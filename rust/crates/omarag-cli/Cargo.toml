@@ -1,0 +1,21 @@
+[package]
+name = "omarag-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+omarag-client = { path = "../omarag-client" }
+omarag-domain = { path = "../omarag-domain" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "omarag-cli"
+path = "src/main.rs"

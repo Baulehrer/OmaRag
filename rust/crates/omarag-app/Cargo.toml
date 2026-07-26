@@ -1,0 +1,13 @@
+[package]
+name = "omarag-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+omarag-domain = { path = "../omarag-domain" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

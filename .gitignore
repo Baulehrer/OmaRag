@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.serena/
+target/
+dist/
+*.egg-info/
+*.pending-snap
+*.snap.new
+.omarag-data/
+omarag-data/

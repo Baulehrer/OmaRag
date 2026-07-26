@@ -1,0 +1,38 @@
+services:
+  omaragd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ghcr.io/baulehrer/oracle-of-daedalus:0.5.0
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --token
+      - ${OMARAG_TOKEN:?OMARAG_TOKEN muss gesetzt sein}
+    environment:
+      OMARAG_OLLAMA_URL: http://host.docker.internal:11434
+    ports:
+      - "127.0.0.1:${OMARAG_PORT:-8765}:8765"
+    volumes:
+      - oracle-data:/var/lib/oracle-of-daedalus
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+    mem_limit: 4500m
+    memswap_limit: 5500m
+    cpus: 6.0
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/v1/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  oracle-data:

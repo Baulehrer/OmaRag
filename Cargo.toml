@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+  "rust/crates/omarag-domain",
+  "rust/crates/omarag-client",
+  "rust/crates/omarag-app",
+  "rust/crates/omarag-tui",
+  "rust/crates/omarag-cli",
+]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-stream = "0.3"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.29"
+futures-util = "0.3"
+ratatui = "0.30"
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+nucleo-matcher = "0.3.1"
+notify-debouncer-mini = "0.7.0"
+ratatui-textarea = "0.9.2"
+sysinfo = "0.38"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest-eventsource = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7.19"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-width = "0.2"
+url = "2.5"
+uuid = { version = "1.18", features = ["v4", "serde"] }
+insta = "1.48.0"

@@ -1,0 +1,123 @@
+{
+  "$defs": {
+    "EvidenceMode": {
+      "enum": [
+        "strict",
+        "normal",
+        "explore"
+      ],
+      "title": "EvidenceMode",
+      "type": "string"
+    },
+    "PrivacyMode": {
+      "enum": [
+        "local",
+        "cloud-allowed"
+      ],
+      "title": "PrivacyMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "cloud_acknowledged": {
+      "default": false,
+      "title": "Cloud Acknowledged",
+      "type": "boolean"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "database_schema_version": {
+      "default": "detected",
+      "title": "Database Schema Version",
+      "type": "string"
+    },
+    "document_policy": {
+      "default": "prefer-current",
+      "title": "Document Policy",
+      "type": "string"
+    },
+    "embedding_model": {
+      "default": "",
+      "title": "Embedding Model",
+      "type": "string"
+    },
+    "embedding_provider": {
+      "default": "ollama",
+      "title": "Embedding Provider",
+      "type": "string"
+    },
+    "etag": {
+      "title": "Etag",
+      "type": "string"
+    },
+    "evidence_mode": {
+      "$ref": "#/$defs/EvidenceMode",
+      "default": "strict"
+    },
+    "haiku_compatible_range": {
+      "default": ">=0.70,<0.71",
+      "title": "Haiku Compatible Range",
+      "type": "string"
+    },
+    "id": {
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "path": {
+      "title": "Path",
+      "type": "string"
+    },
+    "privacy_mode": {
+      "$ref": "#/$defs/PrivacyMode",
+      "default": "local"
+    },
+    "processing_profile": {
+      "default": "default",
+      "title": "Processing Profile",
+      "type": "string"
+    },
+    "read_only": {
+      "default": false,
+      "title": "Read Only",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "vector_dimension": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Vector Dimension"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "path",
+    "etag"
+  ],
+  "title": "WorkspaceManifest",
+  "type": "object"
+}

@@ -1,0 +1,24 @@
+[Unit]
+Description=Oracle of Daedalus local evidence daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=@ENV_FILE@
+ExecStart=@VENV@/bin/oracle-daedalusd --data-dir @DATA_DIR@ --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+MemoryHigh=3500M
+MemoryMax=4500M
+MemorySwapMax=1G
+TasksMax=128
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=@DATA_DIR@
+
+[Install]
+WantedBy=default.target

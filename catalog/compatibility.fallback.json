@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "haiku": {
+    "0.68": {
+      "adapter": "haiku-v068",
+      "support": "best-effort"
+    },
+    "0.69": {
+      "adapter": "haiku-v069",
+      "support": "compatible"
+    },
+    "0.70": {
+      "adapter": "haiku-v070",
+      "capabilities": {
+        "analysis_images": true,
+        "native_capabilities": true,
+        "question_images": true
+      },
+      "support": "preferred"
+    }
+  }
+}
