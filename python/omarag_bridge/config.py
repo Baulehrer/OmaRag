@@ -9,9 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OMARAG_", extra="ignore")
 
-    data_dir: Path = Field(
-        default=Path("~/.local/share/oracle-of-daedalus").expanduser()
-    )
+    data_dir: Path = Field(default=Path("~/.local/share/oracle-of-daedalus").expanduser())
     host: str = "127.0.0.1"
     port: int = 8765
     bearer_token: str | None = None
