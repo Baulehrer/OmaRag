@@ -1,6 +1,15 @@
 {
   "components": {
     "schemas": {
+      "AnswerCacheStatus": {
+        "enum": [
+          "hit",
+          "miss",
+          "bypass"
+        ],
+        "title": "AnswerCacheStatus",
+        "type": "string"
+      },
       "BackendMeta": {
         "additionalProperties": false,
         "properties": {
@@ -56,7 +65,7 @@
             "type": "string"
           },
           "omarag_version": {
-            "default": "0.7.0",
+            "default": "0.8.0",
             "title": "Omarag Version",
             "type": "string"
           }
@@ -111,6 +120,31 @@
           "sha256"
         ],
         "title": "BackupSummary",
+        "type": "object"
+      },
+      "Body_import_gguf_v1_models_import_gguf_post": {
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/ModelCategory"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "model": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "model",
+          "category"
+        ],
+        "title": "Body_import_gguf_v1_models_import_gguf_post",
         "type": "object"
       },
       "BookMetadata": {
@@ -1742,6 +1776,97 @@
         "title": "ModelCategory",
         "type": "string"
       },
+      "ModelDefaultsPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "changes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Changes",
+            "type": "object"
+          },
+          "requires_reindex": {
+            "default": false,
+            "title": "Requires Reindex",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id"
+        ],
+        "title": "ModelDefaultsPreflight",
+        "type": "object"
+      },
+      "ModelDefaultsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "chat": {
+            "minLength": 1,
+            "title": "Chat",
+            "type": "string"
+          },
+          "embedding": {
+            "minLength": 1,
+            "title": "Embedding",
+            "type": "string"
+          },
+          "embedding_provider": {
+            "default": "ollama",
+            "enum": [
+              "ollama",
+              "sentence-transformers"
+            ],
+            "title": "Embedding Provider",
+            "type": "string"
+          },
+          "rerank": {
+            "minLength": 1,
+            "title": "Rerank",
+            "type": "string"
+          },
+          "rerank_provider": {
+            "default": "cross-encoder",
+            "enum": [
+              "cross-encoder",
+              "vllm"
+            ],
+            "title": "Rerank Provider",
+            "type": "string"
+          },
+          "vector_dim": {
+            "default": 1024,
+            "maximum": 8192.0,
+            "minimum": 64.0,
+            "title": "Vector Dim",
+            "type": "integer"
+          },
+          "vl": {
+            "minLength": 1,
+            "title": "Vl",
+            "type": "string"
+          }
+        },
+        "required": [
+          "chat",
+          "vl",
+          "embedding",
+          "rerank"
+        ],
+        "title": "ModelDefaultsRequest",
+        "type": "object"
+      },
       "ModelFit": {
         "enum": [
           "comfortable",
@@ -1857,6 +1982,63 @@
         "title": "ModelPackageItem",
         "type": "object"
       },
+      "ModelResidency": {
+        "enum": [
+          "unconfigured",
+          "idle",
+          "loading",
+          "loaded",
+          "active"
+        ],
+        "title": "ModelResidency",
+        "type": "string"
+      },
+      "ModelRoleRuntime": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "residency": {
+            "$ref": "#/components/schemas/ModelResidency",
+            "default": "unconfigured"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ModelCategory"
+          },
+          "shared_with": {
+            "items": {
+              "$ref": "#/components/schemas/ModelCategory"
+            },
+            "title": "Shared With",
+            "type": "array"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "ModelRoleRuntime",
+        "type": "object"
+      },
       "ModelRuntime": {
         "additionalProperties": false,
         "properties": {
@@ -1911,6 +2093,23 @@
               "$ref": "#/components/schemas/ModelRuntime"
             },
             "title": "Models",
+            "type": "array"
+          },
+          "query_worker_state": {
+            "default": "idle",
+            "title": "Query Worker State",
+            "type": "string"
+          },
+          "query_worker_timeout_seconds": {
+            "default": 0.0,
+            "title": "Query Worker Timeout Seconds",
+            "type": "number"
+          },
+          "roles": {
+            "items": {
+              "$ref": "#/components/schemas/ModelRoleRuntime"
+            },
+            "title": "Roles",
             "type": "array"
           }
         },
@@ -2231,6 +2430,59 @@
         "title": "RunEvaluationRequest",
         "type": "object"
       },
+      "RunReceipt": {
+        "additionalProperties": false,
+        "description": "Small, user-facing account of how an answer was produced.",
+        "properties": {
+          "cache_status": {
+            "$ref": "#/components/schemas/AnswerCacheStatus"
+          },
+          "new_source_count": {
+            "minimum": 0.0,
+            "title": "New Source Count",
+            "type": "integer"
+          },
+          "reused_source_count": {
+            "minimum": 0.0,
+            "title": "Reused Source Count",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source_check": {
+            "$ref": "#/components/schemas/SourceCheck"
+          },
+          "source_count": {
+            "minimum": 0.0,
+            "title": "Source Count",
+            "type": "integer"
+          },
+          "total_ms": {
+            "minimum": 0.0,
+            "title": "Total Ms",
+            "type": "number"
+          },
+          "turn": {
+            "minimum": 1.0,
+            "title": "Turn",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "turn",
+          "cache_status",
+          "total_ms",
+          "source_count",
+          "reused_source_count",
+          "new_source_count",
+          "source_check"
+        ],
+        "title": "RunReceipt",
+        "type": "object"
+      },
       "RunRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2274,6 +2526,9 @@
           "session_id": {
             "anyOf": [
               {
+                "maxLength": 120,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$",
                 "type": "string"
               },
               {
@@ -2343,6 +2598,20 @@
             "title": "Question",
             "type": "string"
           },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
           },
@@ -2359,6 +2628,7 @@
         "required": [
           "id",
           "workspace_id",
+          "session_id",
           "status",
           "question",
           "evidence_mode",
@@ -2727,6 +2997,15 @@
         "title": "SearchRequest",
         "type": "object"
       },
+      "SourceCheck": {
+        "enum": [
+          "verified",
+          "reviewed",
+          "insufficient"
+        ],
+        "title": "SourceCheck",
+        "type": "string"
+      },
       "SourceDefinition": {
         "additionalProperties": false,
         "properties": {
@@ -3046,7 +3325,7 @@
   "info": {
     "description": "Offline Retrieval-Augmented Command-Line Environment; stable operations and quality layer for vanilla Haiku RAG",
     "title": "Oracle of Daedalus API",
-    "version": "0.7.0"
+    "version": "0.8.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3650,6 +3929,47 @@
         "summary": "Model Catalog"
       }
     },
+    "/v1/models/import/gguf": {
+      "post": {
+        "operationId": "import_gguf_v1_models_import_gguf_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_import_gguf_v1_models_import_gguf_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Gguf"
+      }
+    },
     "/v1/models/load": {
       "post": {
         "operationId": "load_model_v1_models_load_post",
@@ -3737,6 +4057,24 @@
     "/v1/models/runtime": {
       "get": {
         "operationId": "model_runtime_v1_models_runtime_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -3747,6 +4085,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
@@ -5268,6 +5616,130 @@
           }
         ],
         "summary": "Preflight Import"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/model-defaults/apply": {
+      "post": {
+        "operationId": "apply_model_defaults_v1_workspaces__workspace_id__model_defaults_apply_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "if-match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelDefaultsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDocument"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Apply Model Defaults"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/model-defaults/preflight": {
+      "post": {
+        "operationId": "model_defaults_preflight_v1_workspaces__workspace_id__model_defaults_preflight_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelDefaultsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDefaultsPreflight"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Model Defaults Preflight"
       }
     },
     "/v1/workspaces/{workspace_id}/open": {

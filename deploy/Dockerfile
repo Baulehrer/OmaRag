@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN /opt/omarag-venv/bin/python -m omarag_bridge.compat_probe
 
 FROM python:3.12-slim AS runtime
-ARG VERSION=0.7.0
+ARG VERSION=0.8.0
 LABEL org.opencontainers.image.title="Oracle of Daedalus" \
       org.opencontainers.image.description="Offline Retrieval-Augmented Command-Line Environment" \
       org.opencontainers.image.source="https://github.com/Baulehrer/oracle-of-daedalus" \

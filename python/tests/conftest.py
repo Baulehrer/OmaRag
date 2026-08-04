@@ -21,6 +21,8 @@ from omarag_bridge.models.domain import (
     ModelCategory,
     ModelFit,
     ModelOperationResult,
+    ModelResidency,
+    ModelRoleRuntime,
     ModelRuntime,
     ModelRuntimeResponse,
     ModelSource,
@@ -37,6 +39,10 @@ class FakeHaikuAdapter:
         event_replay=True,
         workspaces=True,
     )
+
+    def __init__(self) -> None:
+        self.ask_calls = 0
+        self.analyze_calls = 0
 
     async def ensure_database(self, database: Path) -> None:
         database.mkdir(parents=True, exist_ok=True)
@@ -71,6 +77,7 @@ class FakeHaikuAdapter:
     async def ask(
         self, database: Path, question: str, images: list[str] | None = None, **_: Any
     ) -> tuple[str, list[Citation]]:
+        self.ask_calls += 1
         await self.ensure_database(database)
         return (
             f"Antwort auf: {question}",
@@ -80,6 +87,7 @@ class FakeHaikuAdapter:
     async def analyze(
         self, database: Path, question: str, images: list[str] | None = None, **_: Any
     ) -> tuple[str, list[Citation]]:
+        self.analyze_calls += 1
         await self.ensure_database(database)
         return (
             f"Analyse von: {question}",
@@ -97,6 +105,8 @@ class FakeHaikuAdapter:
 
 
 class FakeModelService:
+    imported_gguf: tuple[str, str, ModelCategory, str] | None = None
+
     async def catalog(
         self,
         source: ModelSource,
@@ -125,8 +135,56 @@ class FakeModelService:
             truncated=source == ModelSource.HUGGING_FACE,
         )
 
-    async def runtime(self) -> ModelRuntimeResponse:
-        return ModelRuntimeResponse(models=[ModelRuntime(name="test/chat-2b", size=1234)])
+    async def runtime(
+        self,
+        roles: dict[str, str | None] | None = None,
+        *,
+        active_roles: set[ModelCategory] | None = None,
+        worker_timeout_seconds: float = 0.0,
+    ) -> ModelRuntimeResponse:
+        configured = roles or {}
+        active = active_roles or set()
+        role_rows = []
+        for category in ModelCategory:
+            model = configured.get(category.value)
+            role_rows.append(
+                ModelRoleRuntime(
+                    role=category,
+                    model=model,
+                    residency=(
+                        ModelResidency.ACTIVE
+                        if category in active
+                        else ModelResidency.LOADED
+                        if model == "test/chat-2b"
+                        else ModelResidency.IDLE
+                        if model
+                        else ModelResidency.UNCONFIGURED
+                    ),
+                    shared_with=[
+                        other
+                        for other in ModelCategory
+                        if other != category and model and configured.get(other.value) == model
+                    ],
+                )
+            )
+        return ModelRuntimeResponse(
+            models=[ModelRuntime(name="test/chat-2b", size=1234)],
+            roles=role_rows,
+            query_worker_state="active" if active else "idle",
+            query_worker_timeout_seconds=worker_timeout_seconds,
+        )
+
+    async def import_gguf(
+        self,
+        path: Path,
+        filename: str,
+        model: str,
+        category: ModelCategory,
+        digest: str,
+    ) -> AsyncIterator[bytes]:
+        assert path.read_bytes().startswith(b"GGUF")
+        self.imported_gguf = (filename, model, category, digest)
+        yield b'{"status":"success"}\n'
 
     async def pull(self, model: str) -> AsyncIterator[bytes]:
         yield (f'{{"model":"{model}","status":"success"}}\n').encode()

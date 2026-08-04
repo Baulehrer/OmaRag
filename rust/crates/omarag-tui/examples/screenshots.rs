@@ -2,8 +2,10 @@ use omarag_app::{
     AppState, ConnectionState, FileBrowserEntry, ModelCatalogEntry, ModelCategory, ModelFit,
     ModelPackage, ModelPackageItem, ModelSource, Overlay, View,
 };
-use omarag_domain::{DocumentSummary, WorkspaceSummary};
-use omarag_tui::{LoadedModel, RuntimeMetrics, Theme, render_with_metrics};
+use omarag_domain::{
+    AnswerCacheStatus, Citation, DocumentSummary, RunReceipt, SourceCheck, WorkspaceSummary,
+};
+use omarag_tui::{LoadedModel, ModelRoleStatus, RuntimeMetrics, Theme, render_with_metrics};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 use std::{fmt::Write as _, fs, path::Path};
 
@@ -38,21 +40,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model("snowflake-arctic-embed2:568m", "Long-context retrieval", 0),
     ];
     models.model_manager.packages = vec![
-        package(
-            1,
-            "Qwen Unified",
-            "One compact model family for chat and vision.",
-        ),
+        package(1, "Fast", "One compact model family for chat and vision."),
         package(
             2,
-            "Qwen Depth",
+            "Balanced",
             "Separated chat and retrieval for higher quality.",
         ),
-        package(
-            3,
-            "BGE Retrieval",
-            "BGE embedding and reranking tuned together.",
-        ),
+        package(3, "Quality", "BGE embedding and reranking tuned together."),
     ];
     snapshot(&models, &demo_metrics(), "model-foundry", &output)?;
 
@@ -77,6 +71,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut help = dashboard;
     help.overlay = Some(Overlay::Help);
     snapshot(&help, &demo_metrics(), "keyboard-and-mouse", &output)?;
+
+    let mut themes = demo_state();
+    themes.navigate_view(View::Themes);
+    themes.theme_index = 8;
+    themes.theme_cursor = 8;
+    snapshot(&themes, &demo_metrics(), "themes", &output)?;
     Ok(())
 }
 
@@ -99,7 +99,42 @@ fn demo_state() -> AppState {
         document("Eurocode 2.pdf", 227),
         document("Materials and Durability.pdf", 344),
     ];
+    state
+        .chat
+        .question
+        .set("What controls concrete durability?");
     state.chat.answer = "Reinforced concrete durability depends on exposure class, cover, crack control and execution quality. The indexed handbook recommends checking these as one system rather than isolated values.".into();
+    state.chat.citations = vec![Citation {
+        evidence_id: Some("E1".into()),
+        chunk_id: "durability-42".into(),
+        chunk_ids: vec!["durability-42".into()],
+        document_id: Some("concrete-design-handbook".into()),
+        logical_document_id: Some("concrete-design-handbook".into()),
+        source_uri: Some("/home/daedalus/Knowledge/Concrete Design Handbook.pdf".into()),
+        document_title: Some("Concrete Design Handbook".into()),
+        pages: vec![184],
+        headings: vec!["Durability design".into()],
+        element_types: vec!["text".into()],
+        doc_item_refs: Vec::new(),
+        picture_refs: Vec::new(),
+        primary_anchors: Vec::new(),
+        context_anchors: Vec::new(),
+        excerpt: "Durability design combines exposure class, cover and crack control.".into(),
+        retrieval_rank: Some(1),
+        rerank_score: Some(0.94),
+        book: None,
+        verification_status: "verified".into(),
+    }];
+    state.chat.receipt = Some(RunReceipt {
+        session_id: "conversation-demo".into(),
+        turn: 2,
+        cache_status: AnswerCacheStatus::Hit,
+        total_ms: 18.0,
+        source_count: 1,
+        reused_source_count: 1,
+        new_source_count: 0,
+        source_check: SourceCheck::Verified,
+    });
     state
 }
 
@@ -185,7 +220,26 @@ fn demo_metrics() -> RuntimeMetrics {
             parameter_size: "2B".into(),
             quantization: "Q4_K_M".into(),
         }],
+        model_roles: vec![
+            role("chat", "qwen3.5:2b-q4_K_M", "loaded"),
+            role("vl", "qwen3.5:2b-q4_K_M", "loaded"),
+            role("embedding", "qwen3-embedding:0.6b", "idle"),
+            role(
+                "rerank",
+                "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+                "idle",
+            ),
+        ],
         ..RuntimeMetrics::default()
+    }
+}
+
+fn role(role: &str, model: &str, residency: &str) -> ModelRoleStatus {
+    ModelRoleStatus {
+        role: role.into(),
+        model: Some(model.into()),
+        residency: residency.into(),
+        shared_with: Vec::new(),
     }
 }
 
@@ -197,7 +251,8 @@ fn snapshot(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backend = TestBackend::new(WIDTH, HEIGHT);
     let mut terminal = Terminal::new(backend)?;
-    terminal.draw(|frame| render_with_metrics(frame, state, &Theme::default(), metrics))?;
+    terminal
+        .draw(|frame| render_with_metrics(frame, state, &Theme::at(state.theme_index), metrics))?;
     let buffer = terminal.backend().buffer();
     let mut svg = String::new();
     writeln!(

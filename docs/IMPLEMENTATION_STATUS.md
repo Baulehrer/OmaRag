@@ -1,13 +1,15 @@
-# Release scope: 0.7.0
+# Release scope: 0.8.0
 
 Status: 4 August 2026. The plugin system remains deliberately out of scope.
 
 ## Included
 
 - English, SOAP-inspired Ratatui shell with a persistent sidebar, task workspace and contextual
-  inspector; four themes plus keyboard and mouse control.
-- Chat, Library and Foundry are the three core sections. Activity, Settings and Help stay pinned
-  as utilities; Simple mode hides advanced context views without removing them from the palette.
+  inspector; fourteen themes plus keyboard and mouse control.
+- Chat, Library, Models and Settings are the four core sections. Indexing absorbs activity, Help
+  stays behind `?`, and Simple mode hides advanced views without deleting their configuration.
+- All mutable controls live in the center workspace. The right inspector is read-only except for
+  selecting and opening Chat sources and their exact PDF pages.
 - Library creation, profile selection, multi-select PDF/folder browser and one-step ingest queue.
 - Latest-gated vanilla Haiku RAG adapter using public APIs only; no local Haiku fork or patch.
 - Candidate-runtime compatibility probe and last-known-good activation boundary for Haiku updates.
@@ -17,20 +19,22 @@ Status: 4 August 2026. The plugin system remains deliberately out of scope.
 - Hash-addressed immutable originals and explicit current-edition/document filtering.
 - Strict, Normal and Explore evidence modes with stable evidence IDs and technical-token checks.
 - Deterministic Silver evaluation and FTS/vector/hybrid A/B retrieval metrics.
-- Clickable citations and highlighted page/figure previews in Chat.
+- Markdown-rendered answers plus keyboard/mouse-selectable citations and exact-page previews.
+- Persistent conversation IDs, a bounded generation-aware exact-answer cache and a compact answer
+  receipt showing fresh/reused answers, checked sources and known/new evidence.
 - Segmented long-book processing without a product file/page limit.
 - Cooperative pause between PDF segments and chat-priority resource coordination.
 - Lazy API startup plus isolated import/query workers; native model memory is reclaimed when the
   worker exits instead of remaining swapped out in the idle daemon.
-- Chat, VL, Embedding and Rerank model catalog with three hardware-matched stacks,
-  quantization, context and residency controls.
+- Chat, VL, Embedding and Rerank catalog with atomic Fast/Balanced/Quality defaults, custom Ollama
+  IDs, streamed GGUF import, quantization, context and residency controls.
 - Persistent workspaces, jobs, events, configuration, verified backups and safe restore.
 - TUI, scriptable CLI, API daemon and read-only MCP process.
 - Private persistent bearer token, slim Haiku dependency set, non-root Docker image and delegated
   per-worker memory limits in the systemd service.
 - AppImage client, release installer, weekly auto-update timer and zsync update metadata.
 
-## Deliberate 0.7 boundaries
+## Deliberate 0.8 boundaries
 
 - Linux x86_64 is the packaged target.
 - AppImage contains the console client; Docker or the installer provides the Python/Haiku daemon.

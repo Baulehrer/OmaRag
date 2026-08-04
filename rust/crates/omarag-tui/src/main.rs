@@ -25,7 +25,7 @@ use omarag_domain::{
     WorkspaceSummary,
 };
 use omarag_tui::{
-    ChatImagePreview, LoadedModel, RuntimeMetrics, Theme,
+    ChatImagePreview, LoadedModel, ModelRoleStatus, RuntimeMetrics, Theme,
     input::{
         JobCommand, UiCommand, expand_import_paths, fuzzy_score, handle_event, refresh_file_browser,
     },
@@ -109,6 +109,7 @@ struct CitationPreviewTarget {
     citation_index: usize,
     path: String,
     page: u32,
+    remote_preview: bool,
     title: String,
     primary_anchors: Vec<omarag_domain::CitationAnchor>,
     context_anchors: Vec<omarag_domain::CitationAnchor>,
@@ -203,6 +204,17 @@ async fn model_operation_result(
 struct OllamaProcesses {
     #[serde(default)]
     models: Vec<OllamaModel>,
+    #[serde(default)]
+    roles: Vec<RuntimeRole>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeRole {
+    role: String,
+    model: Option<String>,
+    residency: String,
+    #[serde(default)]
+    shared_with: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,7 +313,12 @@ async fn main() -> Result<()> {
     let mut preview_pending = BTreeSet::new();
     let mut preview_scope = PreviewScope::default();
     let mut saved_preferences = serde_json::to_vec(&state.preferences()).unwrap_or_default();
-    metrics.loaded_models = load_ollama_models(&model_api).await.unwrap_or_default();
+    if let Ok((models, roles)) =
+        load_ollama_models(&model_api, state.active_workspace.as_deref()).await
+    {
+        metrics.loaded_models = models;
+        metrics.model_roles = roles;
+    }
     let result = async {
         loop {
             let theme = Theme::at(state.theme_index);
@@ -339,12 +356,18 @@ async fn main() -> Result<()> {
                     system.refresh_cpu_usage();
                     system.refresh_memory();
                     let loaded_models = std::mem::take(&mut metrics.loaded_models);
+                    let model_roles = std::mem::take(&mut metrics.model_roles);
                     metrics = runtime_metrics(&system, metrics.animation_tick);
                     metrics.loaded_models = loaded_models;
+                    metrics.model_roles = model_roles;
                 }
                 _ = model_refresh.tick() => {
-                    if let Ok(models) = load_ollama_models(&model_api).await {
+                    if let Ok((models, roles)) = load_ollama_models(
+                        &model_api,
+                        state.active_workspace.as_deref(),
+                    ).await {
                         metrics.loaded_models = models;
+                        metrics.model_roles = roles;
                     }
                 }
                 _ = preferences_refresh.tick() => {
@@ -515,6 +538,7 @@ fn runtime_metrics(system: &System, animation_tick: u64) -> RuntimeMetrics {
         shared_gpu_memory: gpu.shared_memory,
         animation_tick,
         loaded_models: Vec::new(),
+        model_roles: Vec::new(),
     }
 }
 
@@ -567,16 +591,22 @@ fn read_sysfs_hex(path: impl AsRef<std::path::Path>) -> Option<u64> {
     u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok()
 }
 
-async fn load_ollama_models(api: &ModelApi) -> Result<Vec<LoadedModel>> {
-    let response = api
-        .request(reqwest::Method::GET, "/v1/models/runtime")?
+async fn load_ollama_models(
+    api: &ModelApi,
+    workspace: Option<&str>,
+) -> Result<(Vec<LoadedModel>, Vec<ModelRoleStatus>)> {
+    let mut request = api.request(reqwest::Method::GET, "/v1/models/runtime")?;
+    if let Some(workspace) = workspace {
+        request = request.query(&[("workspace_id", workspace)]);
+    }
+    let response = request
         .timeout(Duration::from_secs(1))
         .send()
         .await?
         .error_for_status()?
         .json::<OllamaProcesses>()
         .await?;
-    Ok(response
+    let models = response
         .models
         .into_iter()
         .map(|model| LoadedModel {
@@ -587,7 +617,18 @@ async fn load_ollama_models(api: &ModelApi) -> Result<Vec<LoadedModel>> {
             parameter_size: model.parameter_size,
             quantization: model.quantization_level,
         })
-        .collect())
+        .collect();
+    let roles = response
+        .roles
+        .into_iter()
+        .map(|role| ModelRoleStatus {
+            role: role.role,
+            model: role.model,
+            residency: role.residency,
+            shared_with: role.shared_with,
+        })
+        .collect();
+    Ok((models, roles))
 }
 
 async fn load_model_catalog(
@@ -623,11 +664,67 @@ async fn load_model_catalog(
         .await?)
 }
 
-async fn pull_model(api: &ModelApi, model: String, tx: mpsc::Sender<BackendMessage>) {
+async fn pull_model(
+    api: &ModelApi,
+    model: String,
+    tx: mpsc::Sender<BackendMessage>,
+) -> Result<(), String> {
     let result = async {
         let mut response = api
             .request(reqwest::Method::POST, "/v1/models/pull")?
             .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut pending = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            pending.extend_from_slice(&chunk);
+            while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+                let line = pending.drain(..=end).collect::<Vec<_>>();
+                let progress = serde_json::from_slice::<PullProgress>(&line)?;
+                if let Some(error) = progress.error {
+                    anyhow::bail!(error);
+                }
+                let _ = tx
+                    .send(BackendMessage::ModelTransfer(ModelTransfer {
+                        model: model.clone(),
+                        status: progress.status,
+                        completed: progress.completed,
+                        total: progress.total,
+                    }))
+                    .await;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await
+    .map_err(|error| error.to_string());
+    let _ = tx
+        .send(BackendMessage::ModelOperationFinished {
+            model,
+            operation: ModelOperation::Download,
+            result: result.clone(),
+        })
+        .await;
+    result
+}
+
+async fn import_gguf(
+    api: &ModelApi,
+    path: String,
+    model: String,
+    category: ModelCategory,
+    tx: mpsc::Sender<BackendMessage>,
+) {
+    let result = async {
+        let form = reqwest::multipart::Form::new()
+            .text("model", model.clone())
+            .text("category", category.api_label().to_owned())
+            .file("file", &path)
+            .await?;
+        let mut response = api
+            .request(reqwest::Method::POST, "/v1/models/import/gguf")?
+            .multipart(form)
             .send()
             .await?
             .error_for_status()?;
@@ -810,11 +907,15 @@ fn spawn_command(
             }
             UiCommand::StartRun {
                 workspace,
+                session_id,
                 question,
                 evidence_mode,
             } => BackendMessage::RunStarted(
                 client
-                    .start_run(workspace, RunRequest::question(question, evidence_mode))
+                    .start_run(
+                        workspace,
+                        RunRequest::question(question, evidence_mode).with_session_id(session_id),
+                    )
                     .await
                     .map(|run| run.id)
                     .map_err(|error| error.to_string()),
@@ -941,21 +1042,100 @@ fn spawn_command(
                 .map_err(|error| error.to_string()),
             ),
             UiCommand::PullModel { model } => {
-                pull_model(&model_api, model, tx.clone()).await;
+                let _ = pull_model(&model_api, model, tx.clone()).await;
                 return;
             }
-            UiCommand::PullPackage { name, models } => {
+            UiCommand::PullPackage {
+                name,
+                models,
+                workspace,
+                defaults,
+                vector_dim,
+                etag,
+            } => {
+                let status = if models.is_empty() {
+                    "applying model defaults".into()
+                } else {
+                    format!("installing {} models", models.len())
+                };
                 let _ = tx
                     .send(BackendMessage::ModelTransfer(ModelTransfer {
-                        model: name,
-                        status: format!("installing {} models", models.len()),
+                        model: name.clone(),
+                        status,
                         completed: 0,
                         total: 0,
                     }))
                     .await;
+                let mut result = Ok(());
                 for model in models {
-                    pull_model(&model_api, model, tx.clone()).await;
+                    if let Err(error) = pull_model(&model_api, model, tx.clone()).await {
+                        result = Err(error);
+                        break;
+                    }
                 }
+                if result.is_ok() {
+                    let role = |wanted: ModelCategory| {
+                        defaults
+                            .iter()
+                            .find(|item| item.role == wanted)
+                            .map(|item| item.model.clone())
+                            .unwrap_or_default()
+                    };
+                    let payload = serde_json::json!({
+                        "chat": role(ModelCategory::Chat),
+                        "vl": role(ModelCategory::Vl),
+                        "embedding": role(ModelCategory::Embedding),
+                        "rerank": role(ModelCategory::Rerank),
+                        "embedding_provider": "ollama",
+                        "rerank_provider": "cross-encoder",
+                        "vector_dim": vector_dim,
+                    });
+                    let apply = async {
+                        let preflight = model_api
+                            .request(
+                                reqwest::Method::POST,
+                                &format!("/v1/workspaces/{workspace}/model-defaults/preflight"),
+                            )?
+                            .json(&payload)
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                        let _: serde_json::Value = preflight.json().await?;
+                        let response = model_api
+                            .request(
+                                reqwest::Method::POST,
+                                &format!("/v1/workspaces/{workspace}/model-defaults/apply"),
+                            )?
+                            .header("If-Match", etag)
+                            .json(&payload)
+                            .send()
+                            .await?
+                            .error_for_status()?;
+                        Ok::<ConfigDocument, anyhow::Error>(response.json().await?)
+                    }
+                    .await;
+                    match apply {
+                        Ok(config) => {
+                            let _ = tx.send(BackendMessage::ConfigSaved(Ok(config))).await;
+                        }
+                        Err(error) => result = Err(error.to_string()),
+                    }
+                }
+                let _ = tx
+                    .send(BackendMessage::ModelOperationFinished {
+                        model: name,
+                        operation: ModelOperation::Download,
+                        result,
+                    })
+                    .await;
+                return;
+            }
+            UiCommand::ImportGguf {
+                path,
+                model,
+                category,
+            } => {
+                import_gguf(&model_api, path, model, category, tx.clone()).await;
                 return;
             }
             UiCommand::PreloadModel {
@@ -1114,16 +1294,41 @@ fn open_pdf(path: &str, page: Option<u32>) -> Result<(), String> {
     if !std::path::Path::new(path).exists() {
         return Err(format!("PDF no longer exists: {path}"));
     }
-    if let Some(page) = page
-        && Command::new("evince")
-            .args(["--page-index", &page.saturating_sub(1).to_string(), path])
-            .spawn()
-            .is_ok()
-    {
-        return Ok(());
+    if let Ok(template) = std::env::var("OMARAG_PDF_VIEWER") {
+        let mut parts = template.split_whitespace();
+        if let Some(program) = parts.next() {
+            let page = page.unwrap_or(1).to_string();
+            let args = parts
+                .map(|argument| argument.replace("%f", path).replace("%p", &page))
+                .collect::<Vec<_>>();
+            if Command::new(program).args(args).spawn().is_ok() {
+                return Ok(());
+            }
+        }
     }
+    if let Some(page) = page {
+        let page_text = page.to_string();
+        let zero_based = page.saturating_sub(1).to_string();
+        for (viewer, args) in [
+            ("evince", vec!["--page-index", zero_based.as_str(), path]),
+            ("okular", vec!["-p", page_text.as_str(), path]),
+            ("zathura", vec!["-P", page_text.as_str(), path]),
+        ] {
+            if Command::new(viewer).args(args).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    let target = page
+        .and_then(|page| {
+            Url::from_file_path(path).ok().map(|mut url| {
+                url.set_fragment(Some(&format!("page={page}")));
+                url.to_string()
+            })
+        })
+        .unwrap_or_else(|| path.to_owned());
     Command::new("xdg-open")
-        .arg(path)
+        .arg(target)
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Could not open PDF: {error}"))
@@ -1329,38 +1534,36 @@ fn citation_source_path(state: &AppState, citation: &omarag_domain::Citation) ->
 }
 
 fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
-    let mut targets = Vec::new();
-    for (citation_index, citation) in state.chat.citations.iter().enumerate() {
-        let Some(page) = citation.pages.first().copied() else {
-            continue;
-        };
-        let Some(path) = citation_source_path(state, citation) else {
-            continue;
-        };
-        if !targets
-            .iter()
-            .any(|target: &CitationPreviewTarget| target.path == path && target.page == page)
-        {
-            let source_title = citation.document_title.as_deref().unwrap_or("Source");
-            let preview_title = if citation.picture_refs.is_empty() {
-                format!("{source_title} · p.{page}")
-            } else {
-                format!("Figure · {source_title} · p.{page}")
-            };
-            targets.push(CitationPreviewTarget {
-                citation_index,
-                path,
-                page,
-                title: preview_title,
-                primary_anchors: citation.primary_anchors.clone(),
-                context_anchors: citation.context_anchors.clone(),
-            });
-        }
-        if targets.len() == 4 {
-            break;
-        }
-    }
-    targets
+    let citation_index = state.citation_cursor;
+    let Some(citation) = state.chat.citations.get(citation_index) else {
+        return Vec::new();
+    };
+    let page_index = state
+        .citation_page_cursor
+        .min(citation.pages.len().saturating_sub(1));
+    let Some(page) = citation.pages.get(page_index).copied() else {
+        return Vec::new();
+    };
+    let Some(path) = citation_source_path(state, citation) else {
+        return Vec::new();
+    };
+    let source_title = citation.document_title.as_deref().unwrap_or("Source");
+    let title = if citation.picture_refs.is_empty() {
+        format!("{source_title} · p.{page}")
+    } else {
+        format!("Figure · {source_title} · p.{page}")
+    };
+    Some(CitationPreviewTarget {
+        citation_index,
+        path,
+        page,
+        remote_preview: page_index == 0,
+        title,
+        primary_anchors: citation.primary_anchors.clone(),
+        context_anchors: citation.context_anchors.clone(),
+    })
+    .into_iter()
+    .collect()
 }
 
 fn schedule_chat_previews(
@@ -1398,6 +1601,7 @@ fn schedule_chat_previews(
             citation_index,
             path,
             page,
+            remote_preview,
             title,
             primary_anchors,
             context_anchors,
@@ -1417,14 +1621,15 @@ fn schedule_chat_previews(
         let run_id = state.chat.last_run.clone();
         let client = Arc::clone(&client);
         tokio::spawn(async move {
-            let remote = if let (Some(workspace), Some(run_id)) = (workspace, run_id) {
-                client
-                    .citation_preview(workspace, run_id, citation_index, 1400)
-                    .await
-                    .ok()
-            } else {
-                None
-            };
+            let remote =
+                if remote_preview && let (Some(workspace), Some(run_id)) = (workspace, run_id) {
+                    client
+                        .citation_preview(workspace, run_id, citation_index, 1400)
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
             let render = tokio::task::spawn_blocking(move || {
                 let image = if let Some(bytes) = remote {
                     ImageReader::new(Cursor::new(bytes))
@@ -1679,9 +1884,20 @@ fn remember_chat_session(state: &mut AppState, timestamp: String) {
     }
     let session = omarag_app::ChatSession {
         workspace_id: workspace.clone(),
+        session_id: state.chat.receipt.as_ref().map_or_else(
+            || {
+                state
+                    .conversation_ids
+                    .get(&workspace)
+                    .cloned()
+                    .unwrap_or_default()
+            },
+            |receipt| receipt.session_id.clone(),
+        ),
         question: state.chat.question.value.clone(),
         answer: state.chat.answer.clone(),
         citations: state.chat.citations.clone(),
+        receipt: state.chat.receipt.clone(),
         created_at: timestamp,
     };
     let sessions = state.chat_sessions.entry(workspace).or_default();
@@ -1743,6 +1959,7 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 state.workspace_profiles.remove(&id);
                 state.workspace_custom_profiles.remove(&id);
                 state.chat_sessions.remove(&id);
+                state.conversation_ids.remove(&id);
                 state.workspace_cursor = state
                     .workspace_cursor
                     .min(state.workspaces.len().saturating_sub(1));
@@ -2111,7 +2328,7 @@ mod tests {
         restored.apply_preferences(serde_json::from_str(&encoded).unwrap());
         assert_eq!(restored.theme_index, 2);
         assert_eq!(restored.view, omarag_app::View::Books);
-        assert_eq!(restored.focus_pane, omarag_app::FocusPane::Inspector);
+        assert_eq!(restored.focus_pane, omarag_app::FocusPane::Workspace);
         assert_eq!(restored.focus, omarag_app::FocusPanel::Sources);
         assert_eq!(
             restored.library.filter,

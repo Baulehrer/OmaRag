@@ -1,7 +1,7 @@
 use crate::{
     FoundryControl, app_areas, catalog_filter_areas, centered, confirm_import_area,
     delete_model_confirm_area, file_browser_areas, foundry_catalog_areas, foundry_controls,
-    foundry_inspector_areas, foundry_setup_areas, screen_areas, sidebar_navigation_rows,
+    foundry_setup_areas, model_center_areas, screen_areas, sidebar_navigation_rows,
 };
 use crossterm::{
     event::{
@@ -16,9 +16,9 @@ use nucleo_matcher::{
 };
 use omarag_app::{
     Action, AppState, ChatSession, CustomLibraryProfile, EditorState, FocusPane, FocusPanel,
-    HardwareProfile, ImportPreflight, InputMode, LibraryFilter, ModelCategory, ModelMemoryPolicy,
-    ModelQuantization, ModelSource, Notification, NotificationLevel, Overlay, Route, UndoAction,
-    View, WorkspaceProfile, update,
+    HardwareProfile, ImportPreflight, InputMode, InteractionLevel, LibraryFilter, ModelCategory,
+    ModelMemoryPolicy, ModelQuantization, ModelSource, Notification, NotificationLevel, Overlay,
+    Route, THEME_COUNT, UndoAction, View, WorkspaceProfile, update,
 };
 use omarag_domain::{
     CreateSource, CreateWorkspace, DocumentSummary, EvidenceMode, IngestRequest, JobId, JobStatus,
@@ -27,6 +27,7 @@ use omarag_domain::{
 use ratatui::layout::Rect;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use unicode_width::UnicodeWidthChar;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobCommand {
@@ -45,6 +46,7 @@ pub enum UiCommand {
     },
     StartRun {
         workspace: WorkspaceId,
+        session_id: String,
         question: String,
         evidence_mode: EvidenceMode,
     },
@@ -88,6 +90,10 @@ pub enum UiCommand {
     PullPackage {
         name: String,
         models: Vec<String>,
+        workspace: WorkspaceId,
+        defaults: Vec<omarag_app::ModelPackageItem>,
+        vector_dim: u32,
+        etag: String,
     },
     PreloadModel {
         model: String,
@@ -100,6 +106,11 @@ pub enum UiCommand {
     DeleteModel {
         model: String,
         confirm: String,
+    },
+    ImportGguf {
+        path: String,
+        model: String,
+        category: ModelCategory,
     },
     OpenPdf {
         path: String,
@@ -138,7 +149,6 @@ pub enum PaletteCommand {
     Library,
     Indexing,
     Sources,
-    Jobs,
     Search,
     Quality,
     Backups,
@@ -156,13 +166,12 @@ pub enum PaletteCommand {
 }
 
 impl PaletteCommand {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 19] = [
         Self::Chat,
         Self::History,
         Self::Library,
         Self::Indexing,
         Self::Sources,
-        Self::Jobs,
         Self::Search,
         Self::Quality,
         Self::Backups,
@@ -186,7 +195,6 @@ impl PaletteCommand {
             Self::Library => "Open library tools",
             Self::Indexing => "Show indexing pipeline",
             Self::Sources => "Open source tools",
-            Self::Jobs => "Focus activity",
             Self::Search => "Open search tools",
             Self::Quality => "Show quality report",
             Self::Backups => "Show backups",
@@ -326,8 +334,10 @@ fn handle_mouse_primary(
             FocusPane::Sidebar
         } else if mouse.column < header.x.saturating_add(third.saturating_mul(2)) {
             FocusPane::Workspace
-        } else {
+        } else if matches!(state.view, View::Conversation | View::Retrieval) {
             FocusPane::Inspector
+        } else {
+            FocusPane::Workspace
         };
         update(state, Action::SetFocusPane(pane));
         return None;
@@ -348,20 +358,6 @@ fn handle_mouse_primary(
         if let Some(Some(view)) = navigation.get(row) {
             update(state, Action::NavigateView(*view));
             update(state, Action::SetFocusPane(FocusPane::Sidebar));
-        } else {
-            let utility_y = inner.bottom().saturating_sub(5);
-            match mouse.row.saturating_sub(utility_y) {
-                1 => {
-                    update(state, Action::NavigateView(View::Activity));
-                }
-                2 => {
-                    update(state, Action::NavigateView(View::Settings));
-                }
-                3 if activate => {
-                    update(state, Action::OpenOverlay(Overlay::Help));
-                }
-                _ => {}
-            }
         }
         return None;
     }
@@ -401,10 +397,22 @@ fn handle_mouse_primary(
             }
             View::FoundryOverview => {
                 let [_summary, _rail, packages, _status] = foundry_setup_areas(inner);
-                if contains(packages, &mouse) && !state.model_manager.packages.is_empty() {
+                let controls = foundry_controls(state);
+                let [list, actions] = model_center_areas(packages, controls.len());
+                if contains(list, &mouse) && !state.model_manager.packages.is_empty() {
+                    state.model_manager.center_controls_active = false;
                     state.model_manager.package_cursor =
-                        (mouse.row.saturating_sub(packages.y.saturating_add(1)) as usize / 2)
+                        (mouse.row.saturating_sub(list.y.saturating_add(1)) as usize / 2)
                             .min(state.model_manager.packages.len().saturating_sub(1));
+                } else if contains(actions, &mouse) {
+                    let index = mouse.row.saturating_sub(actions.y.saturating_add(1)) as usize;
+                    if index < controls.len() {
+                        state.model_manager.center_controls_active = true;
+                        state.model_manager.center_control_cursor = index;
+                        if activate {
+                            return execute_foundry_control(state, controls[index], true);
+                        }
+                    }
                 }
             }
             View::Models => {
@@ -424,9 +432,45 @@ fn handle_mouse_primary(
                         &mut state.model_manager.query,
                         mouse.column.saturating_sub(search.x) as usize,
                     );
-                } else if contains(list, &mouse) && !state.model_manager.entries.is_empty() {
-                    state.model_manager.cursor = (mouse.row.saturating_sub(list.y) as usize)
-                        .min(state.model_manager.entries.len().saturating_sub(1));
+                } else {
+                    let controls = foundry_controls(state);
+                    let [model_list, actions] = model_center_areas(list, controls.len());
+                    if contains(model_list, &mouse) && !state.model_manager.entries.is_empty() {
+                        state.model_manager.center_controls_active = false;
+                        state.model_manager.cursor = (mouse.row.saturating_sub(model_list.y)
+                            as usize)
+                            .min(state.model_manager.entries.len().saturating_sub(1));
+                    } else if contains(actions, &mouse) {
+                        let index = mouse.row.saturating_sub(actions.y.saturating_add(1)) as usize;
+                        if index < controls.len() {
+                            state.model_manager.center_controls_active = true;
+                            state.model_manager.center_control_cursor = index;
+                            if activate {
+                                return execute_foundry_control(state, controls[index], true);
+                            }
+                        }
+                    }
+                }
+            }
+            View::Themes => {
+                let grid_y = inner.y.saturating_add(3).saturating_add(1);
+                let column_rows = THEME_COUNT.div_ceil(2) as u16;
+                let rows = if inner.width >= 64 {
+                    column_rows
+                } else {
+                    THEME_COUNT as u16
+                };
+                if mouse.row >= grid_y && mouse.row < grid_y.saturating_add(rows) {
+                    let row = mouse.row.saturating_sub(grid_y) as usize;
+                    let column =
+                        usize::from(inner.width >= 64 && mouse.column >= inner.x + inner.width / 2);
+                    let index = row + column * column_rows as usize;
+                    if index < THEME_COUNT {
+                        preview_theme(state, index);
+                        if activate {
+                            apply_theme_preview(state);
+                        }
+                    }
                 }
             }
             _ => {}
@@ -434,22 +478,22 @@ fn handle_mouse_primary(
         return None;
     }
     if areas.inspector.width > 0 && contains(areas.inspector, &mouse) {
-        update(state, Action::SetFocusPane(FocusPane::Inspector));
         let inner = bordered_inner(areas.inspector);
-        if matches!(state.view, View::FoundryOverview | View::Models) {
-            let [_details, tuning, actions] = foundry_inspector_areas(inner);
-            let controls = foundry_controls(state);
-            let index = if contains(tuning, &mouse) {
-                Some(mouse.row.saturating_sub(tuning.y.saturating_add(1)) as usize)
-            } else if contains(actions, &mouse) {
-                Some(4 + mouse.row.saturating_sub(actions.y.saturating_add(1)) as usize)
+        if matches!(state.view, View::Conversation | View::Retrieval) {
+            update(state, Action::SetFocusPane(FocusPane::Inspector));
+            let preview_height = if state.chat.citations.is_empty() || inner.height < 16 {
+                0
             } else {
-                None
+                inner.height.min(10)
             };
-            if let Some(index) = index.filter(|index| *index < controls.len()) {
-                state.model_manager.inspector_cursor = index;
+            let list_y = inner.y.saturating_add(preview_height).saturating_add(3);
+            if mouse.row >= list_y && !state.chat.citations.is_empty() {
+                let index = (mouse.row.saturating_sub(list_y) as usize / 2)
+                    .min(state.chat.citations.len().saturating_sub(1));
+                state.citation_cursor = index;
+                state.citation_page_cursor = 0;
                 if activate {
-                    return execute_foundry_control(state, controls[index], true);
+                    return selected_citation_command(state, false);
                 }
             }
         }
@@ -678,6 +722,7 @@ fn handle_overlay_mouse(
             }
             None
         }
+        Overlay::CustomModel => None,
     }
 }
 
@@ -855,6 +900,7 @@ fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
             let _ = handle_chat_history(state, KeyEvent::new(key, KeyModifiers::NONE));
         }
         Some(Overlay::DocumentTags) => {}
+        Some(Overlay::CustomModel) => {}
         None => {
             let [_header, body, _footer] = screen_areas(screen);
             let areas = app_areas(body, state.focus_pane);
@@ -933,6 +979,8 @@ fn handle_paste(state: &mut AppState, text: &str) {
     } else if state.overlay == Some(Overlay::CustomProfileEditor) && state.custom_profile_field == 0
     {
         state.custom_profile_name.insert_str(text);
+    } else if state.overlay == Some(Overlay::CustomModel) {
+        state.custom_model_input.insert_str(text);
     } else if state.view == View::Models && state.model_manager.searching {
         state.model_manager.query.insert_str(text);
     } else if state.overlay == Some(Overlay::Palette) {
@@ -1020,7 +1068,7 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             Some(refresh_model_catalog_command(state))
         }
         KeyCode::Char('a') => {
-            update(state, Action::NavigateView(View::Activity));
+            update(state, Action::NavigateView(View::Indexing));
             update(state, Action::SetFocusPane(FocusPane::Workspace));
             None
         }
@@ -1261,7 +1309,7 @@ fn hide_selected_library_job(state: &mut AppState) {
 }
 
 fn move_citation(state: &mut AppState, next: bool) {
-    let len = state.chat.citations.len().min(4);
+    let len = state.chat.citations.len();
     if len == 0 {
         return;
     }
@@ -1271,11 +1319,33 @@ fn move_citation(state: &mut AppState, next: bool) {
         (state.citation_cursor + len - 1) % len
     };
     state.gallery_cursor = state.citation_cursor;
+    state.citation_page_cursor = 0;
+}
+
+fn move_citation_page(state: &mut AppState, next: bool) {
+    let len = state
+        .chat
+        .citations
+        .get(state.citation_cursor)
+        .map_or(0, |citation| citation.pages.len());
+    if len == 0 {
+        return;
+    }
+    state.citation_page_cursor = if next {
+        (state.citation_page_cursor + 1) % len
+    } else {
+        (state.citation_page_cursor + len - 1) % len
+    };
 }
 
 fn selected_citation_command(state: &AppState, preview: bool) -> Option<UiCommand> {
     let citation = state.chat.citations.get(state.citation_cursor)?;
-    let (path, page) = citation_pdf_target(state, citation)?;
+    let (path, default_page) = citation_pdf_target(state, citation)?;
+    let page = citation
+        .pages
+        .get(state.citation_page_cursor)
+        .copied()
+        .unwrap_or(default_page);
     Some(if preview {
         UiCommand::OpenPageImage {
             path,
@@ -1293,7 +1363,12 @@ fn selected_citation_command(state: &AppState, preview: bool) -> Option<UiComman
 
 fn selected_citation_copy(state: &AppState) -> Option<UiCommand> {
     let citation = state.chat.citations.get(state.citation_cursor)?;
-    let (path, page) = citation_pdf_target(state, citation)?;
+    let (path, default_page) = citation_pdf_target(state, citation)?;
+    let page = citation
+        .pages
+        .get(state.citation_page_cursor)
+        .copied()
+        .unwrap_or(default_page);
     Some(UiCommand::CopyText(format!("{path}#page={page}")))
 }
 
@@ -1303,9 +1378,11 @@ fn repeat_current_question(state: &mut AppState) -> Option<UiCommand> {
     if question.is_empty() {
         return None;
     }
+    let session_id = conversation_id(state, &workspace);
     update(state, Action::RunRequestStarted);
     Some(UiCommand::StartRun {
         workspace,
+        session_id,
         question,
         evidence_mode: state.chat.evidence_mode,
     })
@@ -1322,9 +1399,21 @@ fn export_current_chat(state: &AppState) -> Option<UiCommand> {
         workspace,
         session: ChatSession {
             workspace_id,
+            session_id: state.chat.receipt.as_ref().map_or_else(
+                || {
+                    state
+                        .active_workspace
+                        .as_ref()
+                        .and_then(|workspace| state.conversation_ids.get(workspace))
+                        .cloned()
+                        .unwrap_or_default()
+                },
+                |receipt| receipt.session_id.clone(),
+            ),
             question: state.chat.question.value.clone(),
             answer: state.chat.answer.clone(),
             citations: state.chat.citations.clone(),
+            receipt: state.chat.receipt.clone(),
             created_at: "now".into(),
         },
     })
@@ -1439,7 +1528,189 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
         Overlay::ConfirmLibraryDelete => handle_library_delete_confirmation(state, key),
         Overlay::ChatHistory => handle_chat_history(state, key),
         Overlay::DocumentTags => handle_document_tags(state, key),
+        Overlay::CustomModel => handle_custom_model(state, key),
     }
+}
+
+fn handle_custom_model(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+    match key.code {
+        KeyCode::Esc => {
+            state.overlay = None;
+            state.input_mode = InputMode::Nav;
+        }
+        KeyCode::Tab => state.custom_model_file = !state.custom_model_file,
+        KeyCode::Char('[') => {
+            state.model_manager.category = match state.model_manager.category {
+                ModelCategory::Chat => ModelCategory::Rerank,
+                ModelCategory::Vl => ModelCategory::Chat,
+                ModelCategory::Embedding => ModelCategory::Vl,
+                ModelCategory::Rerank => ModelCategory::Embedding,
+            }
+        }
+        KeyCode::Char(']') => {
+            state.model_manager.category = state.model_manager.category.next();
+        }
+        KeyCode::Enter => {
+            let value = state.custom_model_input.value.trim().to_owned();
+            if value.is_empty() {
+                notify(
+                    state,
+                    NotificationLevel::Warning,
+                    "Enter a model ID or GGUF path.",
+                );
+                return None;
+            }
+            if state.model_manager.category == ModelCategory::Rerank && !state.custom_model_file {
+                let command = apply_cross_encoder_default(state, value);
+                if command.is_some() {
+                    state.overlay = None;
+                    state.input_mode = InputMode::Nav;
+                }
+                return command;
+            }
+            if state.custom_model_file {
+                if state.model_manager.category == ModelCategory::Rerank {
+                    notify(
+                        state,
+                        NotificationLevel::Warning,
+                        "Rerank uses a Hugging Face cross-encoder, not an Ollama GGUF.",
+                    );
+                    return None;
+                }
+                let path = Path::new(&value);
+                if !path.is_file()
+                    || !path
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+                {
+                    notify(
+                        state,
+                        NotificationLevel::Warning,
+                        "Choose an existing .gguf file.",
+                    );
+                    return None;
+                }
+                let model = path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("custom-model")
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                            character.to_ascii_lowercase()
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect::<String>()
+                    .trim_matches(['-', '_'])
+                    .to_owned();
+                let model = if model.is_empty() {
+                    "custom-model".into()
+                } else {
+                    model
+                };
+                state.overlay = None;
+                state.input_mode = InputMode::Nav;
+                return Some(UiCommand::ImportGguf {
+                    path: value,
+                    model,
+                    category: state.model_manager.category,
+                });
+            }
+            state.overlay = None;
+            state.input_mode = InputMode::Nav;
+            return Some(UiCommand::PullModel { model: value });
+        }
+        KeyCode::Backspace => state.custom_model_input.backspace(),
+        KeyCode::Delete => state.custom_model_input.delete(),
+        KeyCode::Left => state.custom_model_input.move_left(),
+        KeyCode::Right => state.custom_model_input.move_right(),
+        KeyCode::Home => state.custom_model_input.home(),
+        KeyCode::End => state.custom_model_input.end(),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            state.custom_model_input.insert_char(character);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn apply_cross_encoder_default(state: &mut AppState, value: String) -> Option<UiCommand> {
+    if state.model_manager.busy {
+        return None;
+    }
+    let Some(workspace) = state.active_workspace.clone() else {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "Open a library before changing its reranker.",
+        );
+        return None;
+    };
+    let Some(config) = state.config.as_ref() else {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "The library configuration is not loaded yet.",
+        );
+        return None;
+    };
+    let etag = config.etag.clone();
+    let configured = crate::configured_models(state);
+    if configured
+        .iter()
+        .any(|(_, model)| model == "not configured")
+    {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "Apply a complete preset before replacing one model role.",
+        );
+        return None;
+    }
+    let defaults = configured
+        .into_iter()
+        .filter_map(|(label, current)| {
+            let role = match label.as_str() {
+                "Chat" => ModelCategory::Chat,
+                "VL" => ModelCategory::Vl,
+                "Embedding" => ModelCategory::Embedding,
+                "Rerank" => ModelCategory::Rerank,
+                _ => return None,
+            };
+            let model = if role == ModelCategory::Rerank {
+                value.clone()
+            } else {
+                current
+            };
+            Some(omarag_app::ModelPackageItem {
+                role,
+                download_name: model.clone(),
+                model,
+                source: if role == ModelCategory::Rerank {
+                    ModelSource::HuggingFace
+                } else {
+                    ModelSource::Installed
+                },
+                installed: role != ModelCategory::Rerank,
+            })
+        })
+        .collect::<Vec<_>>();
+    state.model_manager.busy = true;
+    state.model_manager.transfer_status = format!("Applying cross-encoder {value}");
+    Some(UiCommand::PullPackage {
+        name: "Custom reranker".into(),
+        models: Vec::new(),
+        workspace,
+        defaults,
+        vector_dim: crate::configured_vector_dim(state),
+        etag,
+    })
 }
 
 fn handle_document_tags(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
@@ -1724,6 +1995,30 @@ fn active_sessions(state: &AppState) -> &[ChatSession] {
         .map_or(&[], Vec::as_slice)
 }
 
+fn conversation_id(state: &mut AppState, workspace: &WorkspaceId) -> String {
+    state
+        .conversation_ids
+        .entry(workspace.clone())
+        .or_insert_with(|| format!("conversation-{}", Uuid::new_v4().simple()))
+        .clone()
+}
+
+fn restore_chat_session(state: &mut AppState, session: ChatSession, include_answer: bool) {
+    state.chat.question.set(session.question);
+    if !session.session_id.is_empty() {
+        state
+            .conversation_ids
+            .insert(session.workspace_id, session.session_id);
+    }
+    if include_answer {
+        state.chat.answer = session.answer;
+        state.chat.citations = session.citations;
+        state.chat.receipt = session.receipt;
+        state.citation_cursor = 0;
+        state.citation_page_cursor = 0;
+    }
+}
+
 fn handle_chat_history(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
     let len = active_sessions(state).len();
     match key.code {
@@ -1736,11 +2031,9 @@ fn handle_chat_history(state: &mut AppState, key: KeyEvent) -> Option<UiCommand>
         }
         KeyCode::Enter | KeyCode::Char('e') => {
             if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
-                state.chat.question.set(session.question);
-                if key.code == KeyCode::Enter {
-                    state.chat.answer = session.answer;
-                    state.chat.citations = session.citations;
-                    state.citation_cursor = 0;
+                let include_answer = key.code == KeyCode::Enter;
+                restore_chat_session(state, session, include_answer);
+                if include_answer {
                     state.overlay = None;
                 } else {
                     state.input_mode = InputMode::Text;
@@ -1750,7 +2043,7 @@ fn handle_chat_history(state: &mut AppState, key: KeyEvent) -> Option<UiCommand>
         }
         KeyCode::Char('r') => {
             if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
-                state.chat.question.set(session.question);
+                restore_chat_session(state, session, false);
                 state.overlay = None;
                 return repeat_current_question(state);
             }
@@ -2352,28 +2645,28 @@ fn handle_model_manager(state: &mut AppState, key: KeyEvent) -> Option<UiCommand
     }
 }
 
-fn handle_foundry_inspector_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+fn handle_foundry_center_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
     let controls = foundry_controls(state);
     if controls.is_empty() {
         return None;
     }
-    state.model_manager.inspector_cursor = state
+    state.model_manager.center_control_cursor = state
         .model_manager
-        .inspector_cursor
+        .center_control_cursor
         .min(controls.len().saturating_sub(1));
     match key.code {
         KeyCode::Up | KeyCode::Char('k') => {
-            state.model_manager.inspector_cursor =
-                (state.model_manager.inspector_cursor + controls.len() - 1) % controls.len();
+            state.model_manager.center_control_cursor =
+                (state.model_manager.center_control_cursor + controls.len() - 1) % controls.len();
             None
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.model_manager.inspector_cursor =
-                (state.model_manager.inspector_cursor + 1) % controls.len();
+            state.model_manager.center_control_cursor =
+                (state.model_manager.center_control_cursor + 1) % controls.len();
             None
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            let control = controls[state.model_manager.inspector_cursor];
+            let control = controls[state.model_manager.center_control_cursor];
             if matches!(
                 control,
                 FoundryControl::Profile
@@ -2383,13 +2676,17 @@ fn handle_foundry_inspector_key(state: &mut AppState, key: KeyEvent) -> Option<U
             ) {
                 execute_foundry_control(state, control, false)
             } else {
-                update(state, Action::SetFocusPane(FocusPane::Workspace));
+                state.model_manager.center_controls_active = false;
                 None
             }
         }
         KeyCode::Right | KeyCode::Enter => {
-            let control = controls[state.model_manager.inspector_cursor];
+            let control = controls[state.model_manager.center_control_cursor];
             execute_foundry_control(state, control, true)
+        }
+        KeyCode::Esc => {
+            state.model_manager.center_controls_active = false;
+            None
         }
         _ => None,
     }
@@ -2448,6 +2745,13 @@ fn execute_foundry_control(
         FoundryControl::Load => load_or_pull_selected_model(state),
         FoundryControl::Unload => unload_selected_model(state),
         FoundryControl::Delete => request_model_delete(state),
+        FoundryControl::Custom => {
+            state.custom_model_input = EditorState::default();
+            state.custom_model_file = false;
+            state.overlay = Some(Overlay::CustomModel);
+            state.input_mode = InputMode::Text;
+            None
+        }
         FoundryControl::Refresh => Some(refresh_model_catalog_command(state)),
     }
 }
@@ -2521,6 +2825,9 @@ fn pull_selected_model(state: &mut AppState) -> Option<UiCommand> {
         return None;
     }
     let entry = selected_model(state)?.clone();
+    if entry.category == ModelCategory::Rerank && entry.source == ModelSource::HuggingFace {
+        return apply_cross_encoder_default(state, entry.id);
+    }
     if entry.source == ModelSource::Installed {
         notify(
             state,
@@ -2547,24 +2854,26 @@ fn pull_selected_package(state: &mut AppState) -> Option<UiCommand> {
         .get(state.model_manager.package_cursor)?
         .clone();
     let mut models = Vec::new();
-    for model in package.models.iter().filter(|model| !model.installed) {
+    for model in package
+        .models
+        .iter()
+        .filter(|model| !model.installed && model.source == ModelSource::Ollama)
+    {
         if !models.contains(&model.download_name) {
             models.push(model.download_name.clone());
         }
     }
-    if models.is_empty() {
-        notify(
-            state,
-            NotificationLevel::Info,
-            "Every model in this stack is already installed.",
-        );
-        return None;
-    }
+    let workspace = state.active_workspace.clone()?;
+    let etag = state.config.as_ref()?.etag.clone();
     state.model_manager.busy = true;
-    state.model_manager.transfer_status = format!("Preparing {}", package.name);
+    state.model_manager.transfer_status = format!("Installing and applying {}", package.name);
     Some(UiCommand::PullPackage {
         name: package.name,
         models,
+        workspace,
+        defaults: package.models,
+        vector_dim: 1024,
+        etag,
     })
 }
 
@@ -2704,7 +3013,6 @@ fn execute_palette(state: &mut AppState, command: PaletteCommand) -> Option<UiCo
         PaletteCommand::Library => Some(View::Books),
         PaletteCommand::Indexing => Some(View::Indexing),
         PaletteCommand::Sources => Some(View::Sources),
-        PaletteCommand::Jobs => Some(View::Activity),
         PaletteCommand::Search => Some(View::Retrieval),
         PaletteCommand::Quality => Some(View::Quality),
         PaletteCommand::Backups => Some(View::Backups),
@@ -2956,9 +3264,11 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
                 return None;
             }
             let evidence_mode = state.chat.evidence_mode;
+            let session_id = conversation_id(state, &workspace);
             update(state, Action::RunRequestStarted);
             Some(UiCommand::StartRun {
                 workspace,
+                session_id,
                 question,
                 evidence_mode,
             })
@@ -3061,6 +3371,34 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         return None;
     }
 
+    if state.view == View::Themes {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => move_theme_preview(state, false),
+            KeyCode::Down | KeyCode::Char('j') => move_theme_preview(state, true),
+            KeyCode::PageUp => move_theme_preview_many(state, false, 5),
+            KeyCode::PageDown => move_theme_preview_many(state, true, 5),
+            KeyCode::Enter => apply_theme_preview(state),
+            KeyCode::Esc => cancel_theme_preview(state),
+            KeyCode::Left | KeyCode::Char('h') => {
+                update(state, Action::SetFocusPane(FocusPane::Sidebar));
+            }
+            KeyCode::Char('?') => {
+                update(state, Action::OpenOverlay(Overlay::Help));
+            }
+            KeyCode::Char(':') => {
+                update(state, Action::OpenOverlay(Overlay::Palette));
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    if state.view == View::Settings && matches!(key.code, KeyCode::Char('m' | 'a')) {
+        update(state, Action::ToggleInteractionLevel);
+        update(state, Action::SetInputMode(InputMode::Nav));
+        return None;
+    }
+
     let in_foundry = matches!(state.view, View::FoundryOverview | View::Models);
     if state.view == View::Models && state.model_manager.searching {
         return handle_model_manager(state, key);
@@ -3097,8 +3435,8 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         return handle_model_manager(state, key);
     }
 
-    if state.focus_pane == FocusPane::Inspector {
-        if in_foundry
+    if in_foundry && state.focus_pane == FocusPane::Workspace {
+        if state.model_manager.center_controls_active
             && matches!(
                 key.code,
                 KeyCode::Up
@@ -3106,10 +3444,45 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
                     | KeyCode::Left
                     | KeyCode::Right
                     | KeyCode::Enter
+                    | KeyCode::Esc
                     | KeyCode::Char('j' | 'k' | 'h')
             )
         {
-            return handle_foundry_inspector_key(state, key);
+            return handle_foundry_center_key(state, key);
+        }
+        if matches!(key.code, KeyCode::Right | KeyCode::Char('l')) {
+            state.model_manager.center_controls_active = true;
+            state.model_manager.center_control_cursor = 0;
+            return None;
+        }
+    }
+
+    if state.focus_pane == FocusPane::Inspector {
+        if matches!(state.view, View::Conversation | View::Retrieval) {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => move_citation(state, false),
+                KeyCode::Down | KeyCode::Char('j') => move_citation(state, true),
+                KeyCode::Left | KeyCode::Char('h') => move_citation_page(state, false),
+                KeyCode::Right | KeyCode::Char('l') => move_citation_page(state, true),
+                KeyCode::Enter | KeyCode::Char('o') => {
+                    return selected_citation_command(state, false);
+                }
+                KeyCode::Char('v') | KeyCode::Char(' ') => {
+                    return selected_citation_command(state, true);
+                }
+                KeyCode::Char('c') => return selected_citation_copy(state),
+                KeyCode::Esc => {
+                    update(state, Action::SetFocusPane(FocusPane::Workspace));
+                }
+                KeyCode::Char('?') => {
+                    update(state, Action::OpenOverlay(Overlay::Help));
+                }
+                KeyCode::Char(':') => {
+                    update(state, Action::OpenOverlay(Overlay::Palette));
+                }
+                _ => {}
+            }
+            return None;
         }
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -3123,11 +3496,6 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             KeyCode::Left | KeyCode::Char('h') => {
                 update(state, Action::SetFocusPane(FocusPane::Workspace));
             }
-            KeyCode::Char('[') => move_citation(state, false),
-            KeyCode::Char(']') => move_citation(state, true),
-            KeyCode::Char('o') => return selected_citation_command(state, false),
-            KeyCode::Char('v') => return selected_citation_command(state, true),
-            KeyCode::Char('c') => return selected_citation_copy(state),
             KeyCode::Char('?') => {
                 update(state, Action::OpenOverlay(Overlay::Help));
             }
@@ -3274,7 +3642,7 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         }
         View::History if key.code == KeyCode::Char('r') => {
             if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
-                state.chat.question.set(session.question);
+                restore_chat_session(state, session, false);
                 update(state, Action::NavigateView(View::Conversation));
                 return repeat_current_question(state);
             }
@@ -3418,6 +3786,7 @@ fn move_selection(state: &mut AppState, next: bool) {
                 };
             }
         }
+        View::Themes => move_theme_preview(state, next),
         View::Quality | View::Settings => {}
     }
 }
@@ -3427,7 +3796,6 @@ fn move_sidebar_view(state: &mut AppState, next: bool) {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    views.extend([View::Activity, View::Settings]);
     views.dedup();
     let current = views
         .iter()
@@ -3456,6 +3824,41 @@ fn move_package_cursor(state: &mut AppState, next: bool) {
 fn move_selection_many(state: &mut AppState, next: bool, count: usize) {
     for _ in 0..count {
         move_selection(state, next);
+    }
+}
+
+fn preview_theme(state: &mut AppState, index: usize) {
+    if state.theme_preview_origin.is_none() {
+        state.theme_preview_origin = Some(state.theme_index);
+    }
+    state.theme_cursor = index % THEME_COUNT;
+    state.theme_index = state.theme_cursor;
+}
+
+fn move_theme_preview(state: &mut AppState, next: bool) {
+    let index = if next {
+        (state.theme_cursor + 1) % THEME_COUNT
+    } else {
+        (state.theme_cursor + THEME_COUNT - 1) % THEME_COUNT
+    };
+    preview_theme(state, index);
+}
+
+fn move_theme_preview_many(state: &mut AppState, next: bool, count: usize) {
+    for _ in 0..count {
+        move_theme_preview(state, next);
+    }
+}
+
+fn apply_theme_preview(state: &mut AppState) {
+    state.theme_index = state.theme_cursor;
+    state.theme_preview_origin = None;
+}
+
+fn cancel_theme_preview(state: &mut AppState) {
+    if let Some(origin) = state.theme_preview_origin.take() {
+        state.theme_index = origin;
+        state.theme_cursor = origin;
     }
 }
 
@@ -3501,16 +3904,21 @@ fn activate_selection(state: &mut AppState) -> Option<UiCommand> {
         }
         View::History => {
             if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
-                state.chat.question.set(session.question);
-                state.chat.answer = session.answer;
-                state.chat.citations = session.citations;
-                state.citation_cursor = 0;
+                restore_chat_session(state, session, true);
                 update(state, Action::NavigateView(View::Conversation));
             }
             None
         }
+        View::Settings if state.interaction_level == InteractionLevel::Simple => {
+            update(state, Action::ToggleInteractionLevel);
+            None
+        }
         View::Retrieval | View::Sources | View::Settings => {
             state.input_mode = InputMode::Text;
+            None
+        }
+        View::Themes => {
+            apply_theme_preview(state);
             None
         }
         View::Backups => state.active_workspace.clone().map(UiCommand::CreateBackup),
@@ -3636,8 +4044,8 @@ fn notify(state: &mut AppState, level: NotificationLevel, message: &str) {
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, MouseEvent};
-    use omarag_app::{FileBrowserEntry, InteractionLevel};
-    use omarag_domain::{ConfigDocument, WorkspaceSummary};
+    use omarag_app::FileBrowserEntry;
+    use omarag_domain::{Citation, ConfigDocument, WorkspaceSummary};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -3677,6 +4085,69 @@ mod tests {
     fn nucleo_fuzzy_search_handles_sparse_terms() {
         assert!(fuzzy_score("Hugging Face Models", "hfm").is_some());
         assert!(fuzzy_score("Hugging Face Models", "zzq").is_none());
+    }
+
+    fn citation(path: &str, pages: &[u32]) -> Citation {
+        Citation {
+            evidence_id: Some("E1".into()),
+            chunk_id: "chunk-1".into(),
+            chunk_ids: Vec::new(),
+            document_id: None,
+            logical_document_id: None,
+            source_uri: Some(path.into()),
+            document_title: Some(path.into()),
+            pages: pages.to_vec(),
+            headings: Vec::new(),
+            element_types: Vec::new(),
+            doc_item_refs: Vec::new(),
+            picture_refs: Vec::new(),
+            primary_anchors: Vec::new(),
+            context_anchors: Vec::new(),
+            excerpt: "Source excerpt".into(),
+            retrieval_rank: None,
+            rerank_score: None,
+            book: None,
+            verification_status: "verified".into(),
+        }
+    }
+
+    #[test]
+    fn source_pane_selects_every_source_and_exact_page_with_keys_and_mouse() {
+        let screen = Rect::new(0, 0, 160, 40);
+        let mut state = AppState {
+            view: View::Conversation,
+            focus_pane: FocusPane::Inspector,
+            ..AppState::default()
+        };
+        state.chat.citations = vec![
+            citation("/tmp/first.pdf", &[4, 7]),
+            citation("/tmp/second.pdf", &[30]),
+        ];
+
+        handle_event(&mut state, key(KeyCode::Right));
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+        assert!(matches!(
+            command,
+            Some(UiCommand::OpenPdf { path, page: Some(7) }) if path == "/tmp/first.pdf"
+        ));
+
+        let [_header, body, _footer] = screen_areas(screen);
+        let inspector = bordered_inner(app_areas(body, FocusPane::Inspector).inspector);
+        let second_source_row = inspector.y + inspector.height.min(10) + 3 + 2;
+        let command = handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                inspector.x + 2,
+                second_source_row,
+            ),
+            screen,
+        );
+        assert_eq!(state.citation_cursor, 1);
+        assert!(matches!(
+            command,
+            Some(UiCommand::OpenPdf { path, page: Some(30) }) if path == "/tmp/second.pdf"
+        ));
     }
 
     #[test]
@@ -3831,7 +4302,7 @@ mod tests {
             &mut state,
             modified_key(KeyCode::Char('a'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.view, View::Activity);
+        assert_eq!(state.view, View::Indexing);
     }
 
     #[test]
@@ -3985,10 +4456,62 @@ mod tests {
     }
 
     #[test]
-    fn foundry_inspector_changes_tuning_and_runs_contextual_actions() {
+    fn settings_switch_between_safe_and_advanced_modes_in_the_center() {
+        let mut state = AppState {
+            view: View::Settings,
+            focus_pane: FocusPane::Workspace,
+            ..AppState::default()
+        };
+        handle_event(&mut state, key(KeyCode::Enter));
+        assert_eq!(state.interaction_level, InteractionLevel::Workshop);
+        assert_eq!(state.input_mode, InputMode::Nav);
+
+        handle_event(&mut state, key(KeyCode::Enter));
+        assert_eq!(state.input_mode, InputMode::Text);
+        handle_event(&mut state, key(KeyCode::Esc));
+        handle_event(&mut state, key(KeyCode::Char('m')));
+        assert_eq!(state.interaction_level, InteractionLevel::Simple);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
+    }
+
+    #[test]
+    fn custom_cross_encoder_replaces_only_rerank_and_preserves_vector_dimension() {
+        let mut state = AppState {
+            overlay: Some(Overlay::CustomModel),
+            active_workspace: Some("ws-models".into()),
+            config: Some(ConfigDocument {
+                content: "qa:\n  model:\n    name: chat:2b\n    vision: true\nembeddings:\n  model:\n    name: embed:small\n    vector_dim: 768\nreranking:\n  model:\n    name: old/reranker\n"
+                    .into(),
+                etag: "etag-1".into(),
+            }),
+            ..AppState::default()
+        };
+        state.model_manager.category = ModelCategory::Rerank;
+        state.custom_model_input.set("BAAI/bge-reranker-v2-m3");
+
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+        assert!(matches!(
+            command,
+            Some(UiCommand::PullPackage {
+                models,
+                defaults,
+                vector_dim: 768,
+                ..
+            }) if models.is_empty()
+                && defaults.iter().any(|item| item.role == ModelCategory::Rerank
+                    && item.model == "BAAI/bge-reranker-v2-m3")
+                && defaults.iter().any(|item| item.role == ModelCategory::Embedding
+                    && item.model == "embed:small")
+        ));
+        assert_eq!(state.overlay, None);
+        assert!(state.model_manager.busy);
+    }
+
+    #[test]
+    fn foundry_center_controls_change_tuning_and_run_contextual_actions() {
         let mut state = AppState {
             view: View::Models,
-            focus_pane: FocusPane::Inspector,
+            focus_pane: FocusPane::Workspace,
             ..AppState::default()
         };
         state.model_manager.entries = vec![omarag_app::ModelCatalogEntry {
@@ -3998,6 +4521,8 @@ mod tests {
             ..omarag_app::ModelCatalogEntry::default()
         }];
 
+        handle_event(&mut state, key(KeyCode::Right));
+        assert!(state.model_manager.center_controls_active);
         let command = handle_event(&mut state, key(KeyCode::Right));
         assert_eq!(state.model_manager.profile, HardwareProfile::Quality);
         assert!(matches!(
@@ -4064,8 +4589,8 @@ mod tests {
         ));
 
         state.model_manager.busy = false;
-        let inspector = bordered_inner(panes.inspector);
-        let [_details, tuning, _actions] = foundry_inspector_areas(inspector);
+        let [_filters, _search, list, _status] = foundry_catalog_areas(workspace);
+        let [_models, tuning] = model_center_areas(list, foundry_controls(&state).len());
         let command = handle_mouse(
             &mut state,
             mouse(
@@ -4186,6 +4711,11 @@ mod tests {
     fn model_stack_install_deduplicates_shared_chat_and_vl_model() {
         let mut state = AppState {
             view: View::FoundryOverview,
+            active_workspace: Some("ws-test".into()),
+            config: Some(omarag_domain::ConfigDocument {
+                content: "embeddings:\nqa:\n".into(),
+                etag: "etag-1".into(),
+            }),
             ..AppState::default()
         };
         state.model_manager.packages.push(omarag_app::ModelPackage {
@@ -4218,7 +4748,7 @@ mod tests {
         let command = handle_event(&mut state, key(KeyCode::Char('a')));
         assert!(matches!(
             command,
-            Some(UiCommand::PullPackage { name, models })
+            Some(UiCommand::PullPackage { name, models, .. })
                 if name == "Qwen Unified"
                     && models == vec!["qwen3.5:2b", "qwen3-embedding:0.6b"]
         ));
@@ -4400,15 +4930,21 @@ mod tests {
             workspace.clone(),
             vec![ChatSession {
                 workspace_id: workspace,
+                session_id: "conversation-test".into(),
                 question: "Question".into(),
                 answer: "Answer".into(),
                 citations: Vec::new(),
+                receipt: None,
                 created_at: "now".into(),
             }],
         );
         handle_event(&mut state, key(KeyCode::Enter));
         assert_eq!(state.chat.question.value, "Question");
         assert_eq!(state.chat.answer, "Answer");
+        assert_eq!(
+            state.conversation_ids.get("ws-test").map(String::as_str),
+            Some("conversation-test")
+        );
         assert_eq!(state.overlay, None);
     }
 }

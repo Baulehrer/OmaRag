@@ -100,17 +100,33 @@ class StateStore:
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY,
                     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    session_id TEXT NOT NULL,
                     status TEXT NOT NULL,
                     question TEXT NOT NULL,
                     evidence_mode TEXT NOT NULL,
                     answer TEXT NOT NULL DEFAULT '',
                     citations_json TEXT NOT NULL DEFAULT '[]',
+                    receipt_json TEXT,
                     error_json TEXT,
                     request_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_event_id INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS answer_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    index_fingerprint TEXT NOT NULL,
+                    config_fingerprint TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    citations_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    hits INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS answer_cache_workspace_idx
+                    ON answer_cache(workspace_id, last_used_at DESC);
                 CREATE TABLE IF NOT EXISTS events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sequence INTEGER NOT NULL,
@@ -241,6 +257,8 @@ class StateStore:
                     VALUES (3, datetime('now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (4, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (5, datetime('now'));
                 """
             )
             job_columns = {
@@ -248,6 +266,18 @@ class StateStore:
             }
             if "progress_detail_json" not in job_columns:
                 self._db.execute("ALTER TABLE jobs ADD COLUMN progress_detail_json TEXT")
+            run_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()
+            }
+            if "session_id" not in run_columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN session_id TEXT")
+                self._db.execute("UPDATE runs SET session_id = 'legacy-' || id")
+            if "receipt_json" not in run_columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN receipt_json TEXT")
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS runs_session_idx "
+                "ON runs(workspace_id, session_id, created_at DESC)"
+            )
             # A daemon crash must never leave an operation looking active.
             self._db.execute(
                 """UPDATE jobs SET status = ?, phase = 'interrupted', updated_at = ?
@@ -328,6 +358,7 @@ class StateStore:
 
                     raise ConflictError("Workspace besitzt einen aktiven oder pausierten Job")
                 self._db.execute("DELETE FROM events WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute("DELETE FROM runs WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute(
                     "DELETE FROM job_checkpoints WHERE job_id IN "
@@ -498,12 +529,13 @@ class StateStore:
         with self._lock:
             self._db.execute(
                 """INSERT INTO runs(
-                    id, workspace_id, status, question, evidence_mode, request_json,
+                    id, workspace_id, session_id, status, question, evidence_mode, request_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     run_id,
                     workspace_id,
+                    request["session_id"],
                     JobStatus.QUEUED,
                     request["question"],
                     request["evidence_mode"],
@@ -528,30 +560,20 @@ class StateStore:
             row = self._db.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if row is None:
             raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
-        return RunSnapshot(
-            id=row["id"],
-            workspace_id=row["workspace_id"],
-            status=row["status"],
-            question=row["question"],
-            evidence_mode=row["evidence_mode"],
-            answer=row["answer"],
-            citations=json.loads(row["citations_json"]),
-            error=json.loads(row["error_json"]) if row["error_json"] else None,
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            last_event_id=row["last_event_id"],
-        )
+        return self._run_from_row(row)
 
     def update_run(self, run_id: str, **changes: Any) -> RunSnapshot:
-        allowed = {"status", "answer", "citations", "error", "last_event_id"}
+        allowed = {"status", "answer", "citations", "receipt", "error", "last_event_id"}
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"Unsupported run fields: {unknown}")
         columns: list[str] = []
         values: list[Any] = []
         for key, value in changes.items():
-            column = f"{key}_json" if key in {"citations", "error"} else key
-            if key in {"citations", "error"} and value is not None:
+            column = f"{key}_json" if key in {"citations", "receipt", "error"} else key
+            if key in {"citations", "receipt", "error"} and value is not None:
+                if hasattr(value, "model_dump"):
+                    value = value.model_dump(mode="json")
                 value = json.dumps(value)
             columns.append(f"{column} = ?")
             values.append(value)
@@ -565,6 +587,134 @@ class StateStore:
             if cursor.rowcount != 1:
                 raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
         return self.get_run(run_id)
+
+    def session_turn(self, workspace_id: str, session_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS count FROM runs WHERE workspace_id = ? AND session_id = ?",
+                (workspace_id, session_id),
+            ).fetchone()
+        return int(row["count"])
+
+    def previous_completed_session_run(
+        self, workspace_id: str, session_id: str, current_run_id: str
+    ) -> RunSnapshot | None:
+        with self._lock:
+            row = self._db.execute(
+                """SELECT * FROM runs
+                   WHERE workspace_id = ? AND session_id = ? AND id != ? AND status = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (workspace_id, session_id, current_run_id, JobStatus.COMPLETED),
+            ).fetchone()
+        return self._run_from_row(row) if row else None
+
+    def workspace_index_fingerprint(self, workspace_id: str) -> str:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT logical_document_id, fingerprint, generation_id
+                   FROM document_index WHERE workspace_id = ?
+                   ORDER BY logical_document_id""",
+                (workspace_id,),
+            ).fetchall()
+        material = [
+            [row["logical_document_id"], row["fingerprint"], row["generation_id"]] for row in rows
+        ]
+        return request_hash({"documents": material})
+
+    def cached_answer(self, cache_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT answer, citations_json FROM answer_cache WHERE cache_key = ?",
+                (cache_key,),
+            ).fetchone()
+            if row is not None:
+                self._db.execute(
+                    "UPDATE answer_cache SET hits = hits + 1, last_used_at = ? WHERE cache_key = ?",
+                    (now_iso(), cache_key),
+                )
+        if row is None:
+            return None
+        return {"answer": row["answer"], "citations": json.loads(row["citations_json"])}
+
+    def cache_answer(
+        self,
+        *,
+        cache_key: str,
+        workspace_id: str,
+        index_fingerprint: str,
+        config_fingerprint: str,
+        request: dict[str, Any],
+        answer: str,
+        citations: list[dict[str, Any]],
+        max_entries: int,
+    ) -> None:
+        timestamp = now_iso()
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    """INSERT INTO answer_cache(
+                           cache_key, workspace_id, index_fingerprint, config_fingerprint,
+                           request_json, answer, citations_json, created_at, last_used_at, hits
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                       ON CONFLICT(cache_key) DO UPDATE SET
+                           answer=excluded.answer, citations_json=excluded.citations_json,
+                           last_used_at=excluded.last_used_at""",
+                    (
+                        cache_key,
+                        workspace_id,
+                        index_fingerprint,
+                        config_fingerprint,
+                        json.dumps(request, sort_keys=True),
+                        answer,
+                        json.dumps(citations),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._db.execute(
+                    """DELETE FROM answer_cache
+                       WHERE workspace_id = ? AND cache_key IN (
+                           SELECT cache_key FROM answer_cache WHERE workspace_id = ?
+                           ORDER BY last_used_at DESC LIMIT -1 OFFSET ?
+                       )""",
+                    (workspace_id, workspace_id, max_entries),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    def clear_answer_cache(self, workspace_id: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
+
+    def answer_cache_size(self, workspace_id: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS count FROM answer_cache WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+        return int(row["count"])
+
+    @staticmethod
+    def _run_from_row(row: sqlite3.Row) -> RunSnapshot:
+        return RunSnapshot(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            session_id=row["session_id"],
+            status=row["status"],
+            question=row["question"],
+            evidence_mode=row["evidence_mode"],
+            answer=row["answer"],
+            citations=json.loads(row["citations_json"]),
+            receipt=json.loads(row["receipt_json"]) if row["receipt_json"] else None,
+            error=json.loads(row["error_json"]) if row["error_json"] else None,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_event_id=row["last_event_id"],
+        )
 
     def append_event(
         self,
@@ -869,6 +1019,7 @@ class StateStore:
                             json.dumps(chunk.get("doc_item_refs", [])),
                         ),
                     )
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
@@ -933,6 +1084,8 @@ class StateStore:
                    WHERE workspace_id = ? AND logical_document_id = ?""",
                 (json.dumps(metadata), now_iso(), workspace_id, logical_document_id),
             )
+            if cursor.rowcount == 1:
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
         if cursor.rowcount != 1:
             raise NotFoundError(f"Document {logical_document_id} was not found")
 

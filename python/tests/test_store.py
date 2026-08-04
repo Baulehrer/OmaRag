@@ -113,3 +113,39 @@ def test_current_document_policy_selects_latest_active_edition(tmp_path: Path) -
     with pytest.raises(ValueError, match="Unsupported document policy"):
         store.resolve_segment_ids(workspace.id, {}, "curent-only")
     store.close()
+
+
+def test_answer_cache_is_bounded_and_document_generations_invalidate_it(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    workspace = WorkspaceService(tmp_path / "workspaces", store).create(
+        CreateWorkspaceRequest(name="Cache")
+    )
+    for index in range(3):
+        store.cache_answer(
+            cache_key=f"key-{index}",
+            workspace_id=workspace.id,
+            index_fingerprint="empty",
+            config_fingerprint="config",
+            request={"question": f"Question {index}"},
+            answer=f"Answer {index}",
+            citations=[],
+            max_entries=2,
+        )
+    assert store.answer_cache_size(workspace.id) == 2
+    assert store.cached_answer("key-0") is None
+
+    before = store.workspace_index_fingerprint(workspace.id)
+    store.upsert_document(
+        workspace.id,
+        "/books/cache.pdf",
+        "fingerprint-cache",
+        {
+            "document_id": "book-cache",
+            "logical_document_id": "book-cache",
+            "generation_id": "generation-cache",
+            "segments": [],
+        },
+    )
+    assert store.workspace_index_fingerprint(workspace.id) != before
+    assert store.answer_cache_size(workspace.id) == 0
+    store.close()

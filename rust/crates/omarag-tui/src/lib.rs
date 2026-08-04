@@ -3,12 +3,15 @@ pub mod input;
 use input::{filtered_palette_commands, fuzzy_score};
 use omarag_app::{
     AppState, EditorState, FocusPane, InputMode, InteractionLevel, LibraryFilter, LibrarySort,
-    ModelCatalogEntry, ModelFit, ModelPackage, ModelSource, Overlay, PrimarySection, View,
-    WorkspaceProfile,
+    ModelCatalogEntry, ModelFit, ModelPackage, ModelSource, Overlay, PrimarySection, THEME_COUNT,
+    View, WorkspaceProfile,
 };
 #[cfg(test)]
 use omarag_app::{ModelCategory, ModelQuantization};
-use omarag_domain::{JobSnapshot, JobStatus};
+use omarag_domain::{AnswerCacheStatus, JobSnapshot, JobStatus, SourceCheck};
+use pulldown_cmark::{
+    Event as MarkdownEvent, HeadingLevel, Options as MarkdownOptions, Parser, Tag, TagEnd,
+};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
@@ -43,7 +46,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = THEME_COUNT;
 
     pub const fn at(index: usize) -> Self {
         match index % Self::COUNT {
@@ -98,7 +101,7 @@ impl Theme {
                 orange: rgb(0xFAB387),
                 selection: rgb(0x313244),
             },
-            _ => Self {
+            3 => Self {
                 name: "Solarized Lite",
                 background: rgb(0xFDF6E3),
                 surface: rgb(0xEEE8D5),
@@ -115,6 +118,116 @@ impl Theme {
                 orange: rgb(0xCB4B16),
                 selection: rgb(0xDDE7E5),
             },
+            4 => dark_theme(
+                "Dædalus Forge",
+                0x100F0D,
+                0x171512,
+                0x201C17,
+                0xE8DED0,
+                0x918579,
+                0x4A3B2F,
+                0xE09F52,
+                0x35271B,
+            ),
+            5 => dark_theme(
+                "Aegean Night",
+                0x08131F,
+                0x0C1B2B,
+                0x10243A,
+                0xD8E8F2,
+                0x7892A5,
+                0x28465D,
+                0x4DD4C6,
+                0x153B49,
+            ),
+            6 => dark_theme(
+                "Blueprint",
+                0x071A2D,
+                0x0B2640,
+                0x0E3151,
+                0xE7F3FF,
+                0x83A7C4,
+                0x2C5D7F,
+                0x58B9FF,
+                0x15476A,
+            ),
+            7 => dark_theme(
+                "Ember Terminal",
+                0x0C0A08,
+                0x15110C,
+                0x1E170F,
+                0xF0E4CE,
+                0x998976,
+                0x4B3923,
+                0xFFB000,
+                0x3A2913,
+            ),
+            8 => dark_theme(
+                "Neon Vector",
+                0x0B0820,
+                0x12102B,
+                0x1A1539,
+                0xEDE9FF,
+                0x8D86B3,
+                0x40366B,
+                0x00E5FF,
+                0x282053,
+            ),
+            9 => dark_theme(
+                "Forest Circuit",
+                0x08140F,
+                0x0D1D16,
+                0x12271D,
+                0xDDE9E1,
+                0x799183,
+                0x2D4A39,
+                0x68D391,
+                0x193B29,
+            ),
+            10 => dark_theme(
+                "Lunar Violet",
+                0x101018,
+                0x171722,
+                0x20202E,
+                0xE6E2F0,
+                0x8E899D,
+                0x3E3A50,
+                0xA78BFA,
+                0x302A47,
+            ),
+            11 => light_theme(
+                "Arctic Paper",
+                0xF4F8FB,
+                0xE9F0F5,
+                0xF8FBFD,
+                0x24313A,
+                0x6D7F8B,
+                0xB8C8D2,
+                0x007C91,
+                0xD4EBF0,
+            ),
+            12 => light_theme(
+                "Drafting Table",
+                0xF5F1E8,
+                0xE9E2D5,
+                0xFBF8F1,
+                0x2E2B27,
+                0x756E64,
+                0xC3B8A7,
+                0x246B78,
+                0xD9E8E5,
+            ),
+            _ => light_theme(
+                "Bauhaus Signal",
+                0xF6F3EA,
+                0xEAE5D9,
+                0xFFFDF7,
+                0x1D1D1B,
+                0x6F6C64,
+                0xB8B1A3,
+                0x0057B8,
+                0xDCE7F5,
+            ),
         }
     }
 }
@@ -133,6 +246,68 @@ const fn rgb(hex: u32) -> Color {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+const fn dark_theme(
+    name: &'static str,
+    background: u32,
+    surface: u32,
+    panel: u32,
+    text: u32,
+    muted: u32,
+    border: u32,
+    focus: u32,
+    selection: u32,
+) -> Theme {
+    Theme {
+        name,
+        background: rgb(background),
+        surface: rgb(surface),
+        panel: rgb(panel),
+        text: rgb(text),
+        muted: rgb(muted),
+        border: rgb(border),
+        focus: rgb(focus),
+        cyan: rgb(0x67D4E8),
+        green: rgb(0x8FD19E),
+        yellow: rgb(0xE7C66A),
+        red: rgb(0xEE7B86),
+        purple: rgb(0xB8A1E3),
+        orange: rgb(0xE9A66B),
+        selection: rgb(selection),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+const fn light_theme(
+    name: &'static str,
+    background: u32,
+    surface: u32,
+    panel: u32,
+    text: u32,
+    muted: u32,
+    border: u32,
+    focus: u32,
+    selection: u32,
+) -> Theme {
+    Theme {
+        name,
+        background: rgb(background),
+        surface: rgb(surface),
+        panel: rgb(panel),
+        text: rgb(text),
+        muted: rgb(muted),
+        border: rgb(border),
+        focus: rgb(focus),
+        cyan: rgb(0x007F91),
+        green: rgb(0x3D7F4A),
+        yellow: rgb(0x936B00),
+        red: rgb(0xB63E4D),
+        purple: rgb(0x6E50A0),
+        orange: rgb(0xB85D16),
+        selection: rgb(selection),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadedModel {
     pub name: String,
@@ -141,6 +316,14 @@ pub struct LoadedModel {
     pub context_length: u64,
     pub parameter_size: String,
     pub quantization: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRoleStatus {
+    pub role: String,
+    pub model: Option<String>,
+    pub residency: String,
+    pub shared_with: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -156,6 +339,7 @@ pub struct RuntimeMetrics {
     pub shared_gpu_memory: u64,
     pub animation_tick: u64,
     pub loaded_models: Vec<LoadedModel>,
+    pub model_roles: Vec<ModelRoleStatus>,
 }
 
 pub struct ChatImagePreview {
@@ -225,7 +409,7 @@ pub fn render_with_previews(
     render_header(frame, header, state, theme, metrics);
     let areas = app_areas(body, state.focus_pane);
     if areas.sidebar.width > 0 {
-        render_sidebar(frame, areas.sidebar, state, theme);
+        render_sidebar(frame, areas.sidebar, state, theme, metrics);
     }
     if areas.workspace.width > 0 {
         render_workspace(frame, areas.workspace, state, theme, metrics, previews);
@@ -300,7 +484,6 @@ fn render_header(
         Paragraph::new(Line::from(vec![
             Span::styled("● ", Style::default().fg(pulse_color)),
             Span::styled(state.connection.label(), Style::default().fg(theme.muted)),
-            Span::styled(format!("  {}", theme.name), Style::default().fg(theme.text)),
         ]))
         .alignment(Alignment::Right),
         status,
@@ -423,31 +606,14 @@ fn section_views(section: PrimarySection, level: InteractionLevel) -> Vec<View> 
             View::Quality,
             View::Backups,
         ],
-        PrimarySection::Foundry => &[View::FoundryOverview, View::Models, View::System],
-        PrimarySection::Utilities => &[],
+        PrimarySection::Foundry => &[View::FoundryOverview, View::Models],
+        PrimarySection::Settings => &[View::Settings, View::Themes, View::System],
     };
     candidates
         .iter()
         .copied()
         .filter(|view| level == InteractionLevel::Workshop || !view.advanced())
         .collect()
-}
-
-fn nav_line(label: &str, active: bool, focused: bool, theme: &Theme) -> Line<'static> {
-    let marker = if active { "│" } else { " " };
-    let style = if active {
-        Style::default()
-            .fg(theme.focus)
-            .bg(theme.selection)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.text)
-    };
-    Line::from(vec![
-        Span::styled(marker, Style::default().fg(theme.focus)),
-        Span::styled(if focused && active { " › " } else { "   " }, style),
-        Span::styled(label.to_owned(), style),
-    ])
 }
 
 fn sidebar_child_line(label: &str, active: bool, focused: bool, theme: &Theme) -> Line<'static> {
@@ -486,7 +652,7 @@ pub(crate) fn sidebar_navigation_rows(state: &AppState) -> Vec<Option<View>> {
             PrimarySection::Chat => View::Conversation,
             PrimarySection::Library => View::Books,
             PrimarySection::Foundry => View::FoundryOverview,
-            PrimarySection::Utilities => View::Activity,
+            PrimarySection::Settings => View::Settings,
         }));
         rows.extend(
             section_views(section, state.interaction_level)
@@ -497,7 +663,13 @@ pub(crate) fn sidebar_navigation_rows(state: &AppState) -> Vec<Option<View>> {
     rows
 }
 
-fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+fn render_sidebar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
     let workspace = state
         .active_workspace
         .as_ref()
@@ -523,9 +695,9 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &T
         .style(Style::default().bg(theme.surface).fg(theme.text));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let utility_height = 5.min(inner.height);
-    let [navigation, utilities] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(utility_height)]).areas(inner);
+    let instrument_height = 8.min(inner.height);
+    let [navigation, instruments] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(instrument_height)]).areas(inner);
 
     let section = state.view.section();
     let mut lines = Vec::new();
@@ -544,43 +716,88 @@ fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &T
             ));
         }
     }
-    frame.render_widget(Paragraph::new(lines), navigation);
-
-    let active_jobs = state
-        .jobs
-        .values()
-        .filter(|job| !is_terminal(&job.status))
-        .count();
+    let active_row = sidebar_navigation_rows(state)
+        .iter()
+        .rposition(|row| *row == Some(state.view))
+        .unwrap_or_default() as u16;
+    let navigation_scroll = active_row.saturating_sub(navigation.height.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled(
-                " UTILITIES",
-                Style::default()
-                    .fg(theme.muted)
-                    .add_modifier(Modifier::BOLD),
+        Paragraph::new(lines).scroll((navigation_scroll, 0)),
+        navigation,
+    );
+
+    let role_lines = if metrics.model_roles.is_empty() {
+        configured_models(state)
+            .into_iter()
+            .map(|(role, model)| {
+                let loaded = metrics
+                    .loaded_models
+                    .iter()
+                    .any(|item| model_matches(&item.name, &model));
+                model_role_line(
+                    &role,
+                    (model != "not configured").then_some(model.as_str()),
+                    if loaded { "loaded" } else { "idle" },
+                    area.width,
+                    theme,
+                )
+            })
+            .collect::<Vec<_>>()
+    } else {
+        metrics
+            .model_roles
+            .iter()
+            .map(|role| {
+                model_role_line(
+                    &role.role,
+                    role.model.as_deref(),
+                    &role.residency,
+                    area.width,
+                    theme,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let vram = if metrics.vram_total > 0 {
+        format!(
+            "VRAM {} / {}",
+            compact_memory(metrics.vram_used),
+            compact_memory(metrics.vram_total)
+        )
+    } else {
+        "VRAM system shared".into()
+    };
+    let mut instrument_lines = vec![
+        Line::styled(
+            " INSTRUMENTS",
+            Style::default()
+                .fg(theme.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(vec![
+            Span::styled(
+                format!(" CPU {:>3.0}%", metrics.cpu_usage),
+                Style::default().fg(theme.green),
             ),
-            nav_line(
-                &format!("Activity  {active_jobs}"),
-                state.view == View::Activity,
-                state.focus_pane == FocusPane::Sidebar,
-                theme,
-            ),
-            nav_line(
-                "Settings",
-                state.view == View::Settings,
-                state.focus_pane == FocusPane::Sidebar,
-                theme,
-            ),
-            Line::from(vec![
-                Span::styled("    ? ", Style::default().fg(theme.yellow)),
-                Span::styled("Help", Style::default().fg(theme.text)),
-            ]),
-            Line::styled(
-                format!("  {} mode", state.interaction_level.label()),
-                Style::default().fg(theme.muted),
+            Span::styled(
+                format!(
+                    "  RAM {:.0}/{:.0}G",
+                    metrics.memory_used as f64 / 1_073_741_824.0,
+                    metrics.memory_total as f64 / 1_073_741_824.0
+                ),
+                Style::default().fg(theme.yellow),
             ),
         ]),
-        utilities,
+        Line::styled(format!(" {vram}"), Style::default().fg(theme.purple)),
+    ];
+    instrument_lines.extend(role_lines);
+    frame.render_widget(
+        Paragraph::new(instrument_lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        instruments,
     );
 }
 
@@ -633,6 +850,7 @@ fn render_workspace(
         View::System => render_system_workspace(frame, inner, state, theme, metrics),
         View::Activity => render_activity_workspace(frame, inner, state, theme, metrics),
         View::Settings => render_settings_workspace(frame, inner, state, theme),
+        View::Themes => render_themes_workspace(frame, inner, state, theme),
     }
 }
 
@@ -642,18 +860,11 @@ fn render_chat_workspace(
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
-    previews: &mut [ChatImagePreview],
+    _previews: &mut [ChatImagePreview],
 ) {
     let input_height = if area.height >= 9 { 3 } else { 1 };
     let [body, input] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(area);
-    let evidence_height = if state.chat.citations.is_empty() || area.height < 18 {
-        0
-    } else {
-        body.height.min(10)
-    };
-    let [answer, evidence] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(evidence_height)]).areas(body);
     let text = if let Some(error) = &state.chat.error {
         Text::from(vec![
             Line::styled("Answer failed", Style::default().fg(theme.red)),
@@ -688,11 +899,8 @@ fn render_chat_workspace(
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((state.chat_scroll, 0)),
-        answer,
+        body,
     );
-    if evidence_height > 0 {
-        render_chat_evidence(frame, evidence, state, theme, previews);
-    }
     render_inline_editor(
         frame,
         input,
@@ -1232,7 +1440,7 @@ fn model_transfer_line(
             Span::styled("● READY", Style::default().fg(theme.green)),
             Span::styled(
                 if state.model_manager.transfer_status.is_empty() {
-                    "  Select an item; details and actions are on the right.".into()
+                    "  Select an item; actions stay here, details are on the right.".into()
                 } else {
                     format!("  {}", state.model_manager.transfer_status)
                 },
@@ -1250,6 +1458,8 @@ fn render_foundry_workspace(
     metrics: &RuntimeMetrics,
 ) {
     let [summary, rail, packages, status] = foundry_setup_areas(area);
+    let controls = foundry_controls(state);
+    let [preset_list, controls_area] = model_center_areas(packages, controls.len());
     let profile = state
         .model_manager
         .profile
@@ -1386,7 +1596,7 @@ fn render_foundry_workspace(
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            package.name.clone(),
+                            preset_name(package.recommended_rank).to_owned(),
                             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
@@ -1425,9 +1635,10 @@ fn render_foundry_workspace(
                     .border_style(Style::default().fg(theme.border))
                     .title(" Recommended for this device "),
             ),
-        packages,
+        preset_list,
         &mut list_state,
     );
+    render_model_center_controls(frame, controls_area, state, theme, &controls);
     frame.render_widget(
         Paragraph::new(model_transfer_line(state, metrics, theme, status.width)),
         status,
@@ -1442,6 +1653,8 @@ fn render_models_workspace(
     metrics: &RuntimeMetrics,
 ) {
     let [filters, search, list, status] = foundry_catalog_areas(area);
+    let controls = foundry_controls(state);
+    let [model_list, controls_area] = model_center_areas(list, controls.len());
     let [source, role, count] = catalog_filter_areas(filters);
     render_filter_chip(
         frame,
@@ -1517,7 +1730,7 @@ fn render_models_workspace(
                         }),
                     ),
                     Span::styled(
-                        truncate(&entry.id, list.width.saturating_sub(30) as usize),
+                        truncate(&entry.id, model_list.width.saturating_sub(30) as usize),
                         Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -1551,9 +1764,10 @@ fn render_models_workspace(
         List::new(items)
             .highlight_symbol("│› ")
             .highlight_style(Style::default().bg(theme.selection)),
-        list,
+        model_list,
         &mut list_state,
     );
+    render_model_center_controls(frame, controls_area, state, theme, &controls);
     let mut status_lines = vec![model_transfer_line(state, metrics, theme, status.width)];
     if state.model_manager.truncated {
         status_lines.push(Line::styled(
@@ -1562,6 +1776,60 @@ fn render_models_workspace(
         ));
     }
     frame.render_widget(Paragraph::new(status_lines), status);
+}
+
+pub(crate) fn model_center_areas(area: Rect, control_count: usize) -> [Rect; 2] {
+    let maximum = area.height.saturating_sub(3);
+    let controls = (control_count as u16 + 2).min(maximum);
+    Layout::vertical([Constraint::Fill(1), Constraint::Length(controls)]).areas(area)
+}
+
+fn render_model_center_controls(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    controls: &[FoundryControl],
+) {
+    if area.height == 0 {
+        return;
+    }
+    let lines = controls
+        .iter()
+        .enumerate()
+        .map(|(index, control)| {
+            foundry_control_line(
+                *control,
+                state,
+                state.model_manager.center_controls_active
+                    && state.model_manager.center_control_cursor == index,
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default().fg(if state.model_manager.center_controls_active {
+                        theme.focus
+                    } else {
+                        theme.border
+                    }),
+                )
+                .title(" Setup & actions "),
+        ),
+        area,
+    );
+}
+
+fn preset_name(rank: u8) -> &'static str {
+    match rank {
+        1 => "Fast",
+        2 => "Balanced",
+        _ => "Quality",
+    }
 }
 
 fn render_system_workspace(
@@ -1647,7 +1915,11 @@ fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState
                     .add_modifier(Modifier::BOLD),
             ),
             Line::styled(
-                "Advanced YAML. Changes are explicit and versioned.",
+                if state.interaction_level == InteractionLevel::Workshop {
+                    "All workspace settings remain available in the advanced editor."
+                } else {
+                    "Safe defaults are active. Switch to Advanced to edit the full configuration."
+                },
                 Style::default().fg(theme.muted),
             ),
             Line::styled(
@@ -1665,16 +1937,133 @@ fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState
         ]),
         intro,
     );
-    render_inline_editor(
-        frame,
-        editor,
-        &state.config_editor,
-        "Workspace YAML",
-        state.input_mode == InputMode::Text,
-        theme,
+    if state.interaction_level == InteractionLevel::Workshop {
+        render_inline_editor(
+            frame,
+            editor,
+            &state.config_editor,
+            "Workspace YAML",
+            state.input_mode == InputMode::Text,
+            theme,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    "BALANCED LOCAL PROFILE",
+                    Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::from("Answers use the selected library and cite original pages."),
+                Line::from("PDF processing preserves layout, tables, formulas and page anchors."),
+                Line::from("Models stay local; unsupported claims are rejected in strict mode."),
+                Line::from(""),
+                Line::styled(
+                    "Press M or Enter for Advanced when you need every Haiku setting.",
+                    Style::default().fg(theme.muted),
+                ),
+            ])
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.border))
+                    .title(" Active defaults "),
+            ),
+            editor,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(if state.interaction_level == InteractionLevel::Workshop {
+            "Enter edit · Ctrl+Enter save · Ctrl+T next theme"
+        } else {
+            "M / Enter advanced · Open Themes for visual settings"
+        })
+        .style(Style::default().fg(theme.muted)),
+        hints,
+    );
+}
+
+fn render_themes_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let [intro, grid, hints] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(2),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                format!("{} PURPOSE-BUILT PALETTES", Theme::COUNT),
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                "Preview instantly. The original palette returns when you cancel.",
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                format!("Active · {}", Theme::at(state.theme_index).name),
+                Style::default().fg(theme.cyan),
+            ),
+        ]),
+        intro,
+    );
+
+    let columns = if grid.width >= 64 { 2 } else { 1 };
+    let rows = Theme::COUNT.div_ceil(columns);
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut row_spans = Vec::new();
+        for column in 0..columns {
+            let index = row + column * rows;
+            if index >= Theme::COUNT {
+                continue;
+            }
+            if column > 0 {
+                row_spans.push(Span::raw("   "));
+            }
+            let palette = Theme::at(index);
+            let selected = index == state.theme_cursor;
+            let active = index == state.theme_index && state.theme_preview_origin.is_none();
+            row_spans.push(Span::styled(
+                if selected { "│› " } else { "   " },
+                Style::default().fg(if selected { theme.focus } else { theme.border }),
+            ));
+            row_spans.push(Span::styled("  ", Style::default().bg(palette.focus)));
+            row_spans.push(Span::styled("  ", Style::default().bg(palette.green)));
+            row_spans.push(Span::styled("  ", Style::default().bg(palette.orange)));
+            row_spans.push(Span::raw(" "));
+            row_spans.push(Span::styled(
+                format!("{:<18}", palette.name),
+                Style::default()
+                    .fg(if selected { theme.focus } else { theme.text })
+                    .bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.background
+                    })
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        }
+        lines.push(Line::from(row_spans));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Palette library "),
+        ),
+        grid,
     );
     frame.render_widget(
-        Paragraph::new("Enter edit · Ctrl+Enter save · Ctrl+T theme")
+        Paragraph::new("↑/↓ choose · Enter apply · Esc cancel · Ctrl+T next")
             .style(Style::default().fg(theme.muted)),
         hints,
     );
@@ -1707,6 +2096,7 @@ pub(crate) enum FoundryControl {
     Load,
     Unload,
     Delete,
+    Custom,
     Refresh,
 }
 
@@ -1735,6 +2125,7 @@ pub(crate) fn foundry_controls(state: &AppState) -> Vec<FoundryControl> {
                     controls.push(FoundryControl::Download);
                 }
             }
+            controls.push(FoundryControl::Custom);
             controls.push(FoundryControl::Refresh);
         }
         _ => {}
@@ -1788,7 +2179,11 @@ fn foundry_control_line(
                 .is_some_and(|package| package.models.iter().all(|model| model.installed));
             (
                 "A",
-                if installed { "Stack" } else { "Install" },
+                if installed {
+                    "Use stack"
+                } else {
+                    "Install & use"
+                },
                 if installed {
                     "Installed"
                 } else {
@@ -1798,10 +2193,28 @@ fn foundry_control_line(
                 if installed { theme.green } else { theme.orange },
             )
         }
+        FoundryControl::Download
+            if state
+                .model_manager
+                .entries
+                .get(state.model_manager.cursor)
+                .is_some_and(|entry| {
+                    entry.category == omarag_app::ModelCategory::Rerank
+                        && entry.source == ModelSource::HuggingFace
+                }) =>
+        {
+            (
+                "D",
+                "Use reranker",
+                "library default".to_owned(),
+                theme.green,
+            )
+        }
         FoundryControl::Download => ("D", "Download", "selected model".to_owned(), theme.green),
         FoundryControl::Load => ("L", "Load", "temporarily".to_owned(), theme.cyan),
         FoundryControl::Unload => ("U", "Unload", "selected model".to_owned(), theme.yellow),
         FoundryControl::Delete => ("X", "Delete", "local model".to_owned(), theme.red),
+        FoundryControl::Custom => ("+", "Add custom", "ID or GGUF".to_owned(), theme.purple),
         FoundryControl::Refresh => ("R", "Refresh", "catalog".to_owned(), theme.yellow),
     };
     let base = if selected {
@@ -1812,7 +2225,7 @@ fn foundry_control_line(
     Line::from(vec![
         Span::styled(if selected { "› " } else { "  " }, base),
         Span::styled(key, base.fg(accent).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {label:<9}"), base),
+        Span::styled(format!(" {label:<14}"), base),
         Span::styled(
             value,
             base.fg(if selected { theme.text } else { theme.muted }),
@@ -1841,7 +2254,6 @@ fn render_foundry_inspector(
     theme: &Theme,
     metrics: &RuntimeMetrics,
 ) {
-    let [details, tuning, actions] = foundry_inspector_areas(area);
     let detail_lines = match state.view {
         View::FoundryOverview => state
             .model_manager
@@ -1883,55 +2295,7 @@ fn render_foundry_inspector(
         Paragraph::new(detail_lines)
             .wrap(Wrap { trim: false })
             .scroll((state.inspector_scroll, 0)),
-        details,
-    );
-
-    let controls = foundry_controls(state);
-    let focused = state.focus_pane == FocusPane::Inspector;
-    let tuning_lines = controls
-        .iter()
-        .take(4)
-        .enumerate()
-        .map(|(index, control)| {
-            foundry_control_line(
-                *control,
-                state,
-                focused && state.model_manager.inspector_cursor == index,
-                theme,
-            )
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(tuning_lines).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border))
-                .title(" Tuning "),
-        ),
-        tuning,
-    );
-    let action_lines = controls
-        .iter()
-        .skip(4)
-        .enumerate()
-        .map(|(index, control)| {
-            let index = index + 4;
-            foundry_control_line(
-                *control,
-                state,
-                focused && state.model_manager.inspector_cursor == index,
-                theme,
-            )
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(action_lines).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border))
-                .title(" Actions "),
-        ),
-        actions,
+        area,
     );
 }
 
@@ -1941,16 +2305,17 @@ fn render_inspector(
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
-    _previews: &mut [ChatImagePreview],
+    previews: &mut [ChatImagePreview],
 ) {
     let title = match state.view {
-        View::Conversation | View::Retrieval => "Evidence",
+        View::Conversation | View::Retrieval => "Source",
         View::Books => "Book details",
         View::Indexing | View::Activity => "Run details",
         View::FoundryOverview => "Stack details",
         View::Models => "Model details",
         View::System => "Runtime details",
         View::Settings => "Configuration",
+        View::Themes => "Palette details",
         _ => "Details",
     };
     let block = inspector_block(title, state.focus_pane == FocusPane::Inspector, theme);
@@ -1960,12 +2325,66 @@ fn render_inspector(
         render_foundry_inspector(frame, inner, state, theme, metrics);
         return;
     }
+    if matches!(state.view, View::Conversation | View::Retrieval) {
+        render_source_inspector(frame, inner, state, theme, metrics, previews);
+        return;
+    }
     let lines = inspector_lines(state, theme, metrics, inner.width);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((state.inspector_scroll, 0)),
         inner,
+    );
+}
+
+fn render_source_inspector(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    previews: &mut [ChatImagePreview],
+) {
+    let preview_height = if state.chat.citations.is_empty() || area.height < 16 {
+        0
+    } else {
+        area.height.min(10)
+    };
+    let [preview_area, list_area] =
+        Layout::vertical([Constraint::Length(preview_height), Constraint::Fill(1)]).areas(area);
+    if preview_height > 0 {
+        let page = state
+            .chat
+            .citations
+            .get(state.citation_cursor)
+            .and_then(|citation| citation.pages.get(state.citation_page_cursor))
+            .copied()
+            .unwrap_or_default();
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(theme.border))
+            .title(format!(" Page {page} "));
+        let inner = block.inner(preview_area);
+        frame.render_widget(block, preview_area);
+        if let Some(preview) = previews.iter_mut().find(|preview| preview.page == page) {
+            preview.receive_resizes();
+            frame.render_stateful_widget(StatefulImage::default(), inner, &mut preview.protocol);
+        } else {
+            frame.render_widget(
+                Paragraph::new("Rendering page preview…")
+                    .style(Style::default().fg(theme.muted))
+                    .alignment(Alignment::Center),
+                inner,
+            );
+        }
+    }
+    let lines = inspector_lines(state, theme, metrics, list_area.width);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((state.inspector_scroll, 0)),
+        list_area,
     );
 }
 
@@ -1978,18 +2397,31 @@ fn inspector_lines(
     match state.view {
         View::Conversation | View::Retrieval => {
             if state.chat.citations.is_empty() {
-                return vec![
-                    Line::styled("NO EVIDENCE SELECTED", Style::default().fg(theme.muted)),
+                let mut lines = receipt_lines(state, theme);
+                if !lines.is_empty() {
+                    lines.push(Line::from(""));
+                }
+                lines.extend([
+                    Line::styled("NO SOURCE SELECTED", Style::default().fg(theme.muted)),
                     Line::from(""),
                     Line::styled(
-                        "Ask a question. Sources and page anchors will appear here.",
+                        if state.chat.receipt.is_some() {
+                            "No usable source supported this answer."
+                        } else {
+                            "Ask a question. Sources and page anchors will appear here."
+                        },
                         Style::default().fg(theme.muted),
                     ),
-                ];
+                ]);
+                return lines;
             }
-            let mut lines = vec![
+            let mut lines = receipt_lines(state, theme);
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.extend([
                 Line::styled(
-                    format!("{} CITATIONS", state.chat.citations.len()),
+                    format!("{} SOURCES", state.chat.citations.len()),
                     Style::default().fg(theme.muted),
                 ),
                 Line::styled(
@@ -1997,12 +2429,19 @@ fn inspector_lines(
                     Style::default().fg(theme.cyan),
                 ),
                 Line::from(""),
-            ];
+            ]);
             for (index, citation) in state.chat.citations.iter().enumerate() {
                 let selected = index == state.citation_cursor;
+                let page_index = if selected {
+                    state
+                        .citation_page_cursor
+                        .min(citation.pages.len().saturating_sub(1))
+                } else {
+                    0
+                };
                 let page = citation
                     .pages
-                    .first()
+                    .get(page_index)
                     .map_or("?".into(), |page| page.to_string());
                 lines.push(Line::from(vec![
                     Span::styled(
@@ -2025,23 +2464,16 @@ fn inspector_lines(
                 ]));
                 lines.push(Line::styled(
                     format!(
-                        "    page {page} · {} anchors",
-                        citation.primary_anchors.len()
+                        "    page {page} · {}/{} · {} anchors",
+                        page_index.saturating_add(1),
+                        citation.pages.len().max(1),
+                        citation.primary_anchors.len(),
                     ),
                     Style::default().fg(theme.muted),
                 ));
-                if selected {
-                    if let Some(heading) = citation.headings.last() {
-                        lines.push(Line::styled(
-                            format!("    {heading}"),
-                            Style::default().fg(theme.cyan),
-                        ));
-                    }
-                    lines.push(Line::from(""));
-                }
             }
             lines.push(Line::styled(
-                "[ ] select  ·  O open  ·  V preview",
+                "↑↓ source · ←→ page · Enter open · Space image",
                 Style::default().fg(theme.muted),
             ));
             lines
@@ -2275,6 +2707,99 @@ fn inspector_lines(
                 Style::default().fg(theme.muted),
             ),
         ],
+        View::Themes => {
+            let palette = Theme::at(state.theme_cursor);
+            vec![
+                Line::styled(
+                    palette.name,
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::styled("LIVE PREVIEW", Style::default().fg(theme.muted)),
+                Line::from(vec![
+                    Span::styled(
+                        "  FOCUS  ",
+                        Style::default().fg(theme.background).bg(palette.focus),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        "  READY  ",
+                        Style::default().fg(theme.background).bg(palette.green),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(
+                        " WARNING ",
+                        Style::default().fg(theme.background).bg(palette.yellow),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        "  ERROR  ",
+                        Style::default().fg(theme.background).bg(palette.red),
+                    ),
+                ]),
+                Line::from(""),
+                Line::styled(
+                    "Enter keeps this palette. Esc restores the previous one.",
+                    Style::default().fg(theme.muted),
+                ),
+            ]
+        }
+    }
+}
+
+fn receipt_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
+    let Some(receipt) = state.chat.receipt.as_ref() else {
+        return Vec::new();
+    };
+    let (answer_label, answer_color) = match receipt.cache_status {
+        AnswerCacheStatus::Hit => ("Saved answer", theme.green),
+        AnswerCacheStatus::Miss => ("Fresh answer", theme.cyan),
+        AnswerCacheStatus::Bypass => ("Fresh answer", theme.cyan),
+    };
+    let (check_label, check_color) = match receipt.source_check {
+        SourceCheck::Verified => ("Passed", theme.green),
+        SourceCheck::Reviewed => ("Reviewed", theme.yellow),
+        SourceCheck::Insufficient => ("Not enough evidence", theme.red),
+    };
+    let mut lines = vec![
+        Line::styled("ANSWER CHECK", Style::default().fg(theme.muted)),
+        Line::from(vec![
+            Span::styled(answer_label, Style::default().fg(answer_color)),
+            Span::styled(
+                format!(" · {}", format_milliseconds(receipt.total_ms)),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        Line::from(format!("Conversation · question {}", receipt.turn)),
+        Line::from(format!("Sources checked · {}", receipt.source_count)),
+    ];
+    if receipt.turn > 1 {
+        lines.push(Line::from(format!(
+            "Known sources · {} · New · {}",
+            receipt.reused_source_count, receipt.new_source_count
+        )));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("Source check · "),
+        Span::styled(check_label, Style::default().fg(check_color)),
+    ]));
+    if receipt.cache_status == AnswerCacheStatus::Hit {
+        lines.push(Line::styled(
+            "Same books and settings",
+            Style::default().fg(theme.muted),
+        ));
+    }
+    lines
+}
+
+fn format_milliseconds(milliseconds: f64) -> String {
+    if milliseconds < 1_000.0 {
+        format!("{milliseconds:.0} ms")
+    } else {
+        format!("{:.1} s", milliseconds / 1_000.0)
     }
 }
 
@@ -2327,192 +2852,336 @@ pub(crate) fn catalog_filter_areas(area: Rect) -> [Rect; 3] {
     .areas(area)
 }
 
-pub(crate) fn foundry_inspector_areas(area: Rect) -> [Rect; 3] {
-    Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(6),
-        Constraint::Length(6),
-    ])
-    .areas(area)
-}
-
 pub(crate) fn delete_model_confirm_area(screen: Rect) -> Rect {
     centered(52, 9, screen)
 }
 
-fn render_chat_evidence(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    theme: &Theme,
-    previews: &mut [ChatImagePreview],
-) {
-    let preview_count = state
-        .chat
-        .citations
-        .iter()
-        .filter(|citation| !citation.pages.is_empty())
-        .take(4)
-        .count();
-    let image_height = if preview_count == 0 {
-        0
-    } else {
-        area.height.saturating_sub(4).min(6)
-    };
-    let [images, sources] =
-        Layout::vertical([Constraint::Length(image_height), Constraint::Fill(1)]).areas(area);
-    if image_height > 0 {
-        let constraints = (0..preview_count)
-            .map(|_| Constraint::Ratio(1, preview_count as u32))
-            .collect::<Vec<_>>();
-        let cells = Layout::horizontal(constraints).split(images);
-        for (index, cell) in cells.iter().enumerate() {
-            let page = state
-                .chat
-                .citations
-                .iter()
-                .filter_map(|citation| citation.pages.first().copied())
-                .nth(index)
-                .unwrap_or(0);
-            let preview_title = previews.get(index).map_or_else(
-                || format!("p.{page}"),
-                |preview| truncate(&preview.title, cell.width.saturating_sub(4) as usize),
-            );
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if index == state.citation_cursor {
-                    theme.focus
-                } else {
-                    theme.purple
-                }))
-                .title(format!(" {preview_title} "));
-            let inner = block.inner(*cell);
-            frame.render_widget(block, *cell);
-            if let Some(preview) = previews.get_mut(index) {
-                preview.receive_resizes();
-                frame.render_stateful_widget(
-                    StatefulImage::default(),
-                    inner,
-                    &mut preview.protocol,
-                );
-            } else {
-                frame.render_widget(
-                    Paragraph::new("Rendering preview…")
-                        .style(Style::default().fg(theme.muted))
-                        .alignment(ratatui::layout::Alignment::Center),
-                    inner,
-                );
-            }
-        }
-    }
-    let lines = state
-        .chat
-        .citations
-        .iter()
-        .take(sources.height as usize)
-        .enumerate()
-        .map(|(index, citation)| {
-            let page = citation
-                .pages
-                .first()
-                .copied()
-                .map_or_else(|| "p.?".into(), |page| format!("p.{page}"));
-            let heading = citation.headings.last().map(String::as_str).unwrap_or("");
-            let element = if citation.picture_refs.is_empty() {
-                citation
-                    .element_types
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or("")
-            } else {
-                "Figure"
-            };
-            let detail = match (heading.is_empty(), element.is_empty()) {
-                (false, false) => format!(" · {heading} · {element}"),
-                (false, true) => format!(" · {heading}"),
-                (true, false) => format!(" · {element}"),
-                (true, true) => String::new(),
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!(" [{}] ", index + 1),
-                    Style::default()
-                        .fg(if index == state.citation_cursor {
-                            theme.background
-                        } else {
-                            theme.orange
-                        })
-                        .bg(if index == state.citation_cursor {
-                            theme.focus
-                        } else {
-                            theme.panel
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    truncate(
-                        &format!(
-                            "{} · {page}{detail}",
-                            citation.document_title.as_deref().unwrap_or("Source")
-                        ),
-                        sources.width.saturating_sub(8) as usize,
-                    ),
-                    Style::default().fg(theme.cyan),
-                ),
-            ])
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::TOP)
-                .title(" Sources ")
-                .border_style(Style::default().fg(theme.border)),
-        ),
-        sources,
-    );
-}
-
 fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'static> {
-    Text::from(
-        answer
-            .lines()
-            .map(|line| {
-                let mut spans = Vec::new();
-                let mut rest = line;
-                while let Some(start) = rest.find('[') {
-                    spans.push(Span::raw(rest[..start].to_owned()));
-                    let Some(end) = rest[start..].find(']') else {
-                        spans.push(Span::raw(rest[start..].to_owned()));
-                        rest = "";
-                        break;
+    let mut options = MarkdownOptions::empty();
+    options.insert(MarkdownOptions::ENABLE_TABLES);
+    options.insert(MarkdownOptions::ENABLE_STRIKETHROUGH);
+    options.insert(MarkdownOptions::ENABLE_TASKLISTS);
+    options.insert(MarkdownOptions::ENABLE_FOOTNOTES);
+
+    let mut lines = Vec::<Line<'static>>::new();
+    let mut spans = Vec::<Span<'static>>::new();
+    let mut styles = vec![Style::default().fg(theme.text)];
+    let mut lists = Vec::<(Option<u64>, u64)>::new();
+    let mut quote_depth = 0usize;
+    let mut link_targets = Vec::<String>::new();
+    let mut in_table_row = false;
+    let mut table_cell = 0usize;
+
+    for event in Parser::new_ext(answer, options) {
+        match event {
+            MarkdownEvent::Start(tag) => match tag {
+                Tag::Paragraph => finish_markdown_line(&mut lines, &mut spans, false),
+                Tag::Heading { level, .. } => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    let prefix = match level {
+                        HeadingLevel::H1 => "◆ ",
+                        HeadingLevel::H2 => "◇ ",
+                        _ => "› ",
                     };
-                    let marker = &rest[start..=start + end];
-                    let index = marker.trim_matches(['[', ']']).parse::<usize>().ok();
                     spans.push(Span::styled(
-                        marker.to_owned(),
+                        prefix,
                         Style::default()
-                            .fg(if index == Some(selected + 1) {
-                                theme.background
-                            } else {
-                                theme.orange
-                            })
-                            .bg(if index == Some(selected + 1) {
-                                theme.focus
-                            } else {
-                                theme.panel
-                            })
+                            .fg(theme.focus)
                             .add_modifier(Modifier::BOLD),
                     ));
-                    rest = &rest[start + end + 1..];
+                    styles.push(
+                        current_markdown_style(&styles)
+                            .fg(theme.focus)
+                            .add_modifier(Modifier::BOLD),
+                    );
                 }
-                if !rest.is_empty() {
-                    spans.push(Span::raw(rest.to_owned()));
+                Tag::Strong => {
+                    styles.push(current_markdown_style(&styles).add_modifier(Modifier::BOLD))
                 }
-                Line::from(spans)
-            })
-            .collect::<Vec<_>>(),
-    )
+                Tag::Emphasis => {
+                    styles.push(current_markdown_style(&styles).add_modifier(Modifier::ITALIC))
+                }
+                Tag::Strikethrough => {
+                    styles.push(current_markdown_style(&styles).add_modifier(Modifier::CROSSED_OUT))
+                }
+                Tag::BlockQuote(_) => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    quote_depth += 1;
+                    spans.push(Span::styled(
+                        format!("{}│ ", "  ".repeat(quote_depth.saturating_sub(1))),
+                        Style::default().fg(theme.purple),
+                    ));
+                    styles.push(current_markdown_style(&styles).fg(theme.muted));
+                }
+                Tag::CodeBlock(_) => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    styles.push(
+                        current_markdown_style(&styles)
+                            .fg(theme.yellow)
+                            .bg(theme.panel),
+                    );
+                }
+                Tag::List(start) => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    lists.push((start, start.unwrap_or(1)));
+                }
+                Tag::Item => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    let depth = lists.len().saturating_sub(1);
+                    let prefix = lists.last_mut().map_or("• ".into(), |(start, next)| {
+                        if start.is_some() {
+                            let value = format!("{next}. ");
+                            *next += 1;
+                            value
+                        } else {
+                            "• ".into()
+                        }
+                    });
+                    spans.push(Span::styled(
+                        format!("{}{prefix}", "  ".repeat(depth)),
+                        Style::default().fg(theme.cyan),
+                    ));
+                }
+                Tag::Link { dest_url, .. } => {
+                    styles.push(
+                        current_markdown_style(&styles)
+                            .fg(theme.cyan)
+                            .add_modifier(Modifier::UNDERLINED),
+                    );
+                    link_targets.push(dest_url.into_string());
+                }
+                Tag::Image { dest_url, .. } => {
+                    spans.push(Span::styled("▧ ", Style::default().fg(theme.purple)));
+                    styles.push(current_markdown_style(&styles).fg(theme.purple));
+                    link_targets.push(dest_url.into_string());
+                }
+                Tag::Table(_) => finish_markdown_line(&mut lines, &mut spans, false),
+                Tag::TableHead | Tag::TableRow => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    in_table_row = true;
+                    table_cell = 0;
+                }
+                Tag::TableCell => {
+                    if table_cell > 0 {
+                        spans.push(Span::styled(" │ ", Style::default().fg(theme.border)));
+                    }
+                    table_cell += 1;
+                }
+                _ => {}
+            },
+            MarkdownEvent::End(tag) => match tag {
+                TagEnd::Paragraph => finish_markdown_line(&mut lines, &mut spans, true),
+                TagEnd::Heading(_) => {
+                    styles.pop();
+                    finish_markdown_line(&mut lines, &mut spans, true);
+                }
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+                    styles.pop();
+                }
+                TagEnd::BlockQuote(_) => {
+                    styles.pop();
+                    quote_depth = quote_depth.saturating_sub(1);
+                    finish_markdown_line(&mut lines, &mut spans, true);
+                }
+                TagEnd::CodeBlock => {
+                    styles.pop();
+                    finish_markdown_line(&mut lines, &mut spans, true);
+                }
+                TagEnd::List(_) => {
+                    lists.pop();
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                }
+                TagEnd::Item => finish_markdown_line(&mut lines, &mut spans, false),
+                TagEnd::Link | TagEnd::Image => {
+                    styles.pop();
+                    if let Some(target) = link_targets.pop()
+                        && !target.is_empty()
+                    {
+                        spans.push(Span::styled(
+                            format!(" ↗{}", sanitize_terminal_text(&target)),
+                            Style::default().fg(theme.muted),
+                        ));
+                    }
+                }
+                TagEnd::TableHead | TagEnd::TableRow => {
+                    in_table_row = false;
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                }
+                TagEnd::Table => finish_markdown_line(&mut lines, &mut spans, true),
+                _ => {}
+            },
+            MarkdownEvent::Text(text) => push_markdown_text(
+                &mut spans,
+                &text,
+                current_markdown_style(&styles),
+                selected,
+                theme,
+            ),
+            MarkdownEvent::Code(code) => push_markdown_text(
+                &mut spans,
+                &code,
+                current_markdown_style(&styles)
+                    .fg(theme.yellow)
+                    .bg(theme.panel),
+                selected,
+                theme,
+            ),
+            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak => {
+                finish_markdown_line(&mut lines, &mut spans, false);
+                if quote_depth > 0 {
+                    spans.push(Span::styled(
+                        format!("{}│ ", "  ".repeat(quote_depth.saturating_sub(1))),
+                        Style::default().fg(theme.purple),
+                    ));
+                }
+            }
+            MarkdownEvent::Rule => {
+                finish_markdown_line(&mut lines, &mut spans, false);
+                lines.push(Line::styled(
+                    "─".repeat(28),
+                    Style::default().fg(theme.border),
+                ));
+            }
+            MarkdownEvent::TaskListMarker(done) => spans.push(Span::styled(
+                if done { "[✓] " } else { "[ ] " },
+                Style::default().fg(if done { theme.green } else { theme.muted }),
+            )),
+            MarkdownEvent::FootnoteReference(reference) => spans.push(Span::styled(
+                format!("[{}]", sanitize_terminal_text(&reference)),
+                Style::default().fg(theme.purple),
+            )),
+            MarkdownEvent::InlineMath(math) => spans.push(Span::styled(
+                sanitize_terminal_text(&math),
+                Style::default().fg(theme.yellow),
+            )),
+            MarkdownEvent::DisplayMath(math) => {
+                finish_markdown_line(&mut lines, &mut spans, false);
+                lines.push(Line::styled(
+                    sanitize_terminal_text(&math),
+                    Style::default().fg(theme.yellow),
+                ));
+            }
+            MarkdownEvent::Html(_) | MarkdownEvent::InlineHtml(_) => {}
+        }
+        if in_table_row && spans.is_empty() {
+            in_table_row = false;
+        }
+    }
+    finish_markdown_line(&mut lines, &mut spans, false);
+    while lines.last().is_some_and(|line| line.spans.is_empty()) {
+        lines.pop();
+    }
+    Text::from(lines)
+}
+
+fn current_markdown_style(styles: &[Style]) -> Style {
+    styles.last().copied().unwrap_or_default()
+}
+
+fn finish_markdown_line(
+    lines: &mut Vec<Line<'static>>,
+    spans: &mut Vec<Span<'static>>,
+    blank_after: bool,
+) {
+    if !spans.is_empty() {
+        lines.push(Line::from(std::mem::take(spans)));
+    }
+    if blank_after && lines.last().is_some_and(|line| !line.spans.is_empty()) {
+        lines.push(Line::from(""));
+    }
+}
+
+fn push_markdown_text(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    style: Style,
+    selected: usize,
+    theme: &Theme,
+) {
+    let sanitized = sanitize_terminal_text(text);
+    let mut rest = sanitized.as_str();
+    while let Some(start) = rest.find('[') {
+        if start > 0 {
+            spans.push(Span::styled(rest[..start].to_owned(), style));
+        }
+        let Some(relative_end) = rest[start..].find(']') else {
+            spans.push(Span::styled(rest[start..].to_owned(), style));
+            return;
+        };
+        let end = start + relative_end;
+        let marker = &rest[start..=end];
+        let token = marker.trim_matches(['[', ']']);
+        let index = token
+            .strip_prefix(['E', 'e'])
+            .unwrap_or(token)
+            .parse::<usize>()
+            .ok();
+        if let Some(index) = index {
+            spans.push(Span::styled(
+                marker.to_owned(),
+                Style::default()
+                    .fg(if index == selected + 1 {
+                        theme.background
+                    } else {
+                        theme.orange
+                    })
+                    .bg(if index == selected + 1 {
+                        theme.focus
+                    } else {
+                        theme.panel
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(marker.to_owned(), style));
+        }
+        rest = &rest[end + 1..];
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_owned(), style));
+    }
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum EscapeState {
+        Text,
+        Escape,
+        ControlSequence,
+        OperatingSystemCommand,
+        OperatingSystemCommandEscape,
+    }
+
+    let mut state = EscapeState::Text;
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        state = match state {
+            EscapeState::Text if character == '\u{1b}' => EscapeState::Escape,
+            EscapeState::Text => {
+                if character == '\t' {
+                    output.push(' ');
+                } else if !character.is_control() {
+                    output.push(character);
+                }
+                EscapeState::Text
+            }
+            EscapeState::Escape => match character {
+                '[' => EscapeState::ControlSequence,
+                ']' => EscapeState::OperatingSystemCommand,
+                _ => EscapeState::Text,
+            },
+            EscapeState::ControlSequence if ('@'..='~').contains(&character) => EscapeState::Text,
+            EscapeState::ControlSequence => EscapeState::ControlSequence,
+            EscapeState::OperatingSystemCommand if character == '\u{7}' => EscapeState::Text,
+            EscapeState::OperatingSystemCommand if character == '\u{1b}' => {
+                EscapeState::OperatingSystemCommandEscape
+            }
+            EscapeState::OperatingSystemCommand => EscapeState::OperatingSystemCommand,
+            EscapeState::OperatingSystemCommandEscape if character == '\\' => EscapeState::Text,
+            EscapeState::OperatingSystemCommandEscape => EscapeState::OperatingSystemCommand,
+        };
+    }
+    output
 }
 
 fn shortcut_words(theme: &Theme, words: &[(&str, char, Color)]) -> Line<'static> {
@@ -2723,13 +3392,24 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
                 View::Indexing | View::Activity => {
                     &[("↑↓", "Select"), ("Space", "Pause/resume"), ("X", "Cancel")]
                 }
+                View::Themes => &[
+                    ("↑↓", "Choose"),
+                    ("Enter", "Apply"),
+                    ("Esc", "Cancel"),
+                    ("Ctrl+T", "Next"),
+                ],
+                View::Settings => &[
+                    ("M", "Simple/advanced"),
+                    ("Enter", "Edit"),
+                    ("Ctrl+Enter", "Save"),
+                ],
                 _ => &[("↑↓", "Move"), ("Enter", "Open"), ("Tab", "Next pane")],
             },
             FocusPane::Inspector => &[
-                ("↑↓", "Inspect"),
-                ("←→", "Adjust"),
-                ("Enter", "Apply"),
-                ("Tab", "Next pane"),
+                ("↑↓", "Source"),
+                ("←→", "Page"),
+                ("Enter", "Open PDF"),
+                ("Space", "Image"),
             ],
         },
     };
@@ -2793,8 +3473,93 @@ fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         Some(Overlay::CustomProfileEditor) => render_custom_profile_editor(frame, state, theme),
         Some(Overlay::ChatHistory) => render_chat_history(frame, state, theme),
         Some(Overlay::DocumentTags) => render_document_tags(frame, state, theme),
+        Some(Overlay::CustomModel) => render_custom_model(frame, state, theme),
         None => {}
     }
+}
+
+fn render_custom_model(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
+    let area = centered(68, 12, frame.area());
+    frame.render_widget(Clear, area);
+    let block = panel("Add custom model", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [intro, mode, input, note, hints] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "Download an Ollama ID or import a local GGUF; Rerank accepts a cross-encoder ID.",
+                Style::default().fg(theme.text),
+            ),
+            Line::styled(
+                "Large GGUF files are streamed and validated before Ollama imports them.",
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        intro,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Tab ",
+                Style::default()
+                    .fg(theme.purple)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if state.custom_model_file {
+                    "Local GGUF"
+                } else {
+                    "Model ID"
+                },
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("   [ ] Role ", Style::default().fg(theme.cyan)),
+            Span::styled(
+                state.model_manager.category.label(),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        mode,
+    );
+    render_inline_editor(
+        frame,
+        input,
+        &state.custom_model_input,
+        if state.custom_model_file {
+            "/path/to/model.gguf"
+        } else {
+            "qwen3.5:4b"
+        },
+        true,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            if state.model_manager.category == omarag_app::ModelCategory::Rerank {
+                "A Hugging Face cross-encoder ID becomes the library default and caches on first use; GGUF is blocked."
+            } else {
+                "Chat, VL and Embedding GGUF files are validated against the selected role."
+            },
+        )
+        .style(Style::default().fg(theme.muted))
+        .wrap(Wrap { trim: false }),
+        note,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter import · Tab type · [ ] role · Esc cancel")
+            .style(Style::default().fg(theme.muted)),
+        hints,
+    );
 }
 
 fn render_file_browser(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
@@ -3655,6 +4420,17 @@ fn package_details(package: &ModelPackage, theme: &Theme) -> Vec<Line<'static>> 
             Span::styled(model.model.clone(), Style::default().fg(theme.cyan)),
         ])
     }));
+    if package
+        .models
+        .iter()
+        .any(|model| model.source == ModelSource::HuggingFace && !model.installed)
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "Cross-encoder files cache automatically on first use.",
+            Style::default().fg(theme.muted),
+        ));
+    }
     lines
 }
 
@@ -3955,10 +4731,10 @@ fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
                     .fg(theme.purple)
                     .add_modifier(Modifier::BOLD),
             ),
-            Line::from("Ctrl+C Quit         Ctrl+S Library      Ctrl+H Foundry"),
-            Line::from("Ctrl+M Models       Ctrl+A Activity     Ctrl+T Theme"),
+            Line::from("Ctrl+C Quit         Ctrl+S Sources      Ctrl+H Presets"),
+            Line::from("Ctrl+M Catalog      Ctrl+A Indexing     Ctrl+T Theme"),
             Line::from("Ctrl+L Libraries    Ctrl+P Palette      Ctrl+Q Quit"),
-            Line::from("Ctrl+I Add PDFs     N New library      Ctrl+E Evidence"),
+            Line::from("Ctrl+I Add PDFs     N New library      Ctrl+E Evidence mode"),
             Line::from("Ctrl+R Refresh      Ctrl+X Stop         Ctrl+D Clear"),
             Line::from("/ Active search     : Command palette  ? Help"),
             Line::from(""),
@@ -4093,30 +4869,77 @@ fn activity_item<'a>(job: &'a JobSnapshot, theme: &Theme) -> ListItem<'a> {
     ])
 }
 
-fn configured_models(state: &AppState) -> Vec<(String, String)> {
+pub(crate) fn configured_models(state: &AppState) -> Vec<(String, String)> {
     let content = state
         .config
         .as_ref()
         .map_or("", |config| config.content.as_str());
-    let chat = config_model(content, "qa").unwrap_or_else(|| "not configured".into());
-    let vision = if config_flag(content, "qa", "vision") {
-        chat.clone()
-    } else {
-        config_model_after(content, "picture_description")
-            .unwrap_or_else(|| "not configured".into())
-    };
+    let chat = config_section_value(content, "model_defaults", "chat")
+        .or_else(|| config_model(content, "qa"))
+        .unwrap_or_else(|| "not configured".into());
+    let vision = config_section_value(content, "model_defaults", "vl").unwrap_or_else(|| {
+        if config_flag(content, "qa", "vision") {
+            chat.clone()
+        } else {
+            config_model_after(content, "picture_description")
+                .unwrap_or_else(|| "not configured".into())
+        }
+    });
     vec![
         ("Chat".into(), chat),
         ("VL".into(), vision),
         (
             "Embedding".into(),
-            config_model(content, "embeddings").unwrap_or_else(|| "not configured".into()),
+            config_section_value(content, "model_defaults", "embedding")
+                .or_else(|| config_model(content, "embeddings"))
+                .unwrap_or_else(|| "not configured".into()),
         ),
         (
             "Rerank".into(),
-            config_model(content, "reranking").unwrap_or_else(|| "not configured".into()),
+            config_section_value(content, "model_defaults", "rerank")
+                .or_else(|| config_model(content, "reranking"))
+                .unwrap_or_else(|| "not configured".into()),
         ),
     ]
+}
+
+pub(crate) fn configured_vector_dim(state: &AppState) -> u32 {
+    let content = state
+        .config
+        .as_ref()
+        .map_or("", |config| config.content.as_str());
+    let mut in_embeddings = false;
+    for line in content.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            in_embeddings = line.trim_end_matches(':') == "embeddings";
+            continue;
+        }
+        if in_embeddings
+            && let Some(value) = line.trim().strip_prefix("vector_dim:")
+            && let Ok(dimension) = value.trim().parse()
+        {
+            return dimension;
+        }
+    }
+    1024
+}
+
+fn config_section_value(content: &str, marker: &str, key: &str) -> Option<String> {
+    let lines = content.lines().collect::<Vec<_>>();
+    let start = lines
+        .iter()
+        .position(|line| line.trim_end().trim_end_matches(':').trim() == marker)?;
+    let marker_indent = lines[start].len() - lines[start].trim_start().len();
+    for line in lines.into_iter().skip(start + 1) {
+        let indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indent <= marker_indent {
+            break;
+        }
+        if let Some(value) = line.trim().strip_prefix(&format!("{key}:")) {
+            return Some(value.trim().trim_matches(['\'', '"']).to_owned());
+        }
+    }
+    None
 }
 
 fn config_flag(content: &str, wanted_section: &str, wanted_key: &str) -> bool {
@@ -4184,6 +5007,54 @@ fn model_matches(loaded: &str, configured: &str) -> bool {
         || loaded.trim_end_matches(":latest") == configured.trim_end_matches(":latest")
 }
 
+fn compact_model_name(model: &str) -> String {
+    if model == "not configured" {
+        return "unset".into();
+    }
+    model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim_end_matches(":latest")
+        .to_owned()
+}
+
+fn model_role_line(
+    role: &str,
+    model: Option<&str>,
+    residency: &str,
+    width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let (marker, color) = match residency {
+        "active" => ("▶", theme.orange),
+        "loaded" => ("●", theme.green),
+        "loading" => ("◐", theme.yellow),
+        "idle" => ("◇", theme.cyan),
+        _ => ("○", theme.muted),
+    };
+    let role = match role {
+        "embedding" => "Embed",
+        "rerank" => "Rerank",
+        "chat" => "Chat",
+        "vl" => "VL",
+        other => other,
+    };
+    let model = model.map_or("unset".into(), compact_model_name);
+    Line::from(vec![
+        Span::styled(format!(" {marker} "), Style::default().fg(color)),
+        Span::styled(format!("{role:<6}"), Style::default().fg(theme.muted)),
+        Span::styled(
+            truncate(&model, width.saturating_sub(13) as usize),
+            Style::default().fg(if model == "unset" {
+                theme.muted
+            } else {
+                theme.text
+            }),
+        ),
+    ])
+}
+
 fn job_color(job: &JobSnapshot, theme: &Theme) -> Color {
     match job.status {
         JobStatus::Completed => theme.green,
@@ -4222,6 +5093,16 @@ fn human_memory(bytes: u64) -> String {
         format!("{:.1} GiB", bytes as f64 / GIB)
     } else {
         format!("{:.0} MiB", bytes as f64 / MIB)
+    }
+}
+
+fn compact_memory(bytes: u64) -> String {
+    const GIB: f64 = 1_073_741_824.0;
+    const MIB: f64 = 1_048_576.0;
+    if bytes as f64 >= GIB {
+        format!("{:.1}G", bytes as f64 / GIB)
+    } else {
+        format!("{:.0}M", bytes as f64 / MIB)
     }
 }
 
@@ -4355,7 +5236,15 @@ mod tests {
     #[test]
     fn wide_shell_contains_sidebar_workspace_and_inspector() {
         let content = rendered(160, 42, &AppState::default(), Theme::default());
-        for title in ["CHAT", "LIBRARY", "FOUNDRY", "Conversation", "Evidence"] {
+        for title in [
+            "CHAT",
+            "LIBRARY",
+            "MODELS",
+            "SETTINGS",
+            "Conversation",
+            "Source",
+            "INSTRUMENTS",
+        ] {
             assert!(content.contains(title), "missing {title}");
         }
         assert!(!content.contains("Index new PDFs"));
@@ -4497,13 +5386,16 @@ mod tests {
                 Some(View::FoundryOverview),
                 Some(View::FoundryOverview),
                 Some(View::Models),
+                Some(View::Settings),
+                Some(View::Settings),
+                Some(View::Themes),
             ]
         );
         let advanced = AppState {
             interaction_level: InteractionLevel::Workshop,
             ..AppState::default()
         };
-        assert_eq!(sidebar_navigation_rows(&advanced).len(), 14);
+        assert_eq!(sidebar_navigation_rows(&advanced).len(), 17);
     }
 
     #[test]
@@ -4529,6 +5421,11 @@ mod tests {
             Some("embed:1b")
         );
         assert_eq!(config_model(yaml, "reranking"), None);
+        let defaults = "oracle:\n  model_defaults:\n    chat: custom/chat\n    vl: custom/vision\n    embedding: custom/embed\n    rerank: custom/rank\n";
+        assert_eq!(
+            config_section_value(defaults, "model_defaults", "vl").as_deref(),
+            Some("custom/vision")
+        );
     }
 
     #[test]
@@ -4564,7 +5461,7 @@ mod tests {
     }
 
     #[test]
-    fn integrated_foundry_renders_setup_catalog_and_tuning() {
+    fn integrated_models_render_presets_catalog_and_central_controls() {
         let mut state = AppState {
             view: View::FoundryOverview,
             ..AppState::default()
@@ -4600,8 +5497,8 @@ mod tests {
             "Recommended for this device",
             "Qwen Unified",
             "Qwen retrieval family",
-            "Tuning",
-            "Install",
+            "Setup & actions",
+            "Install & use",
         ] {
             assert!(setup.contains(expected), "missing {expected}");
         }
@@ -4640,13 +5537,47 @@ mod tests {
         state.focus_pane = FocusPane::Inspector;
         let medium_inspector = rendered(110, 30, &state, Theme::default());
         assert!(medium_inspector.contains("Stack details"));
-        assert!(medium_inspector.contains("Tuning"));
+        assert!(!medium_inspector.contains("Setup & actions"));
 
         state.focus_pane = FocusPane::Workspace;
         let narrow_workspace = rendered(80, 24, &state, Theme::default());
         assert!(narrow_workspace.contains("Model rail"));
         state.focus_pane = FocusPane::Inspector;
         let narrow_inspector = rendered(80, 24, &state, Theme::default());
-        assert!(narrow_inspector.contains("Actions"));
+        assert!(narrow_inspector.contains("Stack details"));
+        assert!(!narrow_inspector.contains("Setup & actions"));
+    }
+
+    #[test]
+    fn markdown_is_rendered_and_unsafe_terminal_markup_is_removed() {
+        let theme = Theme::default();
+        let text = highlighted_answer(
+            "## Result\n\n**bold** and *italic* with `code` [1].\n\n<script>bad</script>\u{1b}[31m",
+            0,
+            &theme,
+        );
+        let rendered = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("Result"));
+        assert!(rendered.contains("bold"));
+        assert!(rendered.contains("italic"));
+        assert!(rendered.contains("code"));
+        assert!(rendered.contains("[1]"));
+        assert!(!rendered.contains("**"));
+        assert!(!rendered.contains("<script>"));
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains("[31m"));
+
+        let bold = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content == "bold")
+            .expect("bold span");
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
     }
 }

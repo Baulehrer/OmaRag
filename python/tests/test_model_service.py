@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import pytest
+
 from omarag_bridge.models.domain import (
     HardwareInfo,
     HardwareProfile,
     ModelCatalogEntry,
     ModelCategory,
     ModelFit,
+    ModelResidency,
     ModelSource,
 )
 from omarag_bridge.services.model_service import ModelService
@@ -88,4 +91,40 @@ def test_three_hardware_fitting_packages_preserve_retrieval_family_synergy() -> 
     assert all(package.fit == ModelFit.COMFORTABLE for package in packages)
     assert {item.role for item in packages[0].models} == set(ModelCategory)
     assert "Qwen" in packages[0].synergy
-    assert "BGE" in packages[2].synergy
+    assert "cross-encoder" in packages[2].synergy
+
+
+@pytest.mark.asyncio
+async def test_runtime_maps_each_configured_role_to_its_residency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ModelService.__new__(ModelService)
+
+    async def ollama_json(*_args, **_kwargs):
+        return {
+            "models": [
+                {
+                    "name": "qwen:latest",
+                    "size": 123,
+                    "details": {"parameter_size": "2B", "quantization_level": "Q4"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(service, "_ollama_json", ollama_json)
+    runtime = await service.runtime(
+        {
+            "chat": "qwen",
+            "vl": "qwen",
+            "embedding": "embed",
+            "rerank": None,
+        },
+        active_roles={ModelCategory.CHAT},
+        worker_timeout_seconds=45.0,
+    )
+    roles = {role.role.value: role for role in runtime.roles}
+    assert roles["chat"].residency == ModelResidency.ACTIVE
+    assert roles["chat"].shared_with == [ModelCategory.VL]
+    assert roles["embedding"].residency == ModelResidency.IDLE
+    assert roles["rerank"].residency == ModelResidency.UNCONFIGURED
+    assert runtime.query_worker_state == "active"

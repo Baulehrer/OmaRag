@@ -113,7 +113,12 @@ class RunEvaluationRequest(StrictModel):
 
 
 class RunRequest(StrictModel):
-    session_id: str | None = None
+    session_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=120,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$",
+    )
     mode: Literal["rag", "analysis"] = "rag"
     question: str = Field(min_length=1)
     images: list[str] = Field(default_factory=list)
@@ -185,6 +190,16 @@ class DeleteModelRequest(StrictModel):
         if self.confirm != self.model:
             raise ValueError("confirm must exactly match model")
         return self
+
+
+class ModelDefaultsRequest(StrictModel):
+    chat: str = Field(min_length=1)
+    vl: str = Field(min_length=1)
+    embedding: str = Field(min_length=1)
+    rerank: str = Field(min_length=1)
+    embedding_provider: Literal["ollama", "sentence-transformers"] = "ollama"
+    rerank_provider: Literal["cross-encoder", "vllm"] = "cross-encoder"
+    vector_dim: int = Field(default=1024, ge=64, le=8192)
 
 
 class RestoreBackupRequest(StrictModel):

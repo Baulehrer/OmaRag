@@ -428,6 +428,11 @@ impl RunRequest {
             filters: BTreeMap::new(),
         }
     }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -481,16 +486,48 @@ fn default_verification_status() -> String {
     "unverified".into()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnswerCacheStatus {
+    Hit,
+    Miss,
+    Bypass,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceCheck {
+    Verified,
+    Reviewed,
+    Insufficient,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunReceipt {
+    pub session_id: String,
+    pub turn: u32,
+    pub cache_status: AnswerCacheStatus,
+    pub total_ms: f64,
+    pub source_count: u32,
+    pub reused_source_count: u32,
+    pub new_source_count: u32,
+    pub source_check: SourceCheck,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunSnapshot {
     pub id: RunId,
     pub workspace_id: WorkspaceId,
+    #[serde(default)]
+    pub session_id: String,
     pub status: JobStatus,
     pub question: String,
     pub evidence_mode: EvidenceMode,
     pub answer: String,
     #[serde(default)]
     pub citations: Vec<Citation>,
+    #[serde(default)]
+    pub receipt: Option<RunReceipt>,
     pub error: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
@@ -685,9 +722,11 @@ mod tests {
 
     #[test]
     fn run_request_has_stable_wire_values() {
-        let request = RunRequest::question("Was ist Beton?", EvidenceMode::Strict);
+        let request = RunRequest::question("Was ist Beton?", EvidenceMode::Strict)
+            .with_session_id("conversation-1");
         let json = serde_json::to_value(request).unwrap();
         assert_eq!(json["evidence_mode"], "strict");
         assert_eq!(json["mode"], "rag");
+        assert_eq!(json["session_id"], "conversation-1");
     }
 }

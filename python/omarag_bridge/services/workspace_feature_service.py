@@ -7,11 +7,14 @@ import tarfile
 import tempfile
 import threading
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from uuid import uuid4
 
+from ruamel.yaml import YAML
+
 from ..adapters.base import HaikuAdapter
-from ..models.api import CreateSourceRequest
+from ..models.api import CreateSourceRequest, ModelDefaultsRequest
 from ..models.domain import (
     BackupSummary,
     BookMetadata,
@@ -19,6 +22,7 @@ from ..models.domain import (
     DocumentQuality,
     DocumentSummary,
     JobStatus,
+    ModelDefaultsPreflight,
     QualityReport,
     SourceDefinition,
 )
@@ -162,6 +166,7 @@ class WorkspaceFeatureService:
         hidden = self._hidden_documents(workspace_id)
         hidden.add(document_id)
         self._write_hidden_documents(workspace_id, hidden)
+        self.store.clear_answer_cache(workspace_id)
         try:
             targets = documents[document_id].segment_document_ids or [document_id]
             for target in targets:
@@ -313,7 +318,122 @@ class WorkspaceFeatureService:
         shutil.copy2(path, backup)
         temporary.write_text(content, encoding="utf-8")
         temporary.replace(path)
+        self.store.clear_answer_cache(workspace_id)
         return self.config(workspace_id)
+
+    def model_defaults_preflight(
+        self, workspace_id: str, request: ModelDefaultsRequest
+    ) -> ModelDefaultsPreflight:
+        current = self.config(workspace_id)
+        data = self._round_trip_yaml().load(current.content) or {}
+        current_embedding = str(
+            ((data.get("embeddings") or {}).get("model") or {}).get("name") or ""
+        )
+        current_provider = str(
+            ((data.get("embeddings") or {}).get("model") or {}).get("provider") or ""
+        )
+        current_dimension = int(
+            ((data.get("embeddings") or {}).get("model") or {}).get("vector_dim") or 0
+        )
+        requested = {
+            "chat": request.chat,
+            "vl": request.vl,
+            "embedding": request.embedding,
+            "rerank": request.rerank,
+        }
+        current_roles = self.configured_model_roles(workspace_id)
+        changes = {
+            role: f"{current_roles.get(role) or 'unset'} → {model}"
+            for role, model in requested.items()
+            if current_roles.get(role) != model
+        }
+        embedding_changed = (
+            current_embedding != request.embedding
+            or current_provider != request.embedding_provider
+            or current_dimension != request.vector_dim
+        )
+        requires_reindex = embedding_changed and bool(self.documents(workspace_id))
+        warnings = []
+        if request.chat != request.vl:
+            warnings.append(
+                "Haiku uses one QA model for chat and vision; the VL model is stored as the "
+                "vision preference but QA remains authoritative."
+            )
+        if requires_reindex:
+            warnings.append(
+                "Changing the embedding model or vector dimension requires a full library rebuild."
+            )
+        return ModelDefaultsPreflight(
+            workspace_id=workspace_id,
+            changes=changes,
+            requires_reindex=requires_reindex,
+            warnings=warnings,
+        )
+
+    def apply_model_defaults(
+        self,
+        workspace_id: str,
+        request: ModelDefaultsRequest,
+        if_match: str | None,
+    ) -> ConfigDocument:
+        preflight = self.model_defaults_preflight(workspace_id, request)
+        if preflight.requires_reindex:
+            raise ConflictError(
+                "Embedding changes on an indexed library require the dedicated rebuild workflow"
+            )
+        current = self.config(workspace_id)
+        if if_match is not None and if_match.strip('"') != current.etag:
+            raise EtagConflictError("Konfiguration wurde zwischenzeitlich geaendert")
+        yaml = self._round_trip_yaml()
+        data = yaml.load(current.content) or {}
+        embeddings = data.setdefault("embeddings", {})
+        embedding_model = embeddings.setdefault("model", {})
+        embedding_model["provider"] = request.embedding_provider
+        embedding_model["name"] = request.embedding
+        embedding_model["vector_dim"] = request.vector_dim
+        reranking = data.setdefault("reranking", {})
+        rerank_model = reranking.setdefault("model", {})
+        rerank_model["provider"] = request.rerank_provider
+        rerank_model["name"] = request.rerank
+        qa = data.setdefault("qa", {})
+        qa_model = qa.setdefault("model", {})
+        qa_model["provider"] = "ollama"
+        qa_model["name"] = request.chat
+        qa_model["vision"] = bool(request.vl)
+        oracle = data.setdefault("oracle", {})
+        defaults = oracle.setdefault("model_defaults", {})
+        defaults["chat"] = request.chat
+        defaults["vl"] = request.vl
+        defaults["embedding"] = request.embedding
+        defaults["rerank"] = request.rerank
+        output = StringIO()
+        yaml.dump(data, output)
+        return self.update_config(workspace_id, output.getvalue(), if_match)
+
+    def configured_model_roles(self, workspace_id: str) -> dict[str, str | None]:
+        data = self._round_trip_yaml().load(self.config(workspace_id).content) or {}
+        oracle_defaults = (data.get("oracle") or {}).get("model_defaults") or {}
+        qa_model = (data.get("qa") or {}).get("model") or {}
+        chat = oracle_defaults.get("chat") or qa_model.get("name")
+        return {
+            "chat": str(chat) if chat else None,
+            "vl": str(oracle_defaults.get("vl") or chat) if chat else None,
+            "embedding": self._nested_model_name(data, "embeddings"),
+            "rerank": self._nested_model_name(data, "reranking"),
+        }
+
+    @staticmethod
+    def _nested_model_name(data: object, section: str) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        value = ((data.get(section) or {}).get("model") or {}).get("name")
+        return str(value) if value else None
+
+    @staticmethod
+    def _round_trip_yaml() -> YAML:
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        return yaml
 
     def create_backup(self, workspace_id: str) -> BackupSummary:
         with self._backup_lock(workspace_id):

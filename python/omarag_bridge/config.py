@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     ollama_url: str = "http://127.0.0.1:11434"
     hugging_face_url: str = "https://huggingface.co"
     model_catalog_scan_limit: int = 1000
+    model_upload_max_bytes: int = Field(default=64 * 1024**3, ge=1024**2)
     api_memory_high_mb: int = Field(default=384, ge=128)
     api_memory_max_mb: int = Field(default=768, ge=256)
     api_swap_max_mb: int = Field(default=0, ge=0)
@@ -36,6 +37,7 @@ class Settings(BaseSettings):
     worker_utility_memory_max_mb: int = Field(default=2048, ge=256)
     worker_utility_swap_max_mb: int = Field(default=256, ge=0)
     worker_tasks_max: int = Field(default=96, ge=16, le=512)
+    answer_cache_max_entries: int = Field(default=256, ge=16, le=4096)
 
     @property
     def state_database(self) -> Path:

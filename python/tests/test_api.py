@@ -4,10 +4,12 @@ import asyncio
 from pathlib import Path
 
 import httpx2
+import pytest
 from fastapi import FastAPI
 
 from omarag_bridge.app import create_app
 from omarag_bridge.config import Settings
+from omarag_bridge.models.domain import ModelCategory
 
 
 async def test_meta_health_and_openapi(client: httpx2.AsyncClient) -> None:
@@ -118,6 +120,93 @@ async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
         "operation": "delete",
         "status": "ok",
     }
+
+
+async def test_model_defaults_are_preflighted_applied_atomically_and_reported(
+    client: httpx2.AsyncClient, workspace: dict[str, object]
+) -> None:
+    workspace_id = str(workspace["id"])
+    config = await client.get(f"/v1/workspaces/{workspace_id}/config")
+    commented = config.json()["content"].replace("qa:\n", "# user model preference\nqa:\n")
+    saved = await client.put(
+        f"/v1/workspaces/{workspace_id}/config",
+        headers={"If-Match": config.headers["etag"]},
+        json={"content": commented},
+    )
+    assert saved.status_code == 200
+    payload = {
+        "chat": "test/chat-2b",
+        "vl": "test/chat-2b",
+        "embedding": "qwen3-embedding:0.6b",
+        "rerank": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+        "embedding_provider": "ollama",
+        "rerank_provider": "cross-encoder",
+        "vector_dim": 1024,
+    }
+    preflight = await client.post(
+        f"/v1/workspaces/{workspace_id}/model-defaults/preflight", json=payload
+    )
+    assert preflight.status_code == 200
+    assert preflight.json()["requires_reindex"] is False
+    assert "chat" in preflight.json()["changes"]
+
+    applied = await client.post(
+        f"/v1/workspaces/{workspace_id}/model-defaults/apply",
+        headers={"If-Match": saved.headers["etag"]},
+        json=payload,
+    )
+    assert applied.status_code == 200
+    assert "# user model preference" in applied.json()["content"]
+    assert "chat: test/chat-2b" in applied.json()["content"]
+
+    runtime = await client.get("/v1/models/runtime", params={"workspace_id": workspace_id})
+    assert runtime.status_code == 200
+    roles = {item["role"]: item for item in runtime.json()["roles"]}
+    assert roles["chat"]["model"] == "test/chat-2b"
+    assert roles["chat"]["residency"] == "loaded"
+    assert roles["vl"]["shared_with"] == ["chat"]
+
+    stale = await client.post(
+        f"/v1/workspaces/{workspace_id}/model-defaults/apply",
+        headers={"If-Match": saved.headers["etag"]},
+        json={**payload, "chat": "test/other"},
+    )
+    assert stale.status_code == 409
+
+
+async def test_gguf_import_validates_early_streams_and_removes_temporary_files(
+    client: httpx2.AsyncClient, app: FastAPI
+) -> None:
+    invalid = await client.post(
+        "/v1/models/import/gguf",
+        data={"model": "local/bad", "category": "chat"},
+        files={"file": ("bad.gguf", b"NOPE", "application/octet-stream")},
+    )
+    assert invalid.status_code == 409
+
+    wrong_role = await client.post(
+        "/v1/models/import/gguf",
+        data={"model": "local/rerank", "category": "rerank"},
+        files={"file": ("rank.gguf", b"GGUFdata", "application/octet-stream")},
+    )
+    assert wrong_role.status_code == 409
+
+    imported = await client.post(
+        "/v1/models/import/gguf",
+        data={"model": "local/textbook", "category": "chat"},
+        files={"file": ("textbook.gguf", b"GGUFtest-model", "application/octet-stream")},
+    )
+    assert imported.status_code == 200
+    assert '"status":"success"' in imported.text
+    service = app.state.services.models
+    assert service.imported_gguf is not None
+    assert service.imported_gguf[0:3] == (
+        "textbook.gguf",
+        "local/textbook",
+        ModelCategory.CHAT,
+    )
+    imports = app.state.services.settings.data_dir / "cache" / "model-imports"
+    assert list(imports.glob("*.part")) == []
 
 
 async def test_configured_model_cannot_be_deleted(
@@ -303,6 +392,61 @@ async def test_search_and_run_have_stable_domain_models(
         await asyncio.sleep(0.01)
     assert analysis["answer"] == "Analyse von: Pruefe XC4"
     assert analysis["citations"][0]["pages"] == [2]
+
+
+async def test_exact_answers_are_cached_per_generation_and_sessions_get_receipts(
+    client: httpx2.AsyncClient, workspace: dict[str, object], app: FastAPI
+) -> None:
+    workspace_id = str(workspace["id"])
+    adapter = app.state.services.adapter
+
+    async def run_question() -> dict[str, object]:
+        response = await client.post(
+            f"/v1/workspaces/{workspace_id}/runs",
+            json={
+                "question": "  Was   bedeutet XC4?  ",
+                "evidence_mode": "strict",
+                "session_id": "conversation-cache-test",
+            },
+        )
+        assert response.status_code == 202
+        run_id = response.json()["id"]
+        for _ in range(50):
+            run = (await client.get(f"/v1/runs/{run_id}")).json()
+            if run["status"] == "completed":
+                return run
+            await asyncio.sleep(0.01)
+        pytest.fail("run did not complete")
+
+    first = await run_question()
+    second = await run_question()
+
+    assert adapter.ask_calls == 1
+    assert first["session_id"] == "conversation-cache-test"
+    assert first["receipt"]["turn"] == 1
+    assert first["receipt"]["cache_status"] == "miss"
+    assert first["receipt"]["new_source_count"] == 1
+    assert second["receipt"]["turn"] == 2
+    assert second["receipt"]["cache_status"] == "hit"
+    assert second["receipt"]["reused_source_count"] == 1
+    assert second["receipt"]["new_source_count"] == 0
+
+    events = app.state.services.store.events_after(0, run_id=str(second["id"]))
+    completed = next(event for event in events if event.type == "run.completed")
+    assert completed.payload["receipt"]["cache_status"] == "hit"
+
+    config = await client.get(f"/v1/workspaces/{workspace_id}/config")
+    changed = await client.put(
+        f"/v1/workspaces/{workspace_id}/config",
+        headers={"If-Match": config.headers["etag"]},
+        json={"content": config.json()["content"] + "\n# cache generation changed\n"},
+    )
+    assert changed.status_code == 200
+
+    third = await run_question()
+    assert adapter.ask_calls == 2
+    assert third["receipt"]["turn"] == 3
+    assert third["receipt"]["cache_status"] == "miss"
 
 
 async def test_workspace_feature_vertical_slices(

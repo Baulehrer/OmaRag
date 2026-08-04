@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.7.0}
+VERSION=${VERSION:-0.8.0}
 ARCH=${ARCH:-x86_64}
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/dist"}
 STAGING="$OUTPUT_DIR/oracle-of-daedalus-$VERSION-linux-$ARCH"

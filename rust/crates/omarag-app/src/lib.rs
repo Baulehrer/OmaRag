@@ -1,10 +1,12 @@
 use omarag_domain::{
     BackendMeta, BackupSummary, BookMetadata, Citation, ConfigDocument, DocumentSummary,
     DomainEvent, EvidenceMode, JobId, JobSnapshot, QualityReport, RetrievalExplanation, RunId,
-    SearchHit, SourceDefinition, WorkspaceId, WorkspaceSummary,
+    RunReceipt, SearchHit, SourceDefinition, WorkspaceId, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+pub const THEME_COUNT: usize = 14;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,18 +40,18 @@ pub enum PrimarySection {
     Chat,
     Library,
     Foundry,
-    Utilities,
+    Settings,
 }
 
 impl PrimarySection {
-    pub const CORE: [Self; 3] = [Self::Chat, Self::Library, Self::Foundry];
+    pub const CORE: [Self; 4] = [Self::Chat, Self::Library, Self::Foundry, Self::Settings];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
             Self::Library => "Library",
-            Self::Foundry => "Foundry",
-            Self::Utilities => "Utilities",
+            Self::Foundry => "Models",
+            Self::Settings => "Settings",
         }
     }
 }
@@ -71,6 +73,7 @@ pub enum View {
     System,
     Activity,
     Settings,
+    Themes,
 }
 
 impl View {
@@ -85,9 +88,9 @@ impl View {
         Self::Backups,
         Self::FoundryOverview,
         Self::Models,
-        Self::System,
-        Self::Activity,
         Self::Settings,
+        Self::Themes,
+        Self::System,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -100,11 +103,12 @@ impl View {
             Self::Sources => "Sources",
             Self::Quality => "Quality",
             Self::Backups => "Backups",
-            Self::FoundryOverview => "Setup",
+            Self::FoundryOverview => "Presets",
             Self::Models => "Catalog",
             Self::System => "Runtime",
             Self::Activity => "Activity",
-            Self::Settings => "Settings",
+            Self::Settings => "General",
+            Self::Themes => "Themes",
         }
     }
 
@@ -114,8 +118,9 @@ impl View {
             Self::Books | Self::Indexing | Self::Sources | Self::Quality | Self::Backups => {
                 PrimarySection::Library
             }
-            Self::FoundryOverview | Self::Models | Self::System => PrimarySection::Foundry,
-            Self::Activity | Self::Settings => PrimarySection::Utilities,
+            Self::FoundryOverview | Self::Models => PrimarySection::Foundry,
+            Self::Activity => PrimarySection::Library,
+            Self::Settings | Self::Themes | Self::System => PrimarySection::Settings,
         }
     }
 
@@ -134,8 +139,7 @@ impl View {
             Self::Sources => Route::Sources,
             Self::Quality => Route::Quality,
             Self::Backups => Route::Backups,
-            Self::FoundryOverview | Self::Models => Route::System,
-            Self::System => Route::System,
+            Self::FoundryOverview | Self::Models | Self::System | Self::Themes => Route::System,
             Self::Activity => Route::Jobs,
             Self::Settings => Route::Settings,
         }
@@ -299,6 +303,7 @@ pub enum Overlay {
     CustomProfileEditor,
     ChatHistory,
     DocumentTags,
+    CustomModel,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,9 +478,13 @@ pub struct DocumentInsight {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatSession {
     pub workspace_id: WorkspaceId,
+    #[serde(default)]
+    pub session_id: String,
     pub question: String,
     pub answer: String,
     pub citations: Vec<Citation>,
+    #[serde(default)]
+    pub receipt: Option<RunReceipt>,
     pub created_at: String,
 }
 
@@ -577,8 +586,8 @@ pub enum HardwareProfile {
 impl HardwareProfile {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Eco => "Eco · Q3 · 4K",
-            Self::Laptop => "Laptop · Q4 · 8K",
+            Self::Eco => "Fast · Q3 · 4K",
+            Self::Laptop => "Balanced · Q4 · 8K",
             Self::Quality => "Quality · Q5 · 8K",
         }
     }
@@ -781,6 +790,8 @@ pub struct ModelManagerState {
     pub cursor: usize,
     pub packages: Vec<ModelPackage>,
     pub package_cursor: usize,
+    pub center_control_cursor: usize,
+    pub center_controls_active: bool,
     pub inspector_cursor: usize,
     pub quantization: ModelQuantization,
     pub context_tokens: u32,
@@ -807,6 +818,8 @@ impl Default for ModelManagerState {
             cursor: 0,
             packages: Vec::new(),
             package_cursor: 0,
+            center_control_cursor: 0,
+            center_controls_active: false,
             inspector_cursor: 0,
             quantization: ModelQuantization::default(),
             context_tokens: 8_192,
@@ -1003,6 +1016,7 @@ pub struct ChatState {
     pub request_pending: bool,
     pub evidence_mode: EvidenceMode,
     pub citations: Vec<Citation>,
+    pub receipt: Option<RunReceipt>,
     pub error: Option<String>,
 }
 
@@ -1099,7 +1113,11 @@ pub struct AppState {
     pub hardware_cursor: usize,
     pub model_cursor: usize,
     pub model_manager: ModelManagerState,
+    pub custom_model_input: EditorState,
+    pub custom_model_file: bool,
     pub theme_index: usize,
+    pub theme_cursor: usize,
+    pub theme_preview_origin: Option<usize>,
     pub jobs: BTreeMap<JobId, JobSnapshot>,
     pub documents: Vec<DocumentSummary>,
     pub document_cursor: usize,
@@ -1114,6 +1132,7 @@ pub struct AppState {
     pub config_dirty: bool,
     pub job_cursor: usize,
     pub citation_cursor: usize,
+    pub citation_page_cursor: usize,
     pub gallery_cursor: usize,
     pub chat: ChatState,
     pub search: SearchState,
@@ -1129,6 +1148,7 @@ pub struct AppState {
     pub custom_profile_field: usize,
     pub editing_custom_profile: Option<usize>,
     pub chat_sessions: BTreeMap<WorkspaceId, Vec<ChatSession>>,
+    pub conversation_ids: BTreeMap<WorkspaceId, String>,
     pub document_tags: BTreeMap<String, Vec<String>>,
     pub tag_editor: EditorState,
     pub history_cursor: usize,
@@ -1161,16 +1181,26 @@ pub struct UiPreferences {
     pub workspace_custom_profiles: BTreeMap<WorkspaceId, String>,
     pub custom_profiles: Vec<CustomLibraryProfile>,
     pub chat_sessions: BTreeMap<WorkspaceId, Vec<ChatSession>>,
+    pub conversation_ids: BTreeMap<WorkspaceId, String>,
     pub document_tags: BTreeMap<String, Vec<String>>,
 }
 
 impl AppState {
     pub fn apply_preferences(&mut self, preferences: UiPreferences) {
-        self.theme_index = preferences.theme_index % 4;
+        self.theme_index = preferences.theme_index % THEME_COUNT;
+        self.theme_cursor = self.theme_index;
         self.active_workspace = preferences.active_workspace;
         if preferences.version >= 2 {
-            self.view = preferences.view;
+            self.view = match preferences.view {
+                View::Activity => View::Indexing,
+                view => view,
+            };
             self.focus_pane = preferences.focus_pane;
+            if self.focus_pane == FocusPane::Inspector
+                && !matches!(self.view, View::Conversation | View::Retrieval)
+            {
+                self.focus_pane = FocusPane::Workspace;
+            }
             self.sync_legacy_navigation();
         } else {
             self.route = preferences.route;
@@ -1193,12 +1223,13 @@ impl AppState {
         self.workspace_custom_profiles = preferences.workspace_custom_profiles;
         self.custom_profiles = preferences.custom_profiles;
         self.chat_sessions = preferences.chat_sessions;
+        self.conversation_ids = preferences.conversation_ids;
         self.document_tags = preferences.document_tags;
     }
 
     pub fn preferences(&self) -> UiPreferences {
         UiPreferences {
-            version: 2,
+            version: 4,
             view: self.view,
             focus_pane: self.focus_pane,
             theme_index: self.theme_index,
@@ -1216,12 +1247,27 @@ impl AppState {
             workspace_custom_profiles: self.workspace_custom_profiles.clone(),
             custom_profiles: self.custom_profiles.clone(),
             chat_sessions: self.chat_sessions.clone(),
+            conversation_ids: self.conversation_ids.clone(),
             document_tags: self.document_tags.clone(),
         }
     }
 
     pub fn navigate_view(&mut self, view: View) {
+        if self.view == View::Themes && view != View::Themes {
+            if let Some(origin) = self.theme_preview_origin.take() {
+                self.theme_index = origin;
+                self.theme_cursor = origin;
+            }
+        } else if self.view != View::Themes && view == View::Themes {
+            self.theme_cursor = self.theme_index;
+            self.theme_preview_origin = Some(self.theme_index);
+        }
         self.view = view;
+        if self.focus_pane == FocusPane::Inspector
+            && !matches!(view, View::Conversation | View::Retrieval)
+        {
+            self.focus_pane = FocusPane::Workspace;
+        }
         self.route = view.route();
         self.route_cursor = View::ALL
             .iter()
@@ -1251,7 +1297,8 @@ impl AppState {
                 | View::Models
                 | View::System
                 | View::Quality
-                | View::Settings => FocusPanel::Models,
+                | View::Settings
+                | View::Themes => FocusPanel::Models,
             },
         };
     }
@@ -1449,7 +1496,10 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
                 InteractionLevel::Workshop => InteractionLevel::Simple,
             }
         }
-        Action::CycleTheme => state.theme_index = (state.theme_index + 1) % 4,
+        Action::CycleTheme => {
+            state.theme_index = (state.theme_index + 1) % THEME_COUNT;
+            state.theme_cursor = state.theme_index;
+        }
         Action::SetInputMode(mode) => state.input_mode = mode,
         Action::SetFocus(focus) => {
             state.focus = focus;
@@ -1460,8 +1510,12 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             };
         }
         Action::SetFocusPane(pane) => state.set_focus_pane(pane),
-        Action::FocusPaneNext => state.set_focus_pane(state.focus_pane.next()),
-        Action::FocusPanePrevious => state.set_focus_pane(state.focus_pane.previous()),
+        Action::FocusPaneNext => {
+            state.set_focus_pane(next_focus_pane(state.view, state.focus_pane, false))
+        }
+        Action::FocusPanePrevious => {
+            state.set_focus_pane(next_focus_pane(state.view, state.focus_pane, true))
+        }
         Action::FocusNext => {
             state.focus = state.focus.next();
             state.focus_pane = if state.focus == FocusPanel::Navigation {
@@ -1626,6 +1680,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.chat.error = None;
             state.chat.answer.clear();
             state.chat.citations.clear();
+            state.chat.receipt = None;
             state.chat.last_run = None;
             state.citation_cursor = 0;
             state.operation = OperationState {
@@ -1726,6 +1781,24 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
     Vec::new()
 }
 
+fn next_focus_pane(view: View, current: FocusPane, reverse: bool) -> FocusPane {
+    let panes: &[FocusPane] = if matches!(view, View::Conversation | View::Retrieval) {
+        &[
+            FocusPane::Sidebar,
+            FocusPane::Workspace,
+            FocusPane::Inspector,
+        ]
+    } else {
+        &[FocusPane::Sidebar, FocusPane::Workspace]
+    };
+    let index = panes.iter().position(|pane| *pane == current).unwrap_or(0);
+    if reverse {
+        panes[(index + panes.len() - 1) % panes.len()]
+    } else {
+        panes[(index + 1) % panes.len()]
+    }
+}
+
 fn select_main_item(state: &mut AppState, next: bool) {
     match state.route {
         Route::Library => move_cursor(&mut state.document_cursor, state.documents.len(), next),
@@ -1786,7 +1859,16 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
                 state.chat.citations.push(citation);
             }
         }
-        "run.completed" | "run.cancelled" => {
+        "run.completed" => {
+            state.chat.receipt = event
+                .payload
+                .get("receipt")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            state.chat.active_run = None;
+            state.operation.active = false;
+        }
+        "run.cancelled" => {
             state.chat.active_run = None;
             state.operation.active = false;
         }
@@ -1829,7 +1911,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.7.0".into(),
+            omarag_version: "0.8.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "local".into(),
@@ -1896,6 +1978,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_run_keeps_the_plain_language_receipt() {
+        let mut state = AppState::default();
+        state.chat.active_run = Some("run-1".into());
+        update(
+            &mut state,
+            Action::EventReceived(DomainEvent {
+                event_id: 10,
+                sequence: 1,
+                timestamp: "now".into(),
+                event_type: "run.completed".into(),
+                workspace_id: Some("workspace-1".into()),
+                job_id: None,
+                run_id: Some("run-1".into()),
+                correlation_id: "run-1".into(),
+                schema_version: 1,
+                payload: json!({
+                    "receipt": {
+                        "session_id": "conversation-1",
+                        "turn": 2,
+                        "cache_status": "hit",
+                        "total_ms": 12.0,
+                        "source_count": 1,
+                        "reused_source_count": 1,
+                        "new_source_count": 0,
+                        "source_check": "verified"
+                    }
+                }),
+            }),
+        );
+        let receipt = state.chat.receipt.as_ref().unwrap();
+        assert_eq!(receipt.turn, 2);
+        assert_eq!(receipt.cache_status, omarag_domain::AnswerCacheStatus::Hit);
+    }
+
+    #[test]
     fn focus_cycles_without_changing_interaction_level() {
         let mut state = AppState::default();
         update(&mut state, Action::FocusNext);
@@ -1915,7 +2032,7 @@ mod tests {
     }
 
     #[test]
-    fn version_two_preferences_restore_view_and_pane() {
+    fn current_preferences_restore_view_and_enforce_read_only_inspector_focus() {
         let mut state = AppState::default();
         state.navigate_view(View::Models);
         state.set_focus_pane(FocusPane::Inspector);
@@ -1923,8 +2040,21 @@ mod tests {
         let mut restored = AppState::default();
         restored.apply_preferences(serde_json::from_str(&encoded).unwrap());
         assert_eq!(restored.view, View::Models);
-        assert_eq!(restored.focus_pane, FocusPane::Inspector);
+        assert_eq!(restored.focus_pane, FocusPane::Workspace);
         assert_eq!(restored.route, Route::System);
+    }
+
+    #[test]
+    fn version_two_activity_and_out_of_range_theme_preferences_migrate() {
+        let preferences: UiPreferences = serde_json::from_str(
+            r#"{"version":2,"view":"activity","focus_pane":"inspector","theme_index":29}"#,
+        )
+        .unwrap();
+        let mut state = AppState::default();
+        state.apply_preferences(preferences);
+        assert_eq!(state.view, View::Indexing);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
+        assert_eq!(state.theme_index, 1);
     }
 
     #[test]

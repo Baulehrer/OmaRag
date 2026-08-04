@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import math
@@ -21,11 +22,13 @@ from ..models.domain import (
     ModelOperationResult,
     ModelPackage,
     ModelPackageItem,
+    ModelResidency,
+    ModelRoleRuntime,
     ModelRuntime,
     ModelRuntimeResponse,
     ModelSource,
 )
-from ..models.errors import UpstreamUnavailableError
+from ..models.errors import ConflictError, UpstreamUnavailableError
 
 GIB = 1024**3
 MIB = 1024**2
@@ -104,7 +107,13 @@ class ModelService:
             truncated=truncated,
         )
 
-    async def runtime(self) -> ModelRuntimeResponse:
+    async def runtime(
+        self,
+        roles: dict[str, str | None] | None = None,
+        *,
+        active_roles: set[ModelCategory] | None = None,
+        worker_timeout_seconds: float = 0.0,
+    ) -> ModelRuntimeResponse:
         payload = await self._ollama_json("GET", "/api/ps")
         models = []
         for raw in payload.get("models", []):
@@ -120,7 +129,119 @@ class ModelService:
                     quantization_level=str(details.get("quantization_level") or ""),
                 )
             )
-        return ModelRuntimeResponse(models=models)
+        role_rows = []
+        configured = roles or {}
+        active = active_roles or set()
+        for role in ModelCategory:
+            model = configured.get(role.value)
+            loaded = bool(
+                model
+                and any(
+                    item.name.removesuffix(":latest") == model.removesuffix(":latest")
+                    for item in models
+                )
+            )
+            shared = [
+                other
+                for other in ModelCategory
+                if other != role and model and configured.get(other.value) == model
+            ]
+            role_rows.append(
+                ModelRoleRuntime(
+                    role=role,
+                    model=model,
+                    provider=("cross-encoder" if role == ModelCategory.RERANK else "ollama")
+                    if model
+                    else None,
+                    residency=(
+                        ModelResidency.ACTIVE
+                        if role in active
+                        else ModelResidency.LOADED
+                        if loaded
+                        else ModelResidency.IDLE
+                        if model
+                        else ModelResidency.UNCONFIGURED
+                    ),
+                    shared_with=shared,
+                )
+            )
+        return ModelRuntimeResponse(
+            models=models,
+            roles=role_rows,
+            query_worker_state="active" if active else "idle",
+            query_worker_timeout_seconds=worker_timeout_seconds,
+        )
+
+    async def import_gguf(
+        self,
+        path: Path,
+        filename: str,
+        model: str,
+        category: ModelCategory,
+        digest: str,
+    ) -> AsyncIterator[bytes]:
+        if category == ModelCategory.RERANK:
+            raise ConflictError("Rerank requires a cross-encoder; Ollama GGUF is unsupported")
+        yield self._progress_line("uploading verified GGUF", 0, path.stat().st_size)
+
+        async def file_body() -> AsyncIterator[bytes]:
+            with path.open("rb") as stream:
+                while chunk := await asyncio.to_thread(stream.read, 8 * MIB):
+                    yield chunk
+
+        timeout = httpx.Timeout(connect=10, read=None, write=None, pool=10)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                blob_response = await client.post(
+                    f"{self.settings.ollama_url.rstrip('/')}/api/blobs/sha256:{digest}",
+                    content=file_body(),
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+                blob_response.raise_for_status()
+                yield self._progress_line(
+                    "creating Ollama model", path.stat().st_size, path.stat().st_size
+                )
+                async with client.stream(
+                    "POST",
+                    f"{self.settings.ollama_url.rstrip('/')}/api/create",
+                    json={
+                        "model": model,
+                        "files": {filename: f"sha256:{digest}"},
+                        "stream": True,
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if line:
+                            yield line.encode() + b"\n"
+        except httpx.HTTPError as exc:
+            yield self._error_line(f"Ollama GGUF import failed: {exc}")
+            return
+
+        try:
+            details = await self._ollama_json("POST", "/api/show", {"model": model})
+            capabilities = {str(item) for item in details.get("capabilities") or []}
+            if category == ModelCategory.VL and "vision" not in capabilities:
+                raise ConflictError("The imported GGUF does not advertise vision capability")
+            if category == ModelCategory.EMBEDDING:
+                await self._ollama_json("POST", "/api/embed", {"model": model, "input": "probe"})
+        except Exception as exc:
+            cleanup = ""
+            try:
+                await self.delete(model)
+            except Exception as cleanup_error:
+                cleanup = f"; automatic cleanup also failed: {cleanup_error}"
+            yield self._error_line(
+                f"Role validation failed; imported model rejected: {exc}{cleanup}"
+            )
+            return
+        yield self._progress_line("success", path.stat().st_size, path.stat().st_size)
+
+    @staticmethod
+    def _progress_line(status: str, completed: int = 0, total: int = 0) -> bytes:
+        return (
+            json.dumps({"status": status, "completed": completed, "total": total}) + "\n"
+        ).encode()
 
     async def pull(self, model: str) -> AsyncIterator[bytes]:
         timeout = httpx.Timeout(connect=10, read=None, write=30, pool=10)
@@ -427,8 +548,8 @@ class ModelService:
         templates = [
             (
                 "qwen-unified",
-                "Qwen Unified",
-                "One vision-capable model handles chat and images.",
+                "Fast",
+                "Lowest memory footprint with complete chat, vision and retrieval roles.",
                 "Qwen generation, embeddings and reranking share one tokenizer family.",
                 [
                     (
@@ -446,7 +567,7 @@ class ModelService:
                     ),
                     (
                         ModelCategory.RERANK,
-                        "Qwen3-Reranker-0.6B",
+                        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
                         ModelSource.HUGGING_FACE,
                         600_000_000,
                     ),
@@ -454,8 +575,8 @@ class ModelService:
             ),
             (
                 "qwen-depth",
-                "Qwen Depth",
-                "More answer quality while keeping retrieval compact.",
+                "Balanced",
+                "The recommended balance of answer quality, speed and memory.",
                 "The same Qwen embedding/rerank pair avoids cross-family retrieval drift.",
                 [
                     (
@@ -478,7 +599,7 @@ class ModelService:
                     ),
                     (
                         ModelCategory.RERANK,
-                        "Qwen3-Reranker-0.6B",
+                        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
                         ModelSource.HUGGING_FACE,
                         600_000_000,
                     ),
@@ -486,21 +607,21 @@ class ModelService:
             ),
             (
                 "bge-retrieval",
-                "BGE Retrieval",
-                "Small multimodal generation with retrieval-first ranking.",
-                "BGE-M3 embedding and BGE reranking are tuned as a retrieval family.",
+                "Quality",
+                "Stronger generation and reranking while preserving the current vector index.",
+                "A larger cross-encoder improves ranking without forcing an embedding rebuild.",
                 [
-                    (ModelCategory.CHAT, "gemma3:1b", ModelSource.OLLAMA, 1_000_000_000),
-                    (ModelCategory.VL, "gemma3:1b", ModelSource.OLLAMA, 1_000_000_000),
+                    (ModelCategory.CHAT, "qwen3.5:4b", ModelSource.OLLAMA, 4_000_000_000),
+                    (ModelCategory.VL, "qwen3.5:4b", ModelSource.OLLAMA, 4_000_000_000),
                     (
                         ModelCategory.EMBEDDING,
-                        "bge-m3:567m",
+                        "qwen3-embedding:0.6b",
                         ModelSource.OLLAMA,
-                        567_000_000,
+                        600_000_000,
                     ),
                     (
                         ModelCategory.RERANK,
-                        "bge-reranker-v2-m3",
+                        "BAAI/bge-reranker-v2-m3",
                         ModelSource.HUGGING_FACE,
                         568_000_000,
                     ),
@@ -564,12 +685,7 @@ class ModelService:
     def _package_download_name(model: str, source: ModelSource, quantization: str) -> str:
         if source == ModelSource.OLLAMA:
             return model
-        repositories = {
-            "Qwen3-Reranker-0.6B": "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF",
-            "bge-reranker-v2-m3": "gpustack/bge-reranker-v2-m3-GGUF",
-        }
-        selected_quantization = "Q8_0" if model == "Qwen3-Reranker-0.6B" else quantization
-        return f"hf.co/{repositories[model]}:{selected_quantization}"
+        return model
 
     @staticmethod
     def _rank_recommendations(

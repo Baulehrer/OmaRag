@@ -2,7 +2,7 @@
 set -eu
 
 REPOSITORY=${ORACLE_REPOSITORY:-Baulehrer/oracle-of-daedalus}
-VERSION=0.7.0
+VERSION=0.8.0
 PREFIX=${ORACLE_PREFIX:-"$HOME/.local"}
 INSTALL_SERVICE=1
 INSTALL_UPDATER=1
@@ -29,7 +29,7 @@ done
 
 case "$(uname -m)" in
     x86_64|amd64) ARCH=x86_64 ;;
-    *) printf 'Release 0.7 supports x86_64 Linux only.\n' >&2; exit 1 ;;
+    *) printf 'Release 0.8 supports x86_64 Linux only.\n' >&2; exit 1 ;;
 esac
 
 TAG="v$VERSION"

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
+import shutil
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -9,7 +12,18 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Query, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -32,6 +46,7 @@ from .models.api import (
     IdempotentResult,
     IngestRequest,
     LoadModelRequest,
+    ModelDefaultsRequest,
     PatchBookMetadataRequest,
     PatchWorkspaceRequest,
     PreflightImportRequest,
@@ -55,6 +70,7 @@ from .models.domain import (
     JobSnapshot,
     ModelCatalogResponse,
     ModelCategory,
+    ModelDefaultsPreflight,
     ModelOperationResult,
     ModelRuntimeResponse,
     ModelSource,
@@ -165,7 +181,14 @@ def build_services(settings: Settings) -> Services:
     token, token_path = _resolve_bearer_token(settings)
     resources = ResourceCoordinator()
     jobs = JobService(store, workspaces, events, adapter, resources)
-    runs = RunService(store, workspaces, events, adapter, resources)
+    runs = RunService(
+        store,
+        workspaces,
+        events,
+        adapter,
+        resources,
+        answer_cache_max_entries=settings.answer_cache_max_entries,
+    )
     features = WorkspaceFeatureService(store, workspaces, adapter)
     models = ModelService(settings)
     textbooks = TextbookService(store, workspaces, adapter)
@@ -331,8 +354,113 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=ModelRuntimeResponse,
         dependencies=protected,
     )
-    async def model_runtime() -> ModelRuntimeResponse:
-        return await services.models.runtime()
+    async def model_runtime(workspace_id: str | None = None) -> ModelRuntimeResponse:
+        roles = (
+            services.features.configured_model_roles(workspace_id)
+            if workspace_id is not None
+            else None
+        )
+        active_roles: set[ModelCategory] = set()
+        if services.runs.active:
+            active_roles.update({ModelCategory.CHAT, ModelCategory.VL, ModelCategory.RERANK})
+        if services.jobs.active:
+            active_roles.add(ModelCategory.EMBEDDING)
+        return await services.models.runtime(
+            roles,
+            active_roles=active_roles,
+            worker_timeout_seconds=services.settings.worker_query_idle_seconds,
+        )
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/model-defaults/preflight",
+        response_model=ModelDefaultsPreflight,
+        dependencies=protected,
+    )
+    async def model_defaults_preflight(
+        workspace_id: str, request: ModelDefaultsRequest
+    ) -> ModelDefaultsPreflight:
+        return services.features.model_defaults_preflight(workspace_id, request)
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/model-defaults/apply",
+        response_model=ConfigDocument,
+        dependencies=protected,
+    )
+    async def apply_model_defaults(
+        workspace_id: str,
+        request: ModelDefaultsRequest,
+        response: Response,
+        if_match: Annotated[str | None, Header()] = None,
+    ) -> ConfigDocument:
+        config = services.features.apply_model_defaults(workspace_id, request, if_match)
+        response.headers["ETag"] = f'"{config.etag}"'
+        await services.events.emit(
+            "config.changed",
+            correlation_id=workspace_id,
+            workspace_id=workspace_id,
+            payload={"etag": config.etag, "operation": "model-defaults"},
+        )
+        return config
+
+    @app.post("/v1/models/import/gguf", dependencies=protected)
+    async def import_gguf(
+        file: Annotated[UploadFile, File()],
+        model: Annotated[str, Form(min_length=1, max_length=120)],
+        category: Annotated[ModelCategory, Form()],
+    ) -> StreamingResponse:
+        if category == ModelCategory.RERANK:
+            raise ConflictError("Rerank requires a cross-encoder; GGUF import is unsupported")
+        filename = Path(file.filename or "model.gguf").name
+        if Path(filename).suffix.casefold() != ".gguf":
+            raise ConflictError("Only .gguf files can be imported")
+        maximum = services.settings.model_upload_max_bytes
+        if file.size is not None and file.size > maximum:
+            raise ConflictError(f"GGUF exceeds the configured {maximum}-byte upload limit")
+        import_dir = services.settings.data_dir / "cache" / "model-imports"
+        import_dir.mkdir(parents=True, exist_ok=True)
+        required = (file.size or 1024**3) + 1024**3
+        if shutil.disk_usage(import_dir).free < required:
+            raise ConflictError("Not enough free disk space for a safe GGUF import")
+        path: Path | None = None
+        digest = hashlib.sha256()
+        total = 0
+        magic = b""
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="gguf-", suffix=".part", dir=import_dir, delete=False
+            ) as temporary:
+                path = Path(temporary.name)
+                while chunk := await file.read(8 * 1024**2):
+                    total += len(chunk)
+                    if total > maximum:
+                        raise ConflictError(
+                            f"GGUF exceeds the configured {maximum}-byte upload limit"
+                        )
+                    if not magic:
+                        magic = chunk[:4]
+                    digest.update(chunk)
+                    temporary.write(chunk)
+                temporary.flush()
+            await file.close()
+            if total == 0 or magic != b"GGUF":
+                raise ConflictError("The upload is not a valid GGUF container")
+        except Exception:
+            await file.close()
+            if path is not None:
+                path.unlink(missing_ok=True)
+            raise
+        assert path is not None
+
+        async def stream_import():
+            try:
+                async for line in services.models.import_gguf(
+                    path, filename, model, category, digest.hexdigest()
+                ):
+                    yield line
+            finally:
+                path.unlink(missing_ok=True)
+
+        return StreamingResponse(stream_import(), media_type="application/x-ndjson")
 
     @app.post("/v1/models/pull", dependencies=protected)
     async def pull_model(request: PullModelRequest) -> StreamingResponse:

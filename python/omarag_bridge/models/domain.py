@@ -33,7 +33,7 @@ class BackendMeta(StrictModel):
     api_version: str = "1.0"
     min_client_version: str = "1.0"
     max_client_version: str = "1.x"
-    omarag_version: str = "0.7.0"
+    omarag_version: str = "0.8.0"
     haiku_version: str | None = None
     adapter: str | None = None
     backend_id: str
@@ -248,14 +248,41 @@ class RetrievalExplanation(StrictModel):
     provider_notes: list[str] = Field(default_factory=list)
 
 
+class AnswerCacheStatus(StrEnum):
+    HIT = "hit"
+    MISS = "miss"
+    BYPASS = "bypass"
+
+
+class SourceCheck(StrEnum):
+    VERIFIED = "verified"
+    REVIEWED = "reviewed"
+    INSUFFICIENT = "insufficient"
+
+
+class RunReceipt(StrictModel):
+    """Small, user-facing account of how an answer was produced."""
+
+    session_id: str
+    turn: int = Field(ge=1)
+    cache_status: AnswerCacheStatus
+    total_ms: float = Field(ge=0.0)
+    source_count: int = Field(ge=0)
+    reused_source_count: int = Field(ge=0)
+    new_source_count: int = Field(ge=0)
+    source_check: SourceCheck
+
+
 class RunSnapshot(StrictModel):
     id: str
     workspace_id: str
+    session_id: str
     status: JobStatus
     question: str
     evidence_mode: EvidenceMode
     answer: str = ""
     citations: list[Citation] = Field(default_factory=list)
+    receipt: RunReceipt | None = None
     error: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
@@ -436,6 +463,32 @@ class ModelRuntime(StrictModel):
 
 class ModelRuntimeResponse(StrictModel):
     models: list[ModelRuntime] = Field(default_factory=list)
+    roles: list[ModelRoleRuntime] = Field(default_factory=list)
+    query_worker_state: str = "idle"
+    query_worker_timeout_seconds: float = 0.0
+
+
+class ModelResidency(StrEnum):
+    UNCONFIGURED = "unconfigured"
+    IDLE = "idle"
+    LOADING = "loading"
+    LOADED = "loaded"
+    ACTIVE = "active"
+
+
+class ModelRoleRuntime(StrictModel):
+    role: ModelCategory
+    model: str | None = None
+    provider: str | None = None
+    residency: ModelResidency = ModelResidency.UNCONFIGURED
+    shared_with: list[ModelCategory] = Field(default_factory=list)
+
+
+class ModelDefaultsPreflight(StrictModel):
+    workspace_id: str
+    changes: dict[str, str] = Field(default_factory=dict)
+    requires_reindex: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ModelOperationResult(StrictModel):

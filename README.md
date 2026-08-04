@@ -20,33 +20,36 @@
 ## Your books. Your machine. Answers with receipts.
 
 Oracle of Dædalus is a clean, three-pane terminal workbench for local knowledge. The left sidebar
-moves between Chat, Library and Foundry, the center holds the current task, and the right inspector
-keeps evidence or technical detail in view. Select PDFs or whole folders, let the library index in
+moves between Chat, Library, Models and Settings, the center holds every action and setting, and the
+right inspector keeps sources or read-only technical detail in view. Select PDFs or whole folders, let the library index in
 the background, then ask questions in plain language. Every answer stays connected to its
 evidence: title, page, excerpt, layout position and—where available—the original figure or table.
 
 - **Library instead of file pile.** Create focused libraries, watch indexing progress, tag and
   filter documents, retry failures and safely remove or restore material.
-- **Sources you can inspect.** Open a citation directly at the matching PDF page. Evidence
-  previews highlight the original area; up to four relevant visual sources can sit beside an
-  answer.
+- **Sources you can inspect.** Select every citation and page with arrows or the mouse, open the
+  original PDF at the exact page, or show a lazily rendered preview with highlighted anchors.
 - **Structure-aware reading.** Docling preserves headings, paragraphs, lists and tables so chunks
   follow the document rather than arbitrary character counts.
 - **Books are works, not filenames.** Import review shows detected title, author, edition and ISBN;
   Oracle keeps immutable originals and searches the newest active edition unless you choose one.
 - **Large-book friendly.** Long PDFs are processed in bounded page segments. There is no product
   limit on file size or page count. Interrupted books continue at the last committed segment.
-- **Fast on the second pass.** Content fingerprints detect duplicates and a bounded conversion
-  cache reuses Docling output. Native-text pages skip OCR; scanned ranges receive it selectively.
+- **Fast on the second pass.** Content fingerprints detect duplicates, a bounded conversion cache
+  reuses Docling output and exact repeat questions reuse a generation-bound answer. Any book or
+  settings change invalidates it automatically.
 - **Retrieval you can audit.** The Retrieval Inspector shows ranked chunks, scores, pages and
   end-to-end search timing without reaching into private Haiku internals.
+- **Answers with a receipt.** Conversation turns stay connected. Source shows whether an answer was
+  fresh or safely reused, how many sources were checked, and which evidence is known or new.
 - **Quality you can measure.** Reproducible Silver cases compare FTS, vector and hybrid retrieval
   with Recall@5/10, MRR, nDCG and correct-page hit rate.
 - **Strict means strict.** Stable evidence IDs, source-only prompting, technical-token validation
   and a defined refusal prevent unsupported numbers, units and standards from slipping through.
-- **A model foundry for the machine you own.** Browse Chat, VL, Embedding and Rerank roles; compare
-  downloads and popularity; choose quantization; or install one of three hardware-matched model
-  stacks.
+- **Models for the machine you own.** Install and activate a Fast, Balanced or Quality stack in one
+  step; browse Chat, VL, Embedding and Rerank roles; or add an Ollama ID or local GGUF.
+- **The machine stays visible.** A compact hardware rail shows CPU, RAM, VRAM and the configured,
+  loaded or active model for every role without opening another screen.
 - **Designed not to eat the laptop.** Only one heavy operation runs at a time, chat gets priority
   before the next indexing segment, and model residency can be temporary. Systemd and Docker add
   hard memory ceilings.
@@ -60,12 +63,12 @@ evidence: title, page, excerpt, layout position and—where available—the orig
 
 | Add knowledge | Hardware-matched models |
 |---|---|
-| [![PDF and folder browser](docs/screenshots/knowledge-browser.png)](docs/screenshots/knowledge-browser.png) | [![Model foundry](docs/screenshots/model-foundry.png)](docs/screenshots/model-foundry.png) |
-| Select several PDFs or folders with `Space`, review once, then index. | Compare roles, memory fit, quantization and three recommended stacks. |
+| [![PDF and folder browser](docs/screenshots/knowledge-browser.png)](docs/screenshots/knowledge-browser.png) | [![Models and presets](docs/screenshots/model-foundry.png)](docs/screenshots/model-foundry.png) |
+| Select several PDFs or folders with `Space`, review once, then index. | Install Fast, Balanced or Quality, or tune the four model roles yourself. |
 
-| Keyboard and mouse help |
-|---|
-| [![Keyboard and mouse help](docs/screenshots/keyboard-and-mouse.png)](docs/screenshots/keyboard-and-mouse.png) |
+| Keyboard and mouse help | Fourteen local themes |
+|---|---|
+| [![Keyboard and mouse help](docs/screenshots/keyboard-and-mouse.png)](docs/screenshots/keyboard-and-mouse.png) | [![Theme browser](docs/screenshots/themes.png)](docs/screenshots/themes.png) |
 
 ## Start in one command
 
@@ -96,8 +99,8 @@ The AppImage is the small console client. It connects to the daemon installed ab
 Docker-hosted daemon; it intentionally does not bundle Python, Haiku, models or your libraries.
 
 ```bash
-chmod +x Oracle-of-Daedalus-0.7.0-x86_64.AppImage
-./Oracle-of-Daedalus-0.7.0-x86_64.AppImage
+chmod +x Oracle-of-Daedalus-0.8.0-x86_64.AppImage
+./Oracle-of-Daedalus-0.8.0-x86_64.AppImage
 ```
 
 It contains GitHub zsync update metadata, so `AppImageUpdate` can apply binary-delta updates when
@@ -156,7 +159,7 @@ configure a remote provider. The default library profile does none of those duri
 Oracle keeps operational metadata in SQLite and lets **Vanilla Haiku RAG** remain the sole owner
 of the vector database. It does not patch or fork Haiku's retrieval behavior.
 
-## Release 0.7 boundaries
+## Release 0.8 boundaries
 
 - Linux x86_64 is the supported packaged platform.
 - The backend is local-first. Authenticated citation previews now work across the API; opening the
@@ -167,7 +170,7 @@ of the vector database. It does not patch or fork Haiku's retrieval behavior.
   cannot consume the remaining RAM or VRAM.
 
 Found a sharp edge? [Open an issue](https://github.com/Baulehrer/oracle-of-daedalus/issues) with
-the visible error and the `Activity` entry—never attach your private PDFs or auth token.
+the visible error and the `Indexing` entry—never attach your private PDFs or auth token.
 
 The TUI layout and quiet aqua-slate direction are inspired by
 [SOAP](https://github.com/GhifariArsa/soap); Oracle's interaction model and implementation are its
