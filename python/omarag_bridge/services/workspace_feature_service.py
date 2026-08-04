@@ -14,7 +14,9 @@ from ..adapters.base import HaikuAdapter
 from ..models.api import CreateSourceRequest
 from ..models.domain import (
     BackupSummary,
+    BookMetadata,
     ConfigDocument,
+    DocumentQuality,
     DocumentSummary,
     JobStatus,
     QualityReport,
@@ -56,6 +58,9 @@ class WorkspaceFeatureService:
         self.workspaces.get(workspace_id)
         hidden = self._hidden_documents(workspace_id)
         restored = self._restored_documents(workspace_id)
+        records = {
+            item["logical_document_id"]: item for item in self.store.book_records(workspace_id)
+        }
         documents: list[DocumentSummary] = []
         for job in self.store.list_jobs(workspace_id):
             if job.kind != "ingest" or job.status != JobStatus.COMPLETED:
@@ -69,10 +74,13 @@ class WorkspaceFeatureService:
                     result.get("document_id") or hashlib.sha256(location.encode()).hexdigest()[:20]
                 )
                 current_result = restored.get(document_id, result)
+                record = records.get(document_id, {})
+                book_payload = record.get("metadata") or current_result.get("book_metadata")
+                quality_payload = record.get("quality") or current_result.get("quality")
                 documents.append(
                     DocumentSummary(
                         id=document_id,
-                        title=Path(location).name or location,
+                        title=(book_payload or {}).get("title") or Path(location).name or location,
                         source=location,
                         segment_document_ids=[
                             str(item) for item in current_result.get("segment_document_ids", [])
@@ -80,6 +88,22 @@ class WorkspaceFeatureService:
                         page_count=current_result.get("page_count"),
                         parser_id="docling",
                         imported_at=job.updated_at,
+                        fingerprint=current_result.get("fingerprint"),
+                        generation_id=current_result.get("generation_id"),
+                        cache_status=current_result.get("cache_status"),
+                        pipeline_stats=current_result.get("pipeline_stats", {}),
+                        managed_source=record.get("managed_source")
+                        or current_result.get("managed_source"),
+                        book=(BookMetadata.model_validate(book_payload) if book_payload else None),
+                        quality=(
+                            DocumentQuality.model_validate(quality_payload)
+                            if quality_payload
+                            else None
+                        ),
+                        pipeline_version=str(
+                            record.get("pipeline_version")
+                            or current_result.get("pipeline_version", "textbook-v1")
+                        ),
                     )
                 )
         unique: dict[str, DocumentSummary] = {}
@@ -157,14 +181,19 @@ class WorkspaceFeatureService:
             item.id: item for item in self._documents(workspace_id, include_hidden=True)
         }
         document = all_documents.get(document_id)
-        if document is None or not Path(document.source).is_file():
+        restore_source = document.managed_source if document else None
+        if document is None or not restore_source or not Path(restore_source).is_file():
             raise ConflictError("Original PDF is unavailable; restore cannot continue")
         result = await self.adapter.ingest(
             self.workspaces.database_path(workspace_id),
-            document.source,
+            restore_source,
             parser_id=document.parser_id,
             processing_profile=self.workspaces.get(workspace_id).processing_profile,
+            metadata=document.book,
+            original_source=document.source,
         )
+        fingerprint = document.fingerprint or _sha256_file(Path(restore_source))
+        self.store.upsert_document(workspace_id, document.source, fingerprint, result)
         restored = self._restored_documents(workspace_id)
         restored[document_id] = result
         self._write_restored_documents(workspace_id, restored)
@@ -242,6 +271,16 @@ class WorkspaceFeatureService:
             issues.append("Der Workspace enthaelt noch keine indexierten Dokumente.")
         if failed:
             issues.append(f"{failed} Auftrag/Auftraege sind fehlgeschlagen.")
+        for document in documents:
+            if document.quality is not None:
+                issues.extend(f"{document.title}: {issue}" for issue in document.quality.issues)
+        latest_evaluation = self.store.latest_evaluation(workspace_id)
+        variants = (latest_evaluation or {}).get("variants", {})
+        retrieval_metrics = {
+            f"{variant}.{metric}": float(value)
+            for variant, metrics in variants.items()
+            for metric, value in metrics.items()
+        }
         return QualityReport(
             workspace_id=workspace_id,
             status="ok" if not issues else "warning",
@@ -249,6 +288,8 @@ class WorkspaceFeatureService:
             completed_imports=completed,
             failed_jobs=failed,
             issues=issues,
+            latest_evaluation_id=(latest_evaluation or {}).get("id"),
+            retrieval_metrics=retrieval_metrics,
         )
 
     def config(self, workspace_id: str) -> ConfigDocument:

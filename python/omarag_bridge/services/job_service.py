@@ -2,19 +2,30 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from ..adapters.base import HaikuAdapter
 from ..models.api import IngestRequest
-from ..models.domain import JobSnapshot, JobStatus
+from ..models.domain import BookMetadata, JobSnapshot, JobStatus
 from ..models.errors import ConflictError, OmaRagError, ReadOnlyError
 from ..store import StateStore
 from .event_service import EventService
 from .resource_coordinator import ResourceCoordinator
+from .textbook_service import archive_source, file_sha256
 from .workspace_service import WorkspaceService
 
 TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED}
+
+
+def _source_fingerprint(source: str) -> str:
+    path = Path(source).expanduser()
+    if path.is_file():
+        return file_sha256(path)
+    import hashlib
+
+    return hashlib.sha256(source.encode()).hexdigest()
 
 
 class JobService:
@@ -99,6 +110,59 @@ class JobService:
                 for index, source in enumerate(sources):
                     if not await self._continue(job_id):
                         return
+                    completed = self.store.checkpoint_data(job_id, f"source-result-{index}")
+                    if completed is not None:
+                        imported.append(completed)
+                        continue
+                    raw_source = str(source["path"])
+                    candidate_path = Path(raw_source).expanduser()
+                    source_path = (
+                        str(candidate_path.resolve()) if candidate_path.exists() else raw_source
+                    )
+                    fingerprint = await asyncio.to_thread(_source_fingerprint, source_path)
+                    provided_fingerprint = source.get("fingerprint")
+                    if provided_fingerprint and provided_fingerprint != fingerprint:
+                        raise ConflictError(
+                            "Source changed after import preflight",
+                            details={"source": source_path},
+                        )
+                    initial = self.store.checkpoint_data(job_id, f"source-init-{index}")
+                    generation_id = str(
+                        (initial or {}).get("generation_id") or f"gen-{uuid4().hex[:16]}"
+                    )
+                    if initial is None:
+                        self.store.checkpoint(
+                            job_id,
+                            f"source-init-{index}",
+                            {
+                                "source": source_path,
+                                "fingerprint": fingerprint,
+                                "generation_id": generation_id,
+                            },
+                        )
+                    elif initial.get("fingerprint") != fingerprint:
+                        raise ConflictError(
+                            "Source changed after this import job was started",
+                            details={"source": source_path},
+                        )
+                    duplicate = self.store.document_by_fingerprint(job.workspace_id, fingerprint)
+                    if duplicate is not None:
+                        policy = str(current.payload.get("duplicate_policy", "review"))
+                        if policy == "review":
+                            raise ConflictError(
+                                "This content is already indexed",
+                                details={
+                                    "source": source_path,
+                                    "existing_source": duplicate["source_path"],
+                                    "fingerprint": fingerprint,
+                                },
+                            )
+                        result = dict(duplicate["result"])
+                        result["duplicate"] = True
+                        result["cache_status"] = "duplicate"
+                        imported.append(result)
+                        self.store.checkpoint(job_id, f"source-result-{index}", result)
+                        continue
                     progress = index / total
                     self.store.update_job(
                         job_id, progress=progress, phase="ingest", checkpoint=f"source-{index}"
@@ -117,9 +181,25 @@ class JobService:
                             "checkpoint": f"source-{index}",
                         },
                     )
+                    metadata_payload = source.get("metadata")
+                    book_metadata = (
+                        BookMetadata.model_validate(metadata_payload)
+                        if metadata_payload is not None
+                        else None
+                    )
+                    managed_source = source_path
+                    if Path(source_path).is_file():
+                        managed_source = str(
+                            await asyncio.to_thread(
+                                archive_source,
+                                Path(self.workspaces.get(job.workspace_id).path),
+                                Path(source_path),
+                                fingerprint,
+                            )
+                        )
                     result = await self.adapter.ingest(
                         self.workspaces.database_path(job.workspace_id),
-                        source["path"],
+                        managed_source,
                         parser_id=str(current.payload.get("parser_id", "auto")),
                         processing_profile=str(
                             current.payload.get("processing_profile", "default")
@@ -128,7 +208,22 @@ class JobService:
                         before_segment=lambda start, end, pages, source_index=index: (
                             self._before_segment(job_id, source_index, total, start, end, pages)
                         ),
+                        generation_id=generation_id,
+                        document_fingerprint=fingerprint,
+                        resume_segments=self.store.list_segments(job_id, index),
+                        on_segment=lambda segment, source_index=index: self._segment_committed(
+                            job_id, source_index, segment
+                        ),
+                        segment_sizer=self.resources.segment_pages,
+                        metadata=book_metadata,
+                        original_source=source_path,
                     )
+                    result.setdefault("fingerprint", fingerprint)
+                    result.setdefault("generation_id", generation_id)
+                    result.setdefault("original_source", source_path)
+                    result.setdefault("managed_source", managed_source)
+                    self.store.upsert_document(job.workspace_id, source_path, fingerprint, result)
+                    self.store.checkpoint(job_id, f"source-result-{index}", result)
                     imported.append(result)
                 self.store.update_job(
                     job_id,
@@ -154,6 +249,40 @@ class JobService:
             except Exception as exc:  # daemon boundary: normalize provider errors
                 await self._fail(job, "INGEST_FAILED", str(exc), {}, True)
 
+    async def _segment_committed(
+        self, job_id: str, source_index: int, segment: dict[str, Any]
+    ) -> None:
+        self.store.record_segment(job_id, source_index, segment)
+        metadata = segment.get("metadata", {})
+        cache_path = metadata.get("cache_path")
+        cache_key = metadata.get("cache_key")
+        if cache_path and cache_key:
+            path = Path(str(cache_path))
+            if path.exists():
+                self.store.touch_cache(
+                    str(cache_key),
+                    str(path),
+                    path.stat().st_size,
+                    {
+                        "job_id": job_id,
+                        "source_index": source_index,
+                        "page_start": segment["page_start"],
+                        "page_end": segment["page_end"],
+                    },
+                )
+        await self.events.emit(
+            "job.segment.committed",
+            correlation_id=job_id,
+            workspace_id=self.store.get_job(job_id).workspace_id,
+            job_id=job_id,
+            payload={
+                "source_index": source_index,
+                "page_start": segment["page_start"],
+                "page_end": segment["page_end"],
+                "cache_hit": bool(metadata.get("cache_hit")),
+            },
+        )
+
     async def _before_segment(
         self,
         job_id: str,
@@ -172,6 +301,21 @@ class JobService:
             progress=progress,
             phase="ingest",
             checkpoint=checkpoint,
+            progress_detail={
+                "current_document": str(source_index + 1),
+                "page_start": start + 1,
+                "page_end": end,
+                "total_pages": pages,
+                "cache_hits": sum(
+                    bool(item.get("metadata", {}).get("cache_hit"))
+                    for item in self.store.list_segments(job_id, source_index)
+                ),
+                "recovered_segments": sum(
+                    bool(item.get("metadata", {}).get("recovered"))
+                    for item in self.store.list_segments(job_id, source_index)
+                ),
+                "memory_state": self.resources.memory().state,
+            },
         )
         self.store.checkpoint(
             job_id,
@@ -252,6 +396,12 @@ class JobService:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        database = self.workspaces.database_path(job.workspace_id)
+        for source_index, _source in enumerate(job.payload.get("sources", [])):
+            for segment in reversed(self.store.list_segments(job_id, source_index)):
+                with suppress(Exception):
+                    await self.adapter.delete_document(database, segment["document_id"])
+        self.store.clear_segments(job_id)
         await self.events.emit(
             "job.cancelled",
             correlation_id=job_id,

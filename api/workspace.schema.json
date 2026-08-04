@@ -59,8 +59,25 @@
       "default": "strict"
     },
     "haiku_compatible_range": {
-      "default": ">=0.70,<0.71",
+      "default": "latest-gated",
       "title": "Haiku Compatible Range",
+      "type": "string"
+    },
+    "haiku_last_verified": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Haiku Last Verified"
+    },
+    "haiku_update_policy": {
+      "default": "latest-gated",
+      "title": "Haiku Update Policy",
       "type": "string"
     },
     "id": {

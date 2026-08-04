@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream::BoxStream};
 use omarag_domain::{
-    ApiErrorResponse, BackendMeta, BackupSummary, ConfigDocument, CreateSource, CreateWorkspace,
-    DocumentSummary, DomainEvent, EventSubscription, HealthReport, IdempotentResult, IngestRequest,
-    JobId, JobSnapshot, OmaRagError, OmaResult, QualityReport, RunId, RunRequest, RunSnapshot,
-    SearchHit, SearchRequest, SourceDefinition, UpdateConfig, WorkspaceId, WorkspaceManifest,
-    WorkspaceSummary,
+    ApiErrorResponse, BackendMeta, BackupSummary, CommitImportRequest, ConfigDocument,
+    CreateSource, CreateWorkspace, DocumentSummary, DomainEvent, EventSubscription, HealthReport,
+    IdempotentResult, ImportPreflightBatch, IngestRequest, JobId, JobSnapshot, OmaRagError,
+    OmaResult, PreflightImportRequest, QualityReport, RetrievalExplanation, RunId, RunRequest,
+    RunSnapshot, SearchHit, SearchRequest, SourceDefinition, UpdateConfig, WorkspaceId,
+    WorkspaceManifest, WorkspaceSummary,
 };
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use reqwest_eventsource::{Event, EventSource};
@@ -46,11 +47,34 @@ pub trait OmaRagClient: Send + Sync {
         request: IngestRequest,
         idempotency_key: String,
     ) -> OmaResult<IdempotentResult>;
+    async fn preflight_import(
+        &self,
+        workspace: WorkspaceId,
+        request: PreflightImportRequest,
+    ) -> OmaResult<ImportPreflightBatch>;
+    async fn commit_import(
+        &self,
+        workspace: WorkspaceId,
+        request: CommitImportRequest,
+        idempotency_key: String,
+    ) -> OmaResult<IdempotentResult>;
     async fn search(
         &self,
         workspace: WorkspaceId,
         request: SearchRequest,
     ) -> OmaResult<Vec<SearchHit>>;
+    async fn explain_search(
+        &self,
+        workspace: WorkspaceId,
+        request: SearchRequest,
+    ) -> OmaResult<RetrievalExplanation>;
+    async fn citation_preview(
+        &self,
+        workspace: WorkspaceId,
+        run_id: RunId,
+        citation_index: usize,
+        max_px: u32,
+    ) -> OmaResult<Vec<u8>>;
     async fn start_run(
         &self,
         workspace: WorkspaceId,
@@ -313,6 +337,38 @@ impl OmaRagClient for HttpOmaRagClient {
         self.json(response).await
     }
 
+    async fn preflight_import(
+        &self,
+        workspace: WorkspaceId,
+        request: PreflightImportRequest,
+    ) -> OmaResult<ImportPreflightBatch> {
+        self.send_json(
+            Method::POST,
+            &format!("/v1/workspaces/{workspace}/imports/preflight"),
+            &request,
+        )
+        .await
+    }
+
+    async fn commit_import(
+        &self,
+        workspace: WorkspaceId,
+        request: CommitImportRequest,
+        idempotency_key: String,
+    ) -> OmaResult<IdempotentResult> {
+        let response = self
+            .request(
+                Method::POST,
+                &format!("/v1/workspaces/{workspace}/imports/commit"),
+            )?
+            .header("Idempotency-Key", idempotency_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| OmaRagError::Transport(error.to_string()))?;
+        self.json(response).await
+    }
+
     async fn search(
         &self,
         workspace: WorkspaceId,
@@ -324,6 +380,46 @@ impl OmaRagClient for HttpOmaRagClient {
             &request,
         )
         .await
+    }
+
+    async fn explain_search(
+        &self,
+        workspace: WorkspaceId,
+        request: SearchRequest,
+    ) -> OmaResult<RetrievalExplanation> {
+        self.send_json(
+            Method::POST,
+            &format!("/v1/workspaces/{workspace}/search/explain"),
+            &request,
+        )
+        .await
+    }
+
+    async fn citation_preview(
+        &self,
+        workspace: WorkspaceId,
+        run_id: RunId,
+        citation_index: usize,
+        max_px: u32,
+    ) -> OmaResult<Vec<u8>> {
+        let response = self
+            .request(
+                Method::GET,
+                &format!(
+                    "/v1/workspaces/{workspace}/runs/{run_id}/citations/{citation_index}/preview?max_px={max_px}"
+                ),
+            )?
+            .send()
+            .await
+            .map_err(|error| OmaRagError::Transport(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|error| OmaRagError::Transport(error.to_string()))
     }
 
     async fn start_run(
@@ -501,6 +597,23 @@ impl OmaRagClient for MockOmaRagClient {
         Err(OmaRagError::Protocol("Nicht im Mock konfiguriert".into()))
     }
 
+    async fn preflight_import(
+        &self,
+        _: WorkspaceId,
+        _: PreflightImportRequest,
+    ) -> OmaResult<ImportPreflightBatch> {
+        Err(OmaRagError::Protocol("Nicht im Mock konfiguriert".into()))
+    }
+
+    async fn commit_import(
+        &self,
+        _: WorkspaceId,
+        _: CommitImportRequest,
+        _: String,
+    ) -> OmaResult<IdempotentResult> {
+        Err(OmaRagError::Protocol("Nicht im Mock konfiguriert".into()))
+    }
+
     async fn delete_workspace(&self, id: WorkspaceId, _: bool) -> OmaResult<()> {
         self.state
             .write()
@@ -538,6 +651,8 @@ impl OmaRagClient for MockOmaRagClient {
             completed_imports: 0,
             failed_jobs: 0,
             issues: Vec::new(),
+            latest_evaluation_id: None,
+            retrieval_metrics: Default::default(),
             generated_at: "now".into(),
         })
     }
@@ -589,6 +704,33 @@ impl OmaRagClient for MockOmaRagClient {
 
     async fn search(&self, _: WorkspaceId, _: SearchRequest) -> OmaResult<Vec<SearchHit>> {
         Ok(Vec::new())
+    }
+
+    async fn explain_search(
+        &self,
+        _: WorkspaceId,
+        request: SearchRequest,
+    ) -> OmaResult<RetrievalExplanation> {
+        Ok(RetrievalExplanation {
+            query: request.query,
+            candidates: Vec::new(),
+            ranked: Vec::new(),
+            timing: omarag_domain::RetrievalTiming {
+                search_ms: 0.0,
+                total_ms: 0.0,
+            },
+            provider_notes: Vec::new(),
+        })
+    }
+
+    async fn citation_preview(
+        &self,
+        _: WorkspaceId,
+        _: RunId,
+        _: usize,
+        _: u32,
+    ) -> OmaResult<Vec<u8>> {
+        Err(OmaRagError::Protocol("Nicht im Mock konfiguriert".into()))
     }
 
     async fn start_run(&self, _: WorkspaceId, _: RunRequest) -> OmaResult<RunSnapshot> {
@@ -670,7 +812,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.5.0".into(),
+            omarag_version: "0.7.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "mock".into(),

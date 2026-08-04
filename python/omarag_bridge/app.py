@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import secrets
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,10 +14,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from . import __version__
-from .adapters.haiku_v070 import HaikuV070Adapter
+from .adapters.base import HaikuAdapter
+from .adapters.haiku_v070 import document_filter_for_ids
+from .adapters.isolated import IsolatedHaikuAdapter, WorkerLimits
 from .config import Settings
 from .models.api import (
     CloneWorkspaceRequest,
+    CommitImportRequest,
     ConfigUpdateRequest,
     CreateSourceRequest,
     CreateWorkspaceRequest,
@@ -25,12 +28,16 @@ from .models.api import (
     DeleteWorkspaceRequest,
     ErrorBody,
     ErrorResponse,
+    GenerateEvaluationRequest,
     IdempotentResult,
     IngestRequest,
     LoadModelRequest,
+    PatchBookMetadataRequest,
     PatchWorkspaceRequest,
+    PreflightImportRequest,
     PullModelRequest,
     RestoreBackupRequest,
+    RunEvaluationRequest,
     RunRequest,
     SearchRequest,
     UnloadModelRequest,
@@ -38,10 +45,13 @@ from .models.api import (
 from .models.domain import (
     BackendMeta,
     BackupSummary,
+    BookMetadata,
     ConfigDocument,
     DocumentSummary,
+    EvaluationReport,
     HardwareProfile,
     HealthReport,
+    ImportPreflightBatch,
     JobSnapshot,
     ModelCatalogResponse,
     ModelCategory,
@@ -50,6 +60,8 @@ from .models.domain import (
     ModelSource,
     ParserDefinition,
     QualityReport,
+    RetrievalExplanation,
+    RetrievalTiming,
     RunSnapshot,
     SearchHit,
     SourceDefinition,
@@ -57,12 +69,16 @@ from .models.domain import (
     WorkspaceSummary,
 )
 from .models.errors import ConflictError, OmaRagError
+from .preview import render_citation_preview
+from .runtime import configure_process_environment
 from .services import (
+    EvaluationService,
     EventService,
     JobService,
     ModelService,
     ResourceCoordinator,
     RunService,
+    TextbookService,
     WorkspaceFeatureService,
     WorkspaceService,
 )
@@ -73,7 +89,7 @@ from .store import StateStore
 class Services:
     settings: Settings
     store: StateStore
-    adapter: HaikuV070Adapter
+    adapter: HaikuAdapter
     workspaces: WorkspaceService
     events: EventService
     jobs: JobService
@@ -81,6 +97,8 @@ class Services:
     resources: ResourceCoordinator
     features: WorkspaceFeatureService
     models: ModelService
+    textbooks: TextbookService
+    evaluations: EvaluationService
     token: str | None
     token_path: Path | None
 
@@ -110,14 +128,38 @@ def build_services(settings: Settings) -> Services:
     cache_dir.mkdir(parents=True, exist_ok=True)
     # Keep model/runtime caches inside OmaRag's writable data area. This also
     # makes AppImage, service and container behavior independent of $HOME.
-    os.environ.setdefault("HF_HOME", str(cache_dir / "huggingface"))
-    os.environ.setdefault("LOGFIRE_IGNORE_NO_CONFIG", "1")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    os.environ.setdefault("OMP_NUM_THREADS", "6")
-    os.environ.setdefault("MKL_NUM_THREADS", "6")
-    os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+    configure_process_environment(cache_dir)
     store = StateStore(settings.state_database)
-    adapter = HaikuV070Adapter()
+    mib = 1024**2
+    adapter = IsolatedHaikuAdapter(
+        api_limits=WorkerLimits(
+            settings.api_memory_high_mb * mib,
+            settings.api_memory_max_mb * mib,
+            settings.api_swap_max_mb * mib,
+            settings.api_tasks_max,
+        ),
+        import_limits=WorkerLimits(
+            settings.worker_import_memory_high_mb * mib,
+            settings.worker_import_memory_max_mb * mib,
+            settings.worker_import_swap_max_mb * mib,
+            settings.worker_tasks_max,
+        ),
+        query_limits=WorkerLimits(
+            settings.worker_query_memory_high_mb * mib,
+            settings.worker_query_memory_max_mb * mib,
+            settings.worker_query_swap_max_mb * mib,
+            settings.worker_tasks_max,
+        ),
+        utility_limits=WorkerLimits(
+            settings.worker_utility_memory_high_mb * mib,
+            settings.worker_utility_memory_max_mb * mib,
+            settings.worker_utility_swap_max_mb * mib,
+            settings.worker_tasks_max,
+        ),
+        query_idle_seconds=settings.worker_query_idle_seconds,
+        ollama_url=settings.ollama_url,
+        unload_ollama_models=settings.unload_ollama_models_on_worker_exit,
+    )
     workspaces = WorkspaceService(settings.workspaces_dir, store, settings.ollama_url)
     events = EventService(store, settings.event_poll_seconds, settings.event_keepalive_seconds)
     token, token_path = _resolve_bearer_token(settings)
@@ -126,6 +168,8 @@ def build_services(settings: Settings) -> Services:
     runs = RunService(store, workspaces, events, adapter, resources)
     features = WorkspaceFeatureService(store, workspaces, adapter)
     models = ModelService(settings)
+    textbooks = TextbookService(store, workspaces, adapter)
+    evaluations = EvaluationService(store, workspaces, adapter)
     return Services(
         settings,
         store,
@@ -137,6 +181,8 @@ def build_services(settings: Settings) -> Services:
         resources,
         features,
         models,
+        textbooks,
+        evaluations,
         token,
         token_path,
     )
@@ -151,6 +197,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await services.jobs.shutdown()
         await services.runs.shutdown()
+        shutdown_adapter = getattr(services.adapter, "shutdown", None)
+        if shutdown_adapter is not None:
+            await shutdown_adapter()
         services.store.close()
 
     app = FastAPI(
@@ -438,6 +487,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         job, reused = await services.jobs.start_ingest(workspace_id, request, idempotency_key)
         return IdempotentResult(id=job.id, reused=reused)
 
+    @app.post(
+        "/v1/workspaces/{workspace_id}/imports/preflight",
+        response_model=ImportPreflightBatch,
+        dependencies=protected,
+    )
+    async def preflight_import(
+        workspace_id: str, request: PreflightImportRequest
+    ) -> ImportPreflightBatch:
+        return await asyncio.to_thread(services.textbooks.preflight, workspace_id, request.sources)
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/imports/commit",
+        response_model=IdempotentResult,
+        status_code=202,
+        dependencies=protected,
+    )
+    async def commit_import(
+        workspace_id: str,
+        request: CommitImportRequest,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> IdempotentResult:
+        sources = await asyncio.to_thread(
+            services.textbooks.validate_commit,
+            workspace_id,
+            request.preflight_id,
+            request.sources,
+        )
+        ingest_request = IngestRequest(
+            sources=sources,
+            processing_profile=request.processing_profile,
+            duplicate_policy=request.duplicate_policy,
+            validity_policy=request.validity_policy,
+        )
+        job, reused = await services.jobs.start_ingest(
+            workspace_id, ingest_request, idempotency_key
+        )
+        return IdempotentResult(id=job.id, reused=reused)
+
     @app.get(
         "/v1/workspaces/{workspace_id}/documents",
         response_model=list[DocumentSummary],
@@ -445,6 +532,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def list_documents(workspace_id: str) -> list[DocumentSummary]:
         return services.features.documents(workspace_id)
+
+    @app.patch(
+        "/v1/workspaces/{workspace_id}/documents/{document_id}/metadata",
+        response_model=BookMetadata,
+        dependencies=protected,
+    )
+    async def patch_book_metadata(
+        workspace_id: str,
+        document_id: str,
+        request: PatchBookMetadataRequest,
+    ) -> BookMetadata:
+        async with services.resources.indexing():
+            await services.textbooks.update_metadata(workspace_id, document_id, request.metadata)
+        await services.events.emit(
+            "document.changed",
+            correlation_id=document_id,
+            workspace_id=workspace_id,
+            payload={"operation": "metadata-updated", "document_id": document_id},
+        )
+        return request.metadata
 
     @app.delete(
         "/v1/workspaces/{workspace_id}/documents/{document_id}",
@@ -542,6 +649,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def quality_report(workspace_id: str) -> QualityReport:
         return services.features.quality(workspace_id)
 
+    @app.post(
+        "/v1/workspaces/{workspace_id}/evaluations/generate",
+        response_model=EvaluationReport,
+        dependencies=protected,
+    )
+    async def generate_evaluation(
+        workspace_id: str, request: GenerateEvaluationRequest
+    ) -> EvaluationReport:
+        return await asyncio.to_thread(services.evaluations.generate, workspace_id, request.limit)
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/evaluations/run",
+        response_model=EvaluationReport,
+        dependencies=protected,
+    )
+    async def run_evaluation(workspace_id: str, request: RunEvaluationRequest) -> EvaluationReport:
+        async with services.resources.chat():
+            return await services.evaluations.run(
+                workspace_id,
+                request.evaluation_id,
+                request.variants,
+                request.top_k,
+            )
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/evaluations/{evaluation_id}",
+        response_model=EvaluationReport,
+        dependencies=protected,
+    )
+    async def get_evaluation(workspace_id: str, evaluation_id: str) -> EvaluationReport:
+        return EvaluationReport.model_validate(
+            services.store.evaluation(workspace_id, evaluation_id)
+        )
+
     @app.get(
         "/v1/workspaces/{workspace_id}/config",
         response_model=ConfigDocument,
@@ -633,10 +774,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def search(workspace_id: str, request: SearchRequest) -> list[SearchHit]:
         services.workspaces.get(workspace_id)
+        document_ids = services.store.resolve_segment_ids(
+            workspace_id, request.filters.active(), request.document_policy
+        )
         async with services.resources.chat():
             return await services.adapter.search(
-                services.workspaces.database_path(workspace_id), request.query, request.limit
+                services.workspaces.database_path(workspace_id),
+                request.query,
+                request.limit,
+                document_filter=document_filter_for_ids(document_ids),
             )
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/search/explain",
+        response_model=RetrievalExplanation,
+        dependencies=protected,
+    )
+    async def explain_search(workspace_id: str, request: SearchRequest) -> RetrievalExplanation:
+        services.workspaces.get(workspace_id)
+        document_ids = services.store.resolve_segment_ids(
+            workspace_id, request.filters.active(), request.document_policy
+        )
+        started = time.perf_counter()
+        async with services.resources.chat():
+            search_started = time.perf_counter()
+            ranked = await services.adapter.search(
+                services.workspaces.database_path(workspace_id),
+                request.query,
+                request.limit,
+                document_filter=document_filter_for_ids(document_ids),
+            )
+            search_ms = (time.perf_counter() - search_started) * 1000
+        total_ms = (time.perf_counter() - started) * 1000
+        return RetrievalExplanation(
+            query=request.query,
+            ranked=ranked,
+            timing=RetrievalTiming(search_ms=search_ms, total_ms=total_ms),
+            provider_notes=[
+                "Vanilla Haiku RAG exposes final hybrid-ranked hits through its public API; "
+                "private candidate stages are intentionally not inspected."
+            ],
+        )
 
     @app.post(
         "/v1/workspaces/{workspace_id}/runs",
@@ -650,6 +828,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/v1/runs/{run_id}", response_model=RunSnapshot, dependencies=protected)
     async def get_run(run_id: str) -> RunSnapshot:
         return services.store.get_run(run_id)
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/runs/{run_id}/citations/{citation_index}/preview",
+        dependencies=protected,
+    )
+    async def citation_preview(
+        workspace_id: str,
+        run_id: str,
+        citation_index: int,
+        max_px: Annotated[int, Query(ge=256, le=2400)] = 1400,
+    ) -> Response:
+        workspace = services.workspaces.get(workspace_id)
+        run = services.store.get_run(run_id)
+        if run.workspace_id != workspace_id:
+            raise ConflictError("Run does not belong to this workspace")
+        if citation_index < 0 or citation_index >= len(run.citations):
+            from .models.errors import NotFoundError
+
+            raise NotFoundError("Citation was not found")
+        payload = await render_citation_preview(
+            run.citations[citation_index],
+            Path(workspace.path) / ".oracle-cache" / "previews",
+            max_px,
+        )
+        return Response(
+            content=payload,
+            media_type="image/png",
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
 
     @app.delete("/v1/runs/{run_id}", response_model=RunSnapshot, dependencies=protected)
     async def cancel_run(run_id: str) -> RunSnapshot:

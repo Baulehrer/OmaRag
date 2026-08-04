@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: ghcr.io/baulehrer/oracle-of-daedalus:0.5.0
+    image: ghcr.io/baulehrer/oracle-of-daedalus:0.7.0
     command:
       - --host
       - 0.0.0.0
@@ -13,6 +13,14 @@ services:
       - ${OMARAG_TOKEN:?OMARAG_TOKEN muss gesetzt sein}
     environment:
       OMARAG_OLLAMA_URL: http://host.docker.internal:11434
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_TRIM_THRESHOLD_: "131072"
+      TOKENIZERS_PARALLELISM: "false"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      OPENBLAS_NUM_THREADS: "4"
+      NUMEXPR_NUM_THREADS: "4"
+      RAYON_NUM_THREADS: "4"
     ports:
       - "127.0.0.1:${OMARAG_PORT:-8765}:8765"
     volumes:
@@ -20,9 +28,9 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
-    mem_limit: 4500m
-    memswap_limit: 5500m
-    cpus: 6.0
+    mem_limit: 10g
+    memswap_limit: 12g
+    cpus: 4.0
     healthcheck:
       test:
         - CMD

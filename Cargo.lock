@@ -1551,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "omarag-app"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "omarag-domain",
  "serde",
@@ -1560,7 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "omarag-cli"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "omarag-client"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "omarag-domain"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "omarag-tui"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",

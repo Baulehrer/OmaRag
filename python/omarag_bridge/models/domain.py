@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -33,7 +33,7 @@ class BackendMeta(StrictModel):
     api_version: str = "1.0"
     min_client_version: str = "1.0"
     max_client_version: str = "1.x"
-    omarag_version: str = "0.5.0"
+    omarag_version: str = "0.7.0"
     haiku_version: str | None = None
     adapter: str | None = None
     backend_id: str
@@ -58,6 +58,65 @@ class EvidenceMode(StrEnum):
     EXPLORE = "explore"
 
 
+class DocumentStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    REFERENCE = "reference"
+
+
+class MetadataProposal(StrictModel):
+    field: str
+    value: Any
+    source: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class BookMetadata(StrictModel):
+    """Confirmed bibliographic identity shared by every Haiku page segment."""
+
+    work_id: str = ""
+    title: str = ""
+    authors: list[str] = Field(default_factory=list)
+    edition_label: str | None = None
+    edition_number: int | None = Field(default=None, ge=1)
+    publication_year: int | None = Field(default=None, ge=1000, le=3000)
+    isbn: list[str] = Field(default_factory=list)
+    language: str = "de"
+    curriculum: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    document_status: DocumentStatus = DocumentStatus.ACTIVE
+    valid_from: date | None = None
+    valid_to: date | None = None
+    confirmed: bool = False
+
+
+class ImportCandidate(StrictModel):
+    id: str
+    source: str
+    fingerprint: str
+    metadata: BookMetadata
+    proposals: list[MetadataProposal] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+
+
+class ImportPreflightBatch(StrictModel):
+    id: str
+    candidates: list[ImportCandidate]
+
+
+class DocumentQuality(StrictModel):
+    score: float = Field(default=1.0, ge=0.0, le=1.0)
+    pages_total: int = 0
+    native_text_pages: int = 0
+    ocr_pages: int = 0
+    chunks: int = 0
+    tables: int = 0
+    formulas: int = 0
+    pictures: int = 0
+    provenance_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    issues: list[str] = Field(default_factory=list)
+
+
 class WorkspaceManifest(StrictModel):
     schema_version: int = 1
     id: str
@@ -66,7 +125,9 @@ class WorkspaceManifest(StrictModel):
     updated_at: datetime = Field(default_factory=utc_now)
     path: str
     read_only: bool = False
-    haiku_compatible_range: str = ">=0.70,<0.71"
+    haiku_compatible_range: str = "latest-gated"
+    haiku_update_policy: str = "latest-gated"
+    haiku_last_verified: str | None = None
     database_schema_version: str = "detected"
     embedding_provider: str = "ollama"
     embedding_model: str = ""
@@ -98,6 +159,16 @@ class JobStatus(StrEnum):
     FAILED = "failed"
 
 
+class JobProgressDetail(StrictModel):
+    current_document: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    total_pages: int | None = None
+    cache_hits: int = 0
+    recovered_segments: int = 0
+    memory_state: str = "ready"
+
+
 class JobSnapshot(StrictModel):
     id: str
     workspace_id: str
@@ -112,6 +183,7 @@ class JobSnapshot(StrictModel):
     updated_at: datetime
     last_event_id: int | None = None
     checkpoint: str | None = None
+    progress_detail: JobProgressDetail | None = None
 
 
 class CitationAnchor(StrictModel):
@@ -131,6 +203,7 @@ class CitationAnchor(StrictModel):
 
 
 class Citation(StrictModel):
+    evidence_id: str | None = None
     chunk_id: str
     chunk_ids: list[str] = Field(default_factory=list)
     document_id: str | None = None
@@ -147,6 +220,8 @@ class Citation(StrictModel):
     excerpt: str
     retrieval_rank: int | None = None
     rerank_score: float | None = None
+    book: BookMetadata | None = None
+    verification_status: str = "unverified"
 
 
 class SearchHit(StrictModel):
@@ -157,6 +232,20 @@ class SearchHit(StrictModel):
     document_id: str | None = None
     document_title: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    search_type: str = "hybrid"
+
+
+class RetrievalTiming(StrictModel):
+    search_ms: float
+    total_ms: float
+
+
+class RetrievalExplanation(StrictModel):
+    query: str
+    candidates: list[SearchHit] = Field(default_factory=list)
+    ranked: list[SearchHit] = Field(default_factory=list)
+    timing: RetrievalTiming
+    provider_notes: list[str] = Field(default_factory=list)
 
 
 class RunSnapshot(StrictModel):
@@ -182,6 +271,14 @@ class DocumentSummary(StrictModel):
     parser_id: str = "docling"
     status: str = "indexed"
     imported_at: datetime
+    fingerprint: str | None = None
+    generation_id: str | None = None
+    cache_status: str | None = None
+    pipeline_stats: dict[str, Any] = Field(default_factory=dict)
+    managed_source: str | None = None
+    book: BookMetadata | None = None
+    quality: DocumentQuality | None = None
+    pipeline_version: str = "textbook-v1"
 
 
 class SourceDefinition(StrictModel):
@@ -210,7 +307,28 @@ class QualityReport(StrictModel):
     completed_imports: int
     failed_jobs: int
     issues: list[str] = Field(default_factory=list)
+    latest_evaluation_id: str | None = None
+    retrieval_metrics: dict[str, float] = Field(default_factory=dict)
     generated_at: datetime = Field(default_factory=utc_now)
+
+
+class EvaluationCase(StrictModel):
+    id: str
+    question: str
+    category: str = "section-location"
+    expected_chunk_id: str
+    expected_document_id: str
+    expected_pages: list[int] = Field(default_factory=list)
+    origin: str = "silver-structure"
+    reviewed: bool = False
+
+
+class EvaluationReport(StrictModel):
+    id: str
+    workspace_id: str
+    cases: list[EvaluationCase] = Field(default_factory=list)
+    variants: dict[str, dict[str, float]] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class BackupSummary(StrictModel):

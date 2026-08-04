@@ -2,7 +2,7 @@
 set -eu
 
 REPOSITORY=${ORACLE_REPOSITORY:-Baulehrer/oracle-of-daedalus}
-VERSION=0.5.0
+VERSION=0.7.0
 PREFIX=${ORACLE_PREFIX:-"$HOME/.local"}
 INSTALL_SERVICE=1
 INSTALL_UPDATER=1
@@ -29,7 +29,7 @@ done
 
 case "$(uname -m)" in
     x86_64|amd64) ARCH=x86_64 ;;
-    *) printf 'Release 0.5 supports x86_64 Linux only.\n' >&2; exit 1 ;;
+    *) printf 'Release 0.7 supports x86_64 Linux only.\n' >&2; exit 1 ;;
 esac
 
 TAG="v$VERSION"
@@ -37,7 +37,14 @@ BASE_URL=${ORACLE_BASE_URL:-"https://github.com/$REPOSITORY/releases/download/$T
 ARCHIVE="oracle-of-daedalus-$VERSION-linux-$ARCH.tar.gz"
 WHEEL="omarag_bridge-$VERSION-py3-none-any.whl"
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oracle-install.XXXXXX")
-trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+CANDIDATE_VENV=
+cleanup() {
+    rm -rf "$WORK_DIR"
+    if [ -n "$CANDIDATE_VENV" ] && [ -d "$CANDIDATE_VENV" ]; then
+        rm -rf "$CANDIDATE_VENV"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
 
 printf 'Oracle of Dædalus %s -> %s\n' "$VERSION" "$PREFIX"
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -75,9 +82,30 @@ command -v uv >/dev/null 2>&1 || {
 }
 
 VENV="$PREFIX/share/oracle-of-daedalus/venv"
-uv venv --python 3.12 --clear "$VENV"
-uv pip install --python "$VENV/bin/python" --torch-backend=cpu "$WORK_DIR/$WHEEL" \
-    'haiku.rag>=0.70,<0.71' 'pypdfium2>=5,<6' 'pydantic-monty>=0.0.17,<0.0.19'
+CANDIDATE_VENV="$PREFIX/share/oracle-of-daedalus/.venv-candidate-$$"
+PREVIOUS_VENV="$PREFIX/share/oracle-of-daedalus/venv-previous"
+uv venv --python 3.12 "$CANDIDATE_VENV"
+uv pip install --python "$CANDIDATE_VENV/bin/python" --torch-backend=cpu \
+    "$WORK_DIR/$WHEEL" 'haiku-rag-slim[docling,cross-encoder]>=0.72' 'pypdfium2>=5,<6'
+printf 'Checking public Haiku compatibility...\n'
+"$CANDIDATE_VENV/bin/python" -m omarag_bridge.compat_probe
+
+# The running environment stays untouched until the newest dependency set has
+# passed Oracle's public-API gate. Keep the last known-good runtime for repair.
+if [ -d "$PREVIOUS_VENV" ]; then
+    mv "$PREVIOUS_VENV" "$WORK_DIR/older-venv"
+fi
+if [ -d "$VENV" ]; then
+    mv "$VENV" "$PREVIOUS_VENV"
+fi
+if ! mv "$CANDIDATE_VENV" "$VENV"; then
+    if [ -d "$PREVIOUS_VENV" ]; then
+        mv "$PREVIOUS_VENV" "$VENV"
+    fi
+    printf 'Could not activate the compatible runtime; previous version restored.\n' >&2
+    exit 1
+fi
+CANDIDATE_VENV=
 
 CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
 CONFIG_DIR="$CONFIG_HOME/oracle-of-daedalus"
@@ -106,6 +134,15 @@ write_wrapper() {
         printf "ENV_FILE='%s'\n" "$(printf %s "$ENV_FILE" | sed "s/'/'\\\\''/g")"
         printf '%s\n' 'if [ -r "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi'
         printf 'export ORACLE_VERSION=%s\n' "$version"
+        printf '%s\n' \
+            'export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}' \
+            'export MALLOC_TRIM_THRESHOLD_=${MALLOC_TRIM_THRESHOLD_:-131072}' \
+            'export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}' \
+            'export OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}' \
+            'export MKL_NUM_THREADS=${MKL_NUM_THREADS:-4}' \
+            'export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-4}' \
+            'export NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-4}' \
+            'export RAYON_NUM_THREADS=${RAYON_NUM_THREADS:-4}'
         printf "exec '%s' \"\$@\"\n" "$(printf %s "$binary" | sed "s/'/'\\\\''/g")"
     } > "$temporary"
     chmod 755 "$temporary"

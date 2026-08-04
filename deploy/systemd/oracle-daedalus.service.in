@@ -6,14 +6,25 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=@ENV_FILE@
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_TRIM_THRESHOLD_=131072
+Environment=TOKENIZERS_PARALLELISM=false
+Environment=OMP_NUM_THREADS=4
+Environment=MKL_NUM_THREADS=4
+Environment=OPENBLAS_NUM_THREADS=4
+Environment=NUMEXPR_NUM_THREADS=4
+Environment=RAYON_NUM_THREADS=4
 ExecStart=@VENV@/bin/oracle-daedalusd --data-dir @DATA_DIR@ --host 127.0.0.1 --port 8765
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30
-MemoryHigh=3500M
-MemoryMax=4500M
-MemorySwapMax=1G
-TasksMax=128
+# The API stays small; this ancestor budget includes an active isolated import
+# worker. Delegated child cgroups apply the tighter per-worker limits.
+Delegate=memory pids
+MemoryHigh=9G
+MemoryMax=10G
+MemorySwapMax=2G
+TasksMax=192
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

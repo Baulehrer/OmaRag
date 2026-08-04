@@ -9,6 +9,7 @@ from omarag_bridge.adapters.haiku_v070 import (
     HaikuV070Adapter,
     _anchors_for_refs,
     _deduplicate_citations,
+    document_filter_for_ids,
 )
 from omarag_bridge.models.domain import Citation
 
@@ -152,6 +153,12 @@ def test_overlapping_segment_citations_are_deduplicated() -> None:
     assert result[0].retrieval_rank == 1
 
 
+def test_document_filter_targets_haiku_document_ids_and_escapes_quotes() -> None:
+    assert document_filter_for_ids(None) is None
+    assert document_filter_for_ids([]) == "id = '__omarag_no_document__'"
+    assert document_filter_for_ids(["doc-1", "doc'2"]) == "id IN ('doc-1', 'doc''2')"
+
+
 async def test_pdf_ingest_reduces_segment_size_on_memory_pressure(tmp_path, monkeypatch) -> None:
     source = tmp_path / "large.pdf"
     source.write_bytes(b"%PDF-fake")
@@ -195,6 +202,15 @@ async def test_pdf_ingest_reduces_segment_size_on_memory_pressure(tmp_path, monk
             return False
 
     adapter = HaikuV070Adapter()
+    monkeypatch.setattr(
+        adapter,
+        "_config",
+        lambda _database: SimpleNamespace(
+            processing=SimpleNamespace(
+                conversion_options=SimpleNamespace(do_ocr=True, force_ocr=False)
+            )
+        ),
+    )
     monkeypatch.setattr(adapter, "_client", lambda *_args, **_kwargs: ClientContext())
 
     result = await adapter._ingest_pdf_segments(tmp_path / "db", source)
@@ -203,3 +219,75 @@ async def test_pdf_ingest_reduces_segment_size_on_memory_pressure(tmp_path, monk
     assert len(result["segments"]) == 3
     assert [item[0]["start"] for item in rag.imports] == [0, 5, 10]
     assert [item[2]["metadata"]["page_offset"] for item in rag.imports] == [0, 5, 10]
+
+
+async def test_pdf_ingest_restarts_at_first_page_when_resume_segments_are_stale(
+    tmp_path, monkeypatch
+) -> None:
+    source = tmp_path / "stale-resume.pdf"
+    source.write_bytes(b"%PDF-fake")
+    monkeypatch.setattr(haiku_v070, "_pdf_info", lambda _path: (4, False))
+    monkeypatch.setattr(
+        haiku_v070,
+        "_pdf_slice",
+        lambda _path, start, end: f"{start}:{end}".encode(),
+    )
+
+    class Rag:
+        def __init__(self):
+            self.starts: list[int] = []
+
+        async def convert(self, path, source_uri=None):
+            start, end = map(int, path.read_text().split(":"))
+            self.starts.append(start)
+            return {"start": start, "end": end, "source_uri": source_uri}
+
+        async def list_documents(self):
+            return []
+
+        async def chunk(self, document):
+            return [document]
+
+        async def import_document(self, document, chunks, **_kwargs):
+            return SimpleNamespace(id="replacement-segment")
+
+        async def delete_document(self, _document_id):
+            return True
+
+    rag = Rag()
+
+    class ClientContext:
+        async def __aenter__(self):
+            return rag
+
+        async def __aexit__(self, *_args):
+            return False
+
+    adapter = HaikuV070Adapter()
+    monkeypatch.setattr(
+        adapter,
+        "_config",
+        lambda _database: SimpleNamespace(
+            processing=SimpleNamespace(
+                conversion_options=SimpleNamespace(do_ocr=True, force_ocr=False)
+            )
+        ),
+    )
+    monkeypatch.setattr(adapter, "_client", lambda *_args, **_kwargs: ClientContext())
+
+    result = await adapter._ingest_pdf_segments(
+        tmp_path / "db",
+        source,
+        generation_id="generation-1",
+        resume_segments=[
+            {
+                "document_id": "deleted-segment",
+                "segment_index": 3,
+                "page_start": 8,
+                "page_end": 12,
+            }
+        ],
+    )
+
+    assert rag.starts == [0]
+    assert result["segments"][0]["segment_index"] == 0

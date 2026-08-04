@@ -56,7 +56,7 @@
             "type": "string"
           },
           "omarag_version": {
-            "default": "0.5.0",
+            "default": "0.7.0",
             "title": "Omarag Version",
             "type": "string"
           }
@@ -111,6 +111,130 @@
           "sha256"
         ],
         "title": "BackupSummary",
+        "type": "object"
+      },
+      "BookMetadata": {
+        "additionalProperties": false,
+        "description": "Confirmed bibliographic identity shared by every Haiku page segment.",
+        "properties": {
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "curriculum": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Curriculum"
+          },
+          "document_status": {
+            "$ref": "#/components/schemas/DocumentStatus",
+            "default": "active"
+          },
+          "edition_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edition Label"
+          },
+          "edition_number": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edition Number"
+          },
+          "isbn": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Isbn",
+            "type": "array"
+          },
+          "language": {
+            "default": "de",
+            "title": "Language",
+            "type": "string"
+          },
+          "publication_year": {
+            "anyOf": [
+              {
+                "maximum": 3000.0,
+                "minimum": 1000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Year"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "valid_from": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid From"
+          },
+          "valid_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid To"
+          },
+          "work_id": {
+            "default": "",
+            "title": "Work Id",
+            "type": "string"
+          }
+        },
+        "title": "BookMetadata",
         "type": "object"
       },
       "CapabilitySet": {
@@ -178,6 +302,16 @@
       "Citation": {
         "additionalProperties": false,
         "properties": {
+          "book": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BookMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "chunk_id": {
             "title": "Chunk Id",
             "type": "string"
@@ -231,6 +365,17 @@
             },
             "title": "Element Types",
             "type": "array"
+          },
+          "evidence_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Id"
           },
           "excerpt": {
             "title": "Excerpt",
@@ -307,6 +452,11 @@
               }
             ],
             "title": "Source Uri"
+          },
+          "verification_status": {
+            "default": "unverified",
+            "title": "Verification Status",
+            "type": "string"
           }
         },
         "required": [
@@ -401,6 +551,63 @@
           "name"
         ],
         "title": "CloneWorkspaceRequest",
+        "type": "object"
+      },
+      "CommitImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "duplicate_policy": {
+            "default": "review",
+            "enum": [
+              "review",
+              "skip",
+              "replace"
+            ],
+            "title": "Duplicate Policy",
+            "type": "string"
+          },
+          "preflight_id": {
+            "title": "Preflight Id",
+            "type": "string"
+          },
+          "processing_profile": {
+            "default": "default",
+            "enum": [
+              "default",
+              "technical",
+              "low-memory",
+              "fast",
+              "quality",
+              "image-heavy",
+              "eco",
+              "balanced"
+            ],
+            "title": "Processing Profile",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInput"
+            },
+            "minItems": 1,
+            "title": "Sources",
+            "type": "array"
+          },
+          "validity_policy": {
+            "default": "prefer-current",
+            "enum": [
+              "prefer-current",
+              "strict"
+            ],
+            "title": "Validity Policy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preflight_id",
+          "sources"
+        ],
+        "title": "CommitImportRequest",
         "type": "object"
       },
       "ConfigDocument": {
@@ -551,9 +758,124 @@
         "title": "DeleteWorkspaceRequest",
         "type": "object"
       },
+      "DocumentQuality": {
+        "additionalProperties": false,
+        "properties": {
+          "chunks": {
+            "default": 0,
+            "title": "Chunks",
+            "type": "integer"
+          },
+          "formulas": {
+            "default": 0,
+            "title": "Formulas",
+            "type": "integer"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "native_text_pages": {
+            "default": 0,
+            "title": "Native Text Pages",
+            "type": "integer"
+          },
+          "ocr_pages": {
+            "default": 0,
+            "title": "Ocr Pages",
+            "type": "integer"
+          },
+          "pages_total": {
+            "default": 0,
+            "title": "Pages Total",
+            "type": "integer"
+          },
+          "pictures": {
+            "default": 0,
+            "title": "Pictures",
+            "type": "integer"
+          },
+          "provenance_coverage": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Provenance Coverage",
+            "type": "number"
+          },
+          "score": {
+            "default": 1.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "number"
+          },
+          "tables": {
+            "default": 0,
+            "title": "Tables",
+            "type": "integer"
+          }
+        },
+        "title": "DocumentQuality",
+        "type": "object"
+      },
+      "DocumentStatus": {
+        "enum": [
+          "active",
+          "superseded",
+          "reference"
+        ],
+        "title": "DocumentStatus",
+        "type": "string"
+      },
       "DocumentSummary": {
         "additionalProperties": false,
         "properties": {
+          "book": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BookMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cache_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Status"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "generation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Generation Id"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -562,6 +884,17 @@
             "format": "date-time",
             "title": "Imported At",
             "type": "string"
+          },
+          "managed_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Source"
           },
           "page_count": {
             "anyOf": [
@@ -578,6 +911,26 @@
             "default": "docling",
             "title": "Parser Id",
             "type": "string"
+          },
+          "pipeline_stats": {
+            "additionalProperties": true,
+            "title": "Pipeline Stats",
+            "type": "object"
+          },
+          "pipeline_version": {
+            "default": "textbook-v1",
+            "title": "Pipeline Version",
+            "type": "string"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentQuality"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "segment_document_ids": {
             "items": {
@@ -609,6 +962,98 @@
         "title": "DocumentSummary",
         "type": "object"
       },
+      "EvaluationCase": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "default": "section-location",
+            "title": "Category",
+            "type": "string"
+          },
+          "expected_chunk_id": {
+            "title": "Expected Chunk Id",
+            "type": "string"
+          },
+          "expected_document_id": {
+            "title": "Expected Document Id",
+            "type": "string"
+          },
+          "expected_pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Expected Pages",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "origin": {
+            "default": "silver-structure",
+            "title": "Origin",
+            "type": "string"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "reviewed": {
+            "default": false,
+            "title": "Reviewed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "expected_chunk_id",
+          "expected_document_id"
+        ],
+        "title": "EvaluationCase",
+        "type": "object"
+      },
+      "EvaluationReport": {
+        "additionalProperties": false,
+        "properties": {
+          "cases": {
+            "items": {
+              "$ref": "#/components/schemas/EvaluationCase"
+            },
+            "title": "Cases",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "variants": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            "title": "Variants",
+            "type": "object"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id"
+        ],
+        "title": "EvaluationReport",
+        "type": "object"
+      },
       "EvidenceMode": {
         "enum": [
           "strict",
@@ -617,6 +1062,20 @@
         ],
         "title": "EvidenceMode",
         "type": "string"
+      },
+      "GenerateEvaluationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 30,
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "title": "GenerateEvaluationRequest",
+        "type": "object"
       },
       "HTTPValidationError": {
         "properties": {
@@ -732,6 +1191,70 @@
         "title": "IdempotentResult",
         "type": "object"
       },
+      "ImportCandidate": {
+        "additionalProperties": false,
+        "properties": {
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/BookMetadata"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/MetadataProposal"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "fingerprint",
+          "metadata"
+        ],
+        "title": "ImportCandidate",
+        "type": "object"
+      },
+      "ImportPreflightBatch": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/ImportCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "candidates"
+        ],
+        "title": "ImportPreflightBatch",
+        "type": "object"
+      },
       "IngestRequest": {
         "additionalProperties": false,
         "properties": {
@@ -761,6 +1284,16 @@
           },
           "processing_profile": {
             "default": "default",
+            "enum": [
+              "default",
+              "technical",
+              "low-memory",
+              "fast",
+              "quality",
+              "image-heavy",
+              "eco",
+              "balanced"
+            ],
             "title": "Processing Profile",
             "type": "string"
           },
@@ -781,6 +1314,10 @@
           },
           "validity_policy": {
             "default": "prefer-current",
+            "enum": [
+              "prefer-current",
+              "strict"
+            ],
             "title": "Validity Policy",
             "type": "string"
           }
@@ -789,6 +1326,72 @@
           "sources"
         ],
         "title": "IngestRequest",
+        "type": "object"
+      },
+      "JobProgressDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_hits": {
+            "default": 0,
+            "title": "Cache Hits",
+            "type": "integer"
+          },
+          "current_document": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Document"
+          },
+          "memory_state": {
+            "default": "ready",
+            "title": "Memory State",
+            "type": "string"
+          },
+          "page_end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page End"
+          },
+          "page_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Start"
+          },
+          "recovered_segments": {
+            "default": 0,
+            "title": "Recovered Segments",
+            "type": "integer"
+          },
+          "total_pages": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Pages"
+          }
+        },
+        "title": "JobProgressDetail",
         "type": "object"
       },
       "JobSnapshot": {
@@ -855,6 +1458,16 @@
             "default": 0.0,
             "title": "Progress",
             "type": "number"
+          },
+          "progress_detail": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobProgressDetail"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "result": {
             "anyOf": [
@@ -930,6 +1543,36 @@
           "model"
         ],
         "title": "LoadModelRequest",
+        "type": "object"
+      },
+      "MetadataProposal": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value"
+          }
+        },
+        "required": [
+          "field",
+          "value",
+          "source",
+          "confidence"
+        ],
+        "title": "MetadataProposal",
         "type": "object"
       },
       "ModelCatalogEntry": {
@@ -1330,6 +1973,19 @@
         "title": "ParserDefinition",
         "type": "object"
       },
+      "PatchBookMetadataRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "metadata": {
+            "$ref": "#/components/schemas/BookMetadata"
+          }
+        },
+        "required": [
+          "metadata"
+        ],
+        "title": "PatchBookMetadataRequest",
+        "type": "object"
+      },
       "PatchWorkspaceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1359,6 +2015,24 @@
           }
         },
         "title": "PatchWorkspaceRequest",
+        "type": "object"
+      },
+      "PreflightImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInput"
+            },
+            "minItems": 1,
+            "title": "Sources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "PreflightImportRequest",
         "type": "object"
       },
       "PrivacyMode": {
@@ -1411,6 +2085,24 @@
             "title": "Issues",
             "type": "array"
           },
+          "latest_evaluation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Evaluation Id"
+          },
+          "retrieval_metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "title": "Retrieval Metrics",
+            "type": "object"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -1444,11 +2136,110 @@
         "title": "RestoreBackupRequest",
         "type": "object"
       },
+      "RetrievalExplanation": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "provider_notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Provider Notes",
+            "type": "array"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "ranked": {
+            "items": {
+              "$ref": "#/components/schemas/SearchHit"
+            },
+            "title": "Ranked",
+            "type": "array"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/RetrievalTiming"
+          }
+        },
+        "required": [
+          "query",
+          "timing"
+        ],
+        "title": "RetrievalExplanation",
+        "type": "object"
+      },
+      "RetrievalTiming": {
+        "additionalProperties": false,
+        "properties": {
+          "search_ms": {
+            "title": "Search Ms",
+            "type": "number"
+          },
+          "total_ms": {
+            "title": "Total Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "search_ms",
+          "total_ms"
+        ],
+        "title": "RetrievalTiming",
+        "type": "object"
+      },
+      "RunEvaluationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "evaluation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluation Id"
+          },
+          "top_k": {
+            "default": 10,
+            "maximum": 50.0,
+            "minimum": 3.0,
+            "title": "Top K",
+            "type": "integer"
+          },
+          "variants": {
+            "items": {
+              "enum": [
+                "fts",
+                "vector",
+                "hybrid"
+              ],
+              "type": "string"
+            },
+            "title": "Variants",
+            "type": "array"
+          }
+        },
+        "title": "RunEvaluationRequest",
+        "type": "object"
+      },
       "RunRequest": {
         "additionalProperties": false,
         "properties": {
           "document_policy": {
             "default": "current-only",
+            "enum": [
+              "current-only",
+              "all-editions"
+            ],
             "title": "Document Policy",
             "type": "string"
           },
@@ -1457,9 +2248,7 @@
             "default": "strict"
           },
           "filters": {
-            "additionalProperties": true,
-            "title": "Filters",
-            "type": "object"
+            "$ref": "#/components/schemas/SearchFilters"
           },
           "images": {
             "items": {
@@ -1579,6 +2368,262 @@
         "title": "RunSnapshot",
         "type": "object"
       },
+      "SearchFilters": {
+        "additionalProperties": false,
+        "properties": {
+          "author": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Author"
+          },
+          "authors": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authors"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "document_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Ids"
+          },
+          "document_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Status"
+          },
+          "edition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edition"
+          },
+          "edition_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edition Number"
+          },
+          "isbn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isbn"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Language"
+          },
+          "logical_document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logical Document Id"
+          },
+          "logical_document_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logical Document Ids"
+          },
+          "publication_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Publication Year"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "work_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Work Id"
+          }
+        },
+        "title": "SearchFilters",
+        "type": "object"
+      },
       "SearchHit": {
         "additionalProperties": false,
         "properties": {
@@ -1634,6 +2679,11 @@
               }
             ],
             "title": "Score"
+          },
+          "search_type": {
+            "default": "hybrid",
+            "title": "Search Type",
+            "type": "string"
           }
         },
         "required": [
@@ -1646,10 +2696,17 @@
       "SearchRequest": {
         "additionalProperties": false,
         "properties": {
+          "document_policy": {
+            "default": "current-only",
+            "enum": [
+              "current-only",
+              "all-editions"
+            ],
+            "title": "Document Policy",
+            "type": "string"
+          },
           "filters": {
-            "additionalProperties": true,
-            "title": "Filters",
-            "type": "object"
+            "$ref": "#/components/schemas/SearchFilters"
           },
           "limit": {
             "default": 10,
@@ -1712,6 +2769,38 @@
       "SourceInput": {
         "additionalProperties": false,
         "properties": {
+          "candidate_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Id"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BookMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "path": {
             "title": "Path",
             "type": "string"
@@ -1829,8 +2918,24 @@
             "default": "strict"
           },
           "haiku_compatible_range": {
-            "default": ">=0.70,<0.71",
+            "default": "latest-gated",
             "title": "Haiku Compatible Range",
+            "type": "string"
+          },
+          "haiku_last_verified": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Haiku Last Verified"
+          },
+          "haiku_update_policy": {
+            "default": "latest-gated",
+            "title": "Haiku Update Policy",
             "type": "string"
           },
           "id": {
@@ -1941,7 +3046,7 @@
   "info": {
     "description": "Offline Retrieval-Augmented Command-Line Environment; stable operations and quality layer for vanilla Haiku RAG",
     "title": "Oracle of Daedalus API",
-    "version": "0.5.0"
+    "version": "0.7.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -3699,6 +4804,69 @@
         "summary": "Delete Document"
       }
     },
+    "/v1/workspaces/{workspace_id}/documents/{document_id}/metadata": {
+      "patch": {
+        "operationId": "patch_book_metadata_v1_workspaces__workspace_id__documents__document_id__metadata_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchBookMetadataRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BookMetadata"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Patch Book Metadata"
+      }
+    },
     "/v1/workspaces/{workspace_id}/documents/{document_id}/restore": {
       "post": {
         "operationId": "restore_document_v1_workspaces__workspace_id__documents__document_id__restore_post",
@@ -3743,6 +4911,167 @@
           }
         ],
         "summary": "Restore Document"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/evaluations/generate": {
+      "post": {
+        "operationId": "generate_evaluation_v1_workspaces__workspace_id__evaluations_generate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateEvaluationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Generate Evaluation"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/evaluations/run": {
+      "post": {
+        "operationId": "run_evaluation_v1_workspaces__workspace_id__evaluations_run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunEvaluationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Run Evaluation"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/evaluations/{evaluation_id}": {
+      "get": {
+        "operationId": "get_evaluation_v1_workspaces__workspace_id__evaluations__evaluation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "evaluation_id",
+            "required": true,
+            "schema": {
+              "title": "Evaluation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Evaluation"
       }
     },
     "/v1/workspaces/{workspace_id}/events": {
@@ -3822,6 +5151,123 @@
           }
         ],
         "summary": "Workspace Events"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/imports/commit": {
+      "post": {
+        "operationId": "commit_import_v1_workspaces__workspace_id__imports_commit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotentResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Commit Import"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/imports/preflight": {
+      "post": {
+        "operationId": "preflight_import_v1_workspaces__workspace_id__imports_preflight_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreflightImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPreflightBatch"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preflight Import"
       }
     },
     "/v1/workspaces/{workspace_id}/open": {
@@ -3966,6 +5412,78 @@
         "summary": "Start Run"
       }
     },
+    "/v1/workspaces/{workspace_id}/runs/{run_id}/citations/{citation_index}/preview": {
+      "get": {
+        "operationId": "citation_preview_v1_workspaces__workspace_id__runs__run_id__citations__citation_index__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "citation_index",
+            "required": true,
+            "schema": {
+              "title": "Citation Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_px",
+            "required": false,
+            "schema": {
+              "default": 1400,
+              "maximum": 2400,
+              "minimum": 256,
+              "title": "Max Px",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Citation Preview"
+      }
+    },
     "/v1/workspaces/{workspace_id}/search": {
       "post": {
         "operationId": "search_v1_workspaces__workspace_id__search_post",
@@ -4022,6 +5540,60 @@
           }
         ],
         "summary": "Search"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/search/explain": {
+      "post": {
+        "operationId": "explain_search_v1_workspaces__workspace_id__search_explain_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalExplanation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Explain Search"
       }
     },
     "/v1/workspaces/{workspace_id}/sources": {

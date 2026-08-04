@@ -14,14 +14,15 @@ use image::{ImageReader, Pixel, Rgba};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use omarag_app::{
     Action, AppState, DocumentInsight, HardwareProfile, ImportPreflight, ModelCatalogResponse,
-    ModelCategory, ModelSource, Notification, NotificationLevel, Overlay, UiPreferences,
-    UndoAction, update,
+    ModelCategory, ModelSource, Notification, NotificationLevel, Overlay, PendingBookReview,
+    UiPreferences, UndoAction, update,
 };
 use omarag_client::{HttpOmaRagClient, OmaRagClient};
 use omarag_domain::{
-    BackupSummary, ConfigDocument, DocumentSummary, DomainEvent, EventSubscription, JobId,
-    JobSnapshot, QualityReport, RunId, RunRequest, SearchHit, SourceDefinition, WorkspaceId,
-    WorkspaceManifest, WorkspaceSummary,
+    BackupSummary, CommitImportRequest, ConfigDocument, DocumentSummary, DomainEvent,
+    EventSubscription, JobId, JobSnapshot, JobStatus, PreflightImportRequest, QualityReport,
+    RetrievalExplanation, RunId, RunRequest, SourceDefinition, WorkspaceId, WorkspaceManifest,
+    WorkspaceSummary,
 };
 use omarag_tui::{
     ChatImagePreview, LoadedModel, RuntimeMetrics, Theme,
@@ -35,7 +36,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write, stdout},
+    io::{Cursor, Read, Write, stdout},
     process::{Command, Stdio},
     sync::{
         Arc,
@@ -79,7 +80,7 @@ enum BackendMessage {
     },
     RunStarted(Result<RunId, String>),
     RunCancelled(Result<(), String>),
-    SearchCompleted(Result<Vec<SearchHit>, String>),
+    SearchCompleted(Result<RetrievalExplanation, String>),
     ImportAccepted(Result<JobId, String>),
     JobUpdated(Result<(), String>),
     JobsLoaded(Result<Vec<JobSnapshot>, String>),
@@ -105,6 +106,7 @@ struct PreviewScope {
 
 #[derive(Debug, Clone)]
 struct CitationPreviewTarget {
+    citation_index: usize,
     path: String,
     page: u32,
     title: String,
@@ -287,11 +289,12 @@ async fn main() -> Result<()> {
     )
     .ok();
     let mut watched_directory = None::<std::path::PathBuf>;
-    let mut redraw = tokio::time::interval(Duration::from_millis(100));
-    let mut jobs_refresh = tokio::time::interval(Duration::from_secs(2));
-    let mut monitor_refresh = tokio::time::interval(Duration::from_secs(1));
-    let mut model_refresh = tokio::time::interval(Duration::from_secs(3));
-    let mut preferences_refresh = tokio::time::interval(Duration::from_secs(1));
+    let mut redraw = tokio::time::interval(Duration::from_millis(250));
+    redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut jobs_refresh = tokio::time::interval(Duration::from_secs(5));
+    let mut monitor_refresh = tokio::time::interval(Duration::from_secs(2));
+    let mut model_refresh = tokio::time::interval(Duration::from_secs(10));
+    let mut preferences_refresh = tokio::time::interval(Duration::from_secs(5));
     let mut system = System::new_all();
     let mut metrics = runtime_metrics(&system, 0);
     let mut chat_previews = Vec::new();
@@ -310,6 +313,7 @@ async fn main() -> Result<()> {
             );
             schedule_chat_previews(
                 &state,
+                Arc::clone(&client),
                 &image_picker,
                 &mut chat_previews,
                 &mut preview_pending,
@@ -320,7 +324,7 @@ async fn main() -> Result<()> {
                 render_with_previews(frame, &state, &theme, &metrics, &mut chat_previews)
             })?;
             tokio::select! {
-                _ = redraw.tick() => {
+                _ = redraw.tick(), if animations_active(&state) => {
                     metrics.animation_tick = metrics.animation_tick.wrapping_add(1);
                 }
                 _ = jobs_refresh.tick() => {
@@ -453,6 +457,21 @@ async fn main() -> Result<()> {
     paste_result.context("Could not disable bracketed paste")?;
     restore_result.context("Could not restore terminal")?;
     result
+}
+
+fn animations_active(state: &AppState) -> bool {
+    state.chat.request_pending
+        || state.chat.active_run.is_some()
+        || state.search.loading
+        || state.library.import_pending
+        || state.model_manager.busy
+        || state.operation.active
+        || state.jobs.values().any(|job| {
+            matches!(
+                job.status,
+                JobStatus::Queued | JobStatus::Running | JobStatus::PauseRequested
+            )
+        })
 }
 
 fn sync_directory_watcher(
@@ -809,17 +828,57 @@ fn spawn_command(
             ),
             UiCommand::Search { workspace, request } => BackendMessage::SearchCompleted(
                 client
-                    .search(workspace, request)
+                    .explain_search(workspace, request)
                     .await
                     .map_err(|error| error.to_string()),
             ),
-            UiCommand::Ingest { workspace, request } => BackendMessage::ImportAccepted(
-                client
-                    .ingest(workspace, request, Uuid::new_v4().to_string())
-                    .await
-                    .map(|result| result.id)
-                    .map_err(|error| error.to_string()),
-            ),
+            UiCommand::Ingest {
+                workspace,
+                request,
+                preflight_id,
+            } => {
+                let result = async {
+                    let (preflight_id, sources) = if let Some(preflight_id) = preflight_id {
+                        (preflight_id, request.sources)
+                    } else {
+                        let preflight = client
+                            .preflight_import(
+                                workspace.clone(),
+                                PreflightImportRequest {
+                                    sources: request.sources.clone(),
+                                },
+                            )
+                            .await?;
+                        let mut sources = request.sources;
+                        for (source, candidate) in sources.iter_mut().zip(preflight.candidates) {
+                            source.path = candidate.source;
+                            source.fingerprint = Some(candidate.fingerprint);
+                            source.candidate_id = Some(candidate.id);
+                            source.metadata = Some(omarag_domain::BookMetadata {
+                                confirmed: true,
+                                ..candidate.metadata
+                            });
+                        }
+                        (preflight.id, sources)
+                    };
+                    client
+                        .commit_import(
+                            workspace,
+                            CommitImportRequest {
+                                preflight_id,
+                                sources,
+                                processing_profile: request.processing_profile,
+                                duplicate_policy: request.duplicate_policy,
+                                validity_policy: request.validity_policy,
+                            },
+                            Uuid::new_v4().to_string(),
+                        )
+                        .await
+                        .map(|accepted| accepted.id)
+                }
+                .await;
+                BackendMessage::ImportAccepted(result.map_err(|error| error.to_string()))
+            }
             UiCommand::Job { id, command } => {
                 let result = match command {
                     JobCommand::Pause => client.pause_job(id).await,
@@ -976,14 +1035,46 @@ fn spawn_command(
                 &primary_anchors,
                 &context_anchors,
             )),
-            UiCommand::AnalyzeImport { selected, existing } => {
-                let result =
+            UiCommand::AnalyzeImport {
+                workspace,
+                selected,
+                existing,
+            } => {
+                let mut result =
                     tokio::task::spawn_blocking(move || analyze_import(&selected, &existing))
                         .await
                         .unwrap_or_else(|error| ImportPreflight {
                             error: Some(error.to_string()),
                             ..ImportPreflight::default()
                         });
+                if result.error.is_none() && !result.pdfs.is_empty() {
+                    match client
+                        .preflight_import(
+                            workspace,
+                            PreflightImportRequest {
+                                sources: omarag_domain::IngestRequest::files(result.pdfs.clone())
+                                    .sources,
+                            },
+                        )
+                        .await
+                    {
+                        Ok(batch) => {
+                            result.server_preflight_id = Some(batch.id);
+                            result.books = batch
+                                .candidates
+                                .into_iter()
+                                .map(|candidate| PendingBookReview {
+                                    candidate_id: candidate.id,
+                                    source: candidate.source,
+                                    fingerprint: candidate.fingerprint,
+                                    metadata: candidate.metadata,
+                                    issues: candidate.issues,
+                                })
+                                .collect();
+                        }
+                        Err(error) => result.error = Some(error.to_string()),
+                    }
+                }
                 BackendMessage::ImportAnalyzed(result)
             }
             UiCommand::DeleteDocument {
@@ -1001,17 +1092,6 @@ fn spawn_command(
                 document,
             } => {
                 let result = async {
-                    if !std::path::Path::new(&document.source).is_file() {
-                        return Err("Original PDF is unavailable; restore was not started.".into());
-                    }
-                    client
-                        .ingest(
-                            workspace.clone(),
-                            omarag_domain::IngestRequest::file(document.source.clone()),
-                            Uuid::new_v4().to_string(),
-                        )
-                        .await
-                        .map_err(|error| error.to_string())?;
                     client
                         .restore_document(workspace, document.id.clone())
                         .await
@@ -1250,7 +1330,7 @@ fn citation_source_path(state: &AppState, citation: &omarag_domain::Citation) ->
 
 fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
     let mut targets = Vec::new();
-    for citation in &state.chat.citations {
+    for (citation_index, citation) in state.chat.citations.iter().enumerate() {
         let Some(page) = citation.pages.first().copied() else {
             continue;
         };
@@ -1268,6 +1348,7 @@ fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
                 format!("Figure · {source_title} · p.{page}")
             };
             targets.push(CitationPreviewTarget {
+                citation_index,
                 path,
                 page,
                 title: preview_title,
@@ -1284,6 +1365,7 @@ fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
 
 fn schedule_chat_previews(
     state: &AppState,
+    client: Arc<HttpOmaRagClient>,
     picker: &Picker,
     previews: &mut Vec<ChatImagePreview>,
     pending: &mut BTreeSet<(String, u32)>,
@@ -1313,6 +1395,7 @@ fn schedule_chat_previews(
     });
     for target in targets {
         let CitationPreviewTarget {
+            citation_index,
             path,
             page,
             title,
@@ -1330,14 +1413,37 @@ fn schedule_chat_previews(
         let picker = picker.clone();
         let tx = tx.clone();
         let cancellation = scope.token.clone();
+        let workspace = state.active_workspace.clone();
+        let run_id = state.chat.last_run.clone();
+        let client = Arc::clone(&client);
         tokio::spawn(async move {
+            let remote = if let (Some(workspace), Some(run_id)) = (workspace, run_id) {
+                client
+                    .citation_preview(workspace, run_id, citation_index, 1400)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
             let render = tokio::task::spawn_blocking(move || {
-                let image_path =
-                    render_pdf_page_with_anchors(&path, page, &primary_anchors, &context_anchors)?;
-                let image = ImageReader::open(image_path)
-                    .map_err(|error| error.to_string())?
-                    .decode()
-                    .map_err(|error| error.to_string())?;
+                let image = if let Some(bytes) = remote {
+                    ImageReader::new(Cursor::new(bytes))
+                        .with_guessed_format()
+                        .map_err(|error| error.to_string())?
+                        .decode()
+                        .map_err(|error| error.to_string())?
+                } else {
+                    let image_path = render_pdf_page_with_anchors(
+                        &path,
+                        page,
+                        &primary_anchors,
+                        &context_anchors,
+                    )?;
+                    ImageReader::open(image_path)
+                        .map_err(|error| error.to_string())?
+                        .decode()
+                        .map_err(|error| error.to_string())?
+                };
                 Ok(ChatImagePreview::new(
                     path,
                     page,
@@ -1433,9 +1539,13 @@ fn inspect_documents(
     documents
         .iter()
         .map(|document| {
-            let path = std::path::Path::new(&document.source);
+            let source = document
+                .managed_source
+                .as_deref()
+                .unwrap_or(&document.source);
+            let path = std::path::Path::new(source);
             let size_bytes = path.metadata().map_or(0, |metadata| metadata.len());
-            let pages = pdf_info(&document.source)
+            let pages = pdf_info(source)
                 .map(|(_, pages)| pages)
                 .filter(|pages| *pages > 0);
             let sha256 = std::fs::File::open(path).ok().and_then(|mut file| {
@@ -1675,7 +1785,7 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
         BackendMessage::DocumentDeleted(result) => match result {
             Ok(document) => {
                 state.documents.retain(|item| item.id != document.id);
-                state.undo = Some(UndoAction::RemovedDocument(document));
+                state.undo = Some(UndoAction::RemovedDocument(Box::new(document)));
                 state.asset_cursor = state.asset_cursor.saturating_sub(1);
                 update(state, Action::OperationFinished);
                 update(
@@ -1728,8 +1838,18 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
             }
         },
         BackendMessage::SearchCompleted(result) => match result {
-            Ok(hits) => {
-                update(state, Action::SearchCompleted(hits));
+            Ok(explanation) => {
+                let duration = explanation.timing.total_ms;
+                let count = explanation.ranked.len();
+                update(state, Action::SearchCompleted(explanation.ranked.clone()));
+                state.search.explanation = Some(explanation);
+                update(
+                    state,
+                    Action::Notify(Notification {
+                        level: NotificationLevel::Info,
+                        message: format!("Retrieval inspector · {count} hits · {duration:.1} ms"),
+                    }),
+                );
             }
             Err(error) => {
                 update(state, Action::SearchFailed(error.clone()));
@@ -1980,7 +2100,8 @@ mod tests {
     fn preferences_round_trip_without_serializing_runtime_state() {
         let mut state = AppState {
             theme_index: 2,
-            focus: omarag_app::FocusPanel::Sources,
+            view: omarag_app::View::Books,
+            focus_pane: omarag_app::FocusPane::Inspector,
             ..AppState::default()
         };
         state.file_browser.current_dir = "/tmp/docs".into();
@@ -1989,6 +2110,8 @@ mod tests {
         let mut restored = AppState::default();
         restored.apply_preferences(serde_json::from_str(&encoded).unwrap());
         assert_eq!(restored.theme_index, 2);
+        assert_eq!(restored.view, omarag_app::View::Books);
+        assert_eq!(restored.focus_pane, omarag_app::FocusPane::Inspector);
         assert_eq!(restored.focus, omarag_app::FocusPanel::Sources);
         assert_eq!(
             restored.library.filter,

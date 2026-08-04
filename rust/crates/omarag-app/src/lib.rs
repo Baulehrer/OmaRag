@@ -1,7 +1,7 @@
 use omarag_domain::{
-    BackendMeta, BackupSummary, Citation, ConfigDocument, DocumentSummary, DomainEvent,
-    EvidenceMode, JobId, JobSnapshot, QualityReport, RunId, SearchHit, SourceDefinition,
-    WorkspaceId, WorkspaceSummary,
+    BackendMeta, BackupSummary, BookMetadata, Citation, ConfigDocument, DocumentSummary,
+    DomainEvent, EvidenceMode, JobId, JobSnapshot, QualityReport, RetrievalExplanation, RunId,
+    SearchHit, SourceDefinition, WorkspaceId, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +29,166 @@ pub enum InputMode {
     #[default]
     Nav,
     Text,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimarySection {
+    #[default]
+    Chat,
+    Library,
+    Foundry,
+    Utilities,
+}
+
+impl PrimarySection {
+    pub const CORE: [Self; 3] = [Self::Chat, Self::Library, Self::Foundry];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "Chat",
+            Self::Library => "Library",
+            Self::Foundry => "Foundry",
+            Self::Utilities => "Utilities",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum View {
+    #[default]
+    Conversation,
+    History,
+    Retrieval,
+    Books,
+    Indexing,
+    Sources,
+    Quality,
+    Backups,
+    FoundryOverview,
+    Models,
+    System,
+    Activity,
+    Settings,
+}
+
+impl View {
+    pub const ALL: [Self; 13] = [
+        Self::Conversation,
+        Self::History,
+        Self::Retrieval,
+        Self::Books,
+        Self::Indexing,
+        Self::Sources,
+        Self::Quality,
+        Self::Backups,
+        Self::FoundryOverview,
+        Self::Models,
+        Self::System,
+        Self::Activity,
+        Self::Settings,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Conversation => "Conversation",
+            Self::History => "History",
+            Self::Retrieval => "Retrieval",
+            Self::Books => "Books",
+            Self::Indexing => "Indexing",
+            Self::Sources => "Sources",
+            Self::Quality => "Quality",
+            Self::Backups => "Backups",
+            Self::FoundryOverview => "Setup",
+            Self::Models => "Catalog",
+            Self::System => "Runtime",
+            Self::Activity => "Activity",
+            Self::Settings => "Settings",
+        }
+    }
+
+    pub const fn section(self) -> PrimarySection {
+        match self {
+            Self::Conversation | Self::History | Self::Retrieval => PrimarySection::Chat,
+            Self::Books | Self::Indexing | Self::Sources | Self::Quality | Self::Backups => {
+                PrimarySection::Library
+            }
+            Self::FoundryOverview | Self::Models | Self::System => PrimarySection::Foundry,
+            Self::Activity | Self::Settings => PrimarySection::Utilities,
+        }
+    }
+
+    pub const fn advanced(self) -> bool {
+        matches!(
+            self,
+            Self::Retrieval | Self::Sources | Self::Quality | Self::Backups | Self::System
+        )
+    }
+
+    pub const fn route(self) -> Route {
+        match self {
+            Self::Conversation | Self::History => Route::Chat,
+            Self::Retrieval => Route::Search,
+            Self::Books | Self::Indexing => Route::Library,
+            Self::Sources => Route::Sources,
+            Self::Quality => Route::Quality,
+            Self::Backups => Route::Backups,
+            Self::FoundryOverview | Self::Models => Route::System,
+            Self::System => Route::System,
+            Self::Activity => Route::Jobs,
+            Self::Settings => Route::Settings,
+        }
+    }
+
+    pub const fn from_legacy(route: Route) -> Self {
+        match route {
+            Route::Chat => Self::Conversation,
+            Route::Library => Self::Books,
+            Route::Sources => Self::Sources,
+            Route::Jobs => Self::Activity,
+            Route::Search => Self::Retrieval,
+            Route::Quality => Self::Quality,
+            Route::Backups => Self::Backups,
+            Route::Settings => Self::Settings,
+            Route::System => Self::FoundryOverview,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusPane {
+    Sidebar,
+    #[default]
+    Workspace,
+    Inspector,
+}
+
+impl FocusPane {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Sidebar => "Sidebar",
+            Self::Workspace => "Workspace",
+            Self::Inspector => "Inspector",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Sidebar => Self::Workspace,
+            Self::Workspace => Self::Inspector,
+            Self::Inspector => Self::Sidebar,
+        }
+    }
+
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Sidebar => Self::Inspector,
+            Self::Workspace => Self::Sidebar,
+            Self::Inspector => Self::Workspace,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,7 +289,6 @@ pub enum Overlay {
     Help,
     Palette,
     Workspaces,
-    ModelManager,
     ConfirmModelDelete,
     FileBrowser,
     ConfirmImport,
@@ -289,7 +448,18 @@ pub struct ImportPreflight {
     pub duplicates: Vec<String>,
     pub unreadable: Vec<String>,
     pub encrypted: Vec<String>,
+    pub server_preflight_id: Option<String>,
+    pub books: Vec<PendingBookReview>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBookReview {
+    pub candidate_id: String,
+    pub source: String,
+    pub fingerprint: String,
+    pub metadata: BookMetadata,
+    pub issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +481,7 @@ pub struct ChatSession {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UndoAction {
-    RemovedDocument(DocumentSummary),
+    RemovedDocument(Box<DocumentSummary>),
     HiddenJob(JobSnapshot),
     CancelledJob(JobSnapshot),
     ProfileChanged {
@@ -611,6 +781,7 @@ pub struct ModelManagerState {
     pub cursor: usize,
     pub packages: Vec<ModelPackage>,
     pub package_cursor: usize,
+    pub inspector_cursor: usize,
     pub quantization: ModelQuantization,
     pub context_tokens: u32,
     pub memory_policy: ModelMemoryPolicy,
@@ -636,6 +807,7 @@ impl Default for ModelManagerState {
             cursor: 0,
             packages: Vec::new(),
             package_cursor: 0,
+            inspector_cursor: 0,
             quantization: ModelQuantization::default(),
             context_tokens: 8_192,
             memory_policy: ModelMemoryPolicy::default(),
@@ -827,6 +999,7 @@ pub struct ChatState {
     pub question: EditorState,
     pub answer: String,
     pub active_run: Option<RunId>,
+    pub last_run: Option<RunId>,
     pub request_pending: bool,
     pub evidence_mode: EvidenceMode,
     pub citations: Vec<Citation>,
@@ -840,6 +1013,7 @@ pub struct SearchState {
     pub cursor: usize,
     pub loading: bool,
     pub error: Option<String>,
+    pub explanation: Option<RetrievalExplanation>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -903,6 +1077,9 @@ pub struct OperationState {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AppState {
+    pub view: View,
+    pub focus_pane: FocusPane,
+    pub inspector_scroll: u16,
     pub route: Route,
     pub interaction_level: InteractionLevel,
     pub input_mode: InputMode,
@@ -966,6 +1143,9 @@ pub struct AppState {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiPreferences {
+    pub version: u8,
+    pub view: View,
+    pub focus_pane: FocusPane,
     pub theme_index: usize,
     pub active_workspace: Option<WorkspaceId>,
     pub focus: FocusPanel,
@@ -988,8 +1168,20 @@ impl AppState {
     pub fn apply_preferences(&mut self, preferences: UiPreferences) {
         self.theme_index = preferences.theme_index % 4;
         self.active_workspace = preferences.active_workspace;
-        self.focus = preferences.focus;
-        self.route = preferences.route;
+        if preferences.version >= 2 {
+            self.view = preferences.view;
+            self.focus_pane = preferences.focus_pane;
+            self.sync_legacy_navigation();
+        } else {
+            self.route = preferences.route;
+            self.focus = preferences.focus;
+            self.view = View::from_legacy(preferences.route);
+            self.focus_pane = if preferences.focus == FocusPanel::Navigation {
+                FocusPane::Sidebar
+            } else {
+                FocusPane::Workspace
+            };
+        }
         self.interaction_level = preferences.interaction_level;
         self.file_browser.current_dir = preferences.last_directory;
         self.file_browser.history = preferences.import_history;
@@ -1006,6 +1198,9 @@ impl AppState {
 
     pub fn preferences(&self) -> UiPreferences {
         UiPreferences {
+            version: 2,
+            view: self.view,
+            focus_pane: self.focus_pane,
             theme_index: self.theme_index,
             active_workspace: self.active_workspace.clone(),
             focus: self.focus,
@@ -1023,6 +1218,42 @@ impl AppState {
             chat_sessions: self.chat_sessions.clone(),
             document_tags: self.document_tags.clone(),
         }
+    }
+
+    pub fn navigate_view(&mut self, view: View) {
+        self.view = view;
+        self.route = view.route();
+        self.route_cursor = View::ALL
+            .iter()
+            .position(|item| *item == view)
+            .unwrap_or_default();
+        self.sync_legacy_navigation();
+        self.input_mode = InputMode::Nav;
+        self.inspector_scroll = 0;
+    }
+
+    pub fn set_focus_pane(&mut self, pane: FocusPane) {
+        self.focus_pane = pane;
+        self.sync_legacy_navigation();
+    }
+
+    fn sync_legacy_navigation(&mut self) {
+        self.route = self.view.route();
+        self.focus = match self.focus_pane {
+            FocusPane::Sidebar => FocusPanel::Navigation,
+            FocusPane::Workspace | FocusPane::Inspector => match self.view {
+                View::Conversation | View::History => FocusPanel::Chat,
+                View::Books | View::Indexing | View::Sources | View::Retrieval => {
+                    FocusPanel::Sources
+                }
+                View::Activity | View::Backups => FocusPanel::Activity,
+                View::FoundryOverview
+                | View::Models
+                | View::System
+                | View::Quality
+                | View::Settings => FocusPanel::Models,
+            },
+        };
     }
 
     pub fn active_profile(&self) -> WorkspaceProfile {
@@ -1097,6 +1328,7 @@ impl AppState {
 pub enum Action {
     QuitRequested,
     Navigate(Route),
+    NavigateView(View),
     NavigateNext,
     NavigatePrevious,
     SetInteractionLevel(InteractionLevel),
@@ -1104,6 +1336,9 @@ pub enum Action {
     CycleTheme,
     SetInputMode(InputMode),
     SetFocus(FocusPanel),
+    SetFocusPane(FocusPane),
+    FocusPaneNext,
+    FocusPanePrevious,
     FocusNext,
     FocusPrevious,
     OpenOverlay(Overlay),
@@ -1170,39 +1405,41 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
     match action {
         Action::QuitRequested => state.quit_requested = true,
         Action::Navigate(route) => {
-            state.route = route;
-            state.route_cursor = Route::ALL
-                .iter()
-                .position(|item| *item == route)
-                .unwrap_or(0);
-            state.focus = match route {
-                Route::Chat => FocusPanel::Chat,
-                Route::Library => FocusPanel::Import,
-                Route::Sources | Route::Search => FocusPanel::Sources,
-                Route::Quality | Route::System => FocusPanel::Models,
-                Route::Settings => FocusPanel::Models,
-                Route::Jobs | Route::Backups => FocusPanel::Activity,
-            };
-            state.input_mode = InputMode::Nav;
+            state.navigate_view(View::from_legacy(route));
         }
+        Action::NavigateView(view) => state.navigate_view(view),
         Action::NavigateNext => {
-            let index = Route::ALL
+            let views = View::ALL
                 .iter()
-                .position(|route| *route == state.route)
+                .copied()
+                .filter(|view| {
+                    state.interaction_level == InteractionLevel::Workshop || !view.advanced()
+                })
+                .collect::<Vec<_>>();
+            let index = views
+                .iter()
+                .position(|view| *view == state.view)
                 .unwrap_or(0);
             update(
                 state,
-                Action::Navigate(Route::ALL[(index + 1) % Route::ALL.len()]),
+                Action::NavigateView(views[(index + 1) % views.len()]),
             );
         }
         Action::NavigatePrevious => {
-            let index = Route::ALL
+            let views = View::ALL
                 .iter()
-                .position(|route| *route == state.route)
+                .copied()
+                .filter(|view| {
+                    state.interaction_level == InteractionLevel::Workshop || !view.advanced()
+                })
+                .collect::<Vec<_>>();
+            let index = views
+                .iter()
+                .position(|view| *view == state.view)
                 .unwrap_or(0);
             update(
                 state,
-                Action::Navigate(Route::ALL[(index + Route::ALL.len() - 1) % Route::ALL.len()]),
+                Action::NavigateView(views[(index + views.len() - 1) % views.len()]),
             );
         }
         Action::SetInteractionLevel(level) => state.interaction_level = level,
@@ -1214,9 +1451,33 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::CycleTheme => state.theme_index = (state.theme_index + 1) % 4,
         Action::SetInputMode(mode) => state.input_mode = mode,
-        Action::SetFocus(focus) => state.focus = focus,
-        Action::FocusNext => state.focus = state.focus.next(),
-        Action::FocusPrevious => state.focus = state.focus.previous(),
+        Action::SetFocus(focus) => {
+            state.focus = focus;
+            state.focus_pane = if focus == FocusPanel::Navigation {
+                FocusPane::Sidebar
+            } else {
+                FocusPane::Workspace
+            };
+        }
+        Action::SetFocusPane(pane) => state.set_focus_pane(pane),
+        Action::FocusPaneNext => state.set_focus_pane(state.focus_pane.next()),
+        Action::FocusPanePrevious => state.set_focus_pane(state.focus_pane.previous()),
+        Action::FocusNext => {
+            state.focus = state.focus.next();
+            state.focus_pane = if state.focus == FocusPanel::Navigation {
+                FocusPane::Sidebar
+            } else {
+                FocusPane::Workspace
+            };
+        }
+        Action::FocusPrevious => {
+            state.focus = state.focus.previous();
+            state.focus_pane = if state.focus == FocusPanel::Navigation {
+                FocusPane::Sidebar
+            } else {
+                FocusPane::Workspace
+            };
+        }
         Action::OpenOverlay(overlay) => state.overlay = Some(overlay),
         Action::CloseOverlay => {
             state.overlay = None;
@@ -1365,6 +1626,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.chat.error = None;
             state.chat.answer.clear();
             state.chat.citations.clear();
+            state.chat.last_run = None;
             state.citation_cursor = 0;
             state.operation = OperationState {
                 label: "Preparing answer".into(),
@@ -1373,7 +1635,8 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::RunStarted(run_id) => {
             state.chat.request_pending = false;
-            state.chat.active_run = Some(run_id);
+            state.chat.active_run = Some(run_id.clone());
+            state.chat.last_run = Some(run_id);
             state.input_mode = InputMode::Nav;
             state.operation = OperationState {
                 label: "Searching library".into(),
@@ -1395,6 +1658,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.search.loading = true;
             state.search.error = None;
             state.search.results.clear();
+            state.search.explanation = None;
             state.operation = OperationState {
                 label: "Searching".into(),
                 active: true,
@@ -1565,7 +1829,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.5.0".into(),
+            omarag_version: "0.7.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "local".into(),
@@ -1637,5 +1901,40 @@ mod tests {
         update(&mut state, Action::FocusNext);
         assert_eq!(state.focus, FocusPanel::Import);
         assert_eq!(state.interaction_level, InteractionLevel::Simple);
+    }
+
+    #[test]
+    fn legacy_preferences_migrate_to_the_new_view_model() {
+        let preferences: UiPreferences =
+            serde_json::from_str(r#"{"route":"quality","focus":"models"}"#).unwrap();
+        let mut state = AppState::default();
+        state.apply_preferences(preferences);
+        assert_eq!(state.view, View::Quality);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
+        assert_eq!(state.route, Route::Quality);
+    }
+
+    #[test]
+    fn version_two_preferences_restore_view_and_pane() {
+        let mut state = AppState::default();
+        state.navigate_view(View::Models);
+        state.set_focus_pane(FocusPane::Inspector);
+        let encoded = serde_json::to_string(&state.preferences()).unwrap();
+        let mut restored = AppState::default();
+        restored.apply_preferences(serde_json::from_str(&encoded).unwrap());
+        assert_eq!(restored.view, View::Models);
+        assert_eq!(restored.focus_pane, FocusPane::Inspector);
+        assert_eq!(restored.route, Route::System);
+    }
+
+    #[test]
+    fn conceptual_focus_cycles_sidebar_workspace_inspector() {
+        let mut state = AppState::default();
+        update(&mut state, Action::FocusPanePrevious);
+        assert_eq!(state.focus_pane, FocusPane::Sidebar);
+        update(&mut state, Action::FocusPaneNext);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
+        update(&mut state, Action::FocusPaneNext);
+        assert_eq!(state.focus_pane, FocusPane::Inspector);
     }
 }

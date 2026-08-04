@@ -1,6 +1,7 @@
 use crate::{
-    centered, confirm_import_area, dashboard_areas, delete_model_confirm_area, file_browser_areas,
-    header_import_area, model_manager_areas, screen_areas,
+    FoundryControl, app_areas, catalog_filter_areas, centered, confirm_import_area,
+    delete_model_confirm_area, file_browser_areas, foundry_catalog_areas, foundry_controls,
+    foundry_inspector_areas, foundry_setup_areas, screen_areas, sidebar_navigation_rows,
 };
 use crossterm::{
     event::{
@@ -14,10 +15,10 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
 };
 use omarag_app::{
-    Action, AppState, ChatSession, CustomLibraryProfile, EditorState, FocusPanel, HardwareProfile,
-    ImportPreflight, InputMode, LibraryFilter, ModelCategory, ModelMemoryPolicy, ModelQuantization,
-    ModelSource, Notification, NotificationLevel, Overlay, Route, UndoAction, WorkspaceProfile,
-    update,
+    Action, AppState, ChatSession, CustomLibraryProfile, EditorState, FocusPane, FocusPanel,
+    HardwareProfile, ImportPreflight, InputMode, LibraryFilter, ModelCategory, ModelMemoryPolicy,
+    ModelQuantization, ModelSource, Notification, NotificationLevel, Overlay, Route, UndoAction,
+    View, WorkspaceProfile, update,
 };
 use omarag_domain::{
     CreateSource, CreateWorkspace, DocumentSummary, EvidenceMode, IngestRequest, JobId, JobStatus,
@@ -55,6 +56,7 @@ pub enum UiCommand {
     Ingest {
         workspace: WorkspaceId,
         request: IngestRequest,
+        preflight_id: Option<String>,
     },
     Job {
         id: JobId,
@@ -110,6 +112,7 @@ pub enum UiCommand {
         context_anchors: Vec<omarag_domain::CitationAnchor>,
     },
     AnalyzeImport {
+        workspace: WorkspaceId,
         selected: Vec<String>,
         existing: Vec<String>,
     },
@@ -131,13 +134,17 @@ pub enum UiCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteCommand {
     Chat,
+    History,
     Library,
+    Indexing,
     Sources,
     Jobs,
     Search,
     Quality,
     Backups,
     Settings,
+    Foundry,
+    Models,
     System,
     SwitchWorkspace,
     ToggleLevel,
@@ -149,14 +156,19 @@ pub enum PaletteCommand {
 }
 
 impl PaletteCommand {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 20] = [
         Self::Chat,
+        Self::History,
         Self::Library,
+        Self::Indexing,
+        Self::Sources,
         Self::Jobs,
         Self::Search,
         Self::Quality,
         Self::Backups,
         Self::Settings,
+        Self::Foundry,
+        Self::Models,
         Self::System,
         Self::SwitchWorkspace,
         Self::ToggleLevel,
@@ -170,14 +182,18 @@ impl PaletteCommand {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Chat => "Focus chat",
+            Self::History => "Open conversation history",
             Self::Library => "Open library tools",
+            Self::Indexing => "Show indexing pipeline",
             Self::Sources => "Open source tools",
             Self::Jobs => "Focus activity",
             Self::Search => "Open search tools",
             Self::Quality => "Show quality report",
             Self::Backups => "Show backups",
             Self::Settings => "Open settings",
-            Self::System => "Show system status",
+            Self::Foundry => "Open recommended model setup",
+            Self::Models => "Open model catalog",
+            Self::System => "Show local runtime",
             Self::SwitchWorkspace => "Switch library",
             Self::ToggleLevel => "Toggle simple/advanced",
             Self::RefreshJobs => "Refresh jobs",
@@ -271,13 +287,13 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent, screen: Rect) -> Option
         }
         MouseEventKind::ScrollLeft => {
             if state.overlay.is_none() {
-                update(state, Action::FocusPrevious);
+                update(state, Action::FocusPanePrevious);
             }
             None
         }
         MouseEventKind::ScrollRight => {
             if state.overlay.is_none() {
-                update(state, Action::FocusNext);
+                update(state, Action::FocusPaneNext);
             }
             None
         }
@@ -305,13 +321,15 @@ fn handle_mouse_primary(
 
     let [header, body, footer] = screen_areas(screen);
     if contains(header, &mouse) {
-        if contains(header_import_area(header), &mouse) {
-            update(state, Action::SetFocus(FocusPanel::Import));
-            update(state, Action::SetInputMode(InputMode::Nav));
-            if activate {
-                open_file_browser(state);
-            }
-        }
+        let third = header.width / 3;
+        let pane = if mouse.column < header.x.saturating_add(third) {
+            FocusPane::Sidebar
+        } else if mouse.column < header.x.saturating_add(third.saturating_mul(2)) {
+            FocusPane::Workspace
+        } else {
+            FocusPane::Inspector
+        };
+        update(state, Action::SetFocusPane(pane));
         return None;
     }
     if contains(footer, &mouse) {
@@ -321,101 +339,121 @@ fn handle_mouse_primary(
         return None;
     }
 
-    let [chat, library, compute, activity] = dashboard_areas(body);
-    if contains(chat, &mouse) {
-        update(state, Action::Navigate(Route::Chat));
-        let inner = bordered_inner(chat);
-        let input_height = if inner.height >= 7 { 3 } else { 1 };
-        let input_y = inner.bottom().saturating_sub(input_height);
-        if mouse.row >= input_y {
-            update(state, Action::SetInputMode(InputMode::Text));
-            set_editor_cursor_from_column(
-                &mut state.chat.question,
-                mouse.column.saturating_sub(inner.x) as usize,
-            );
-        } else if !state.chat.answer.is_empty() && !state.chat.citations.is_empty() {
-            let body_height = inner.height.saturating_sub(input_height);
-            let evidence_height = body_height.min(10);
-            let evidence_y = input_y.saturating_sub(evidence_height);
-            let image_height = evidence_height.saturating_sub(4).min(6);
-            let targets = citation_targets(state);
-            if mouse.row == evidence_y.saturating_sub(1) {
-                let marker_start = inner.x.saturating_add(10);
-                let index = mouse.column.saturating_sub(marker_start) as usize / 4;
-                if index < state.chat.citations.len() {
-                    state.citation_cursor = index;
-                    state.gallery_cursor = index.min(3);
-                    if activate
-                        && let Some(citation) = state.chat.citations.get(index)
-                        && let Some((path, page)) = citation_pdf_target(state, citation)
-                    {
-                        return Some(UiCommand::OpenPdf {
-                            path,
-                            page: Some(page),
-                        });
-                    }
+    let areas = app_areas(body, state.focus_pane);
+    if areas.sidebar.width > 0 && contains(areas.sidebar, &mouse) {
+        update(state, Action::SetFocusPane(FocusPane::Sidebar));
+        let inner = bordered_inner(areas.sidebar);
+        let row = mouse.row.saturating_sub(inner.y) as usize;
+        let navigation = sidebar_navigation_rows(state);
+        if let Some(Some(view)) = navigation.get(row) {
+            update(state, Action::NavigateView(*view));
+            update(state, Action::SetFocusPane(FocusPane::Sidebar));
+        } else {
+            let utility_y = inner.bottom().saturating_sub(5);
+            match mouse.row.saturating_sub(utility_y) {
+                1 => {
+                    update(state, Action::NavigateView(View::Activity));
                 }
-            } else if mouse.row >= evidence_y
-                && mouse.row < evidence_y.saturating_add(image_height)
-                && !targets.is_empty()
-            {
-                let relative = mouse.column.saturating_sub(inner.x) as usize;
-                let index = relative.saturating_mul(targets.len()) / inner.width.max(1) as usize;
-                let index = index.min(targets.len() - 1);
-                state.citation_cursor = index;
-                state.gallery_cursor = index;
-                if activate && let Some((path, page)) = targets.get(index) {
-                    let citation = &state.chat.citations[index];
-                    return Some(UiCommand::OpenPageImage {
-                        path: path.clone(),
-                        page: *page,
-                        primary_anchors: citation.primary_anchors.clone(),
-                        context_anchors: citation.context_anchors.clone(),
-                    });
+                2 => {
+                    update(state, Action::NavigateView(View::Settings));
                 }
-            } else if mouse.row > evidence_y.saturating_add(image_height) {
-                let index = mouse
-                    .row
-                    .saturating_sub(evidence_y.saturating_add(image_height + 1))
-                    as usize;
-                if activate
-                    && let Some(citation) = state.chat.citations.get(index)
-                    && let Some((path, page)) = citation_pdf_target(state, citation)
-                {
-                    state.citation_cursor = index;
-                    return Some(UiCommand::OpenPdf {
-                        path,
-                        page: Some(page),
-                    });
+                3 if activate => {
+                    update(state, Action::OpenOverlay(Overlay::Help));
                 }
+                _ => {}
             }
         }
         return None;
     }
-    if contains(library, &mouse) {
-        return handle_library_mouse(state, mouse, library, activate);
-    }
-    if contains(compute, &mouse) {
-        let was_focused = matches!(state.focus, FocusPanel::Hardware | FocusPanel::Models);
-        update(state, Action::SetFocus(FocusPanel::Models));
-        update(state, Action::SetInputMode(InputMode::Nav));
-        let inner = bordered_inner(compute);
-        let content_height = inner.height.saturating_sub(1);
-        let models_x = inner.x + inner.width.saturating_mul(38) / 100;
-        if mouse.column >= models_x && mouse.row > inner.y {
-            state.model_cursor = mouse.row.saturating_sub(inner.y + 1).min(3) as usize;
-        }
-        if activate
-            && was_focused
-            && mouse.column >= models_x
-            && mouse.row < inner.y + content_height
-        {
-            return open_model_manager(state);
+    if areas.workspace.width > 0 && contains(areas.workspace, &mouse) {
+        update(state, Action::SetFocusPane(FocusPane::Workspace));
+        let inner = bordered_inner(areas.workspace);
+        match state.view {
+            View::Conversation => {
+                let input_height = if inner.height >= 9 { 3 } else { 1 };
+                let input_y = inner.bottom().saturating_sub(input_height);
+                if mouse.row >= input_y {
+                    state.input_mode = InputMode::Text;
+                    set_editor_cursor_from_column(
+                        &mut state.chat.question,
+                        mouse.column.saturating_sub(inner.x) as usize,
+                    );
+                }
+            }
+            View::Books => {
+                let list_y = inner.y.saturating_add(2);
+                let list_bottom = inner.bottom().saturating_sub(3);
+                if mouse.row >= list_y && mouse.row < list_bottom {
+                    let len = visible_document_indices(state).len();
+                    if len > 0 {
+                        state.asset_cursor = (mouse.row.saturating_sub(list_y) as usize / 2)
+                            .min(len.saturating_sub(1));
+                        sync_document_cursor(state);
+                    }
+                }
+            }
+            View::Indexing | View::Activity => {
+                let intro = if state.view == View::Indexing { 3 } else { 0 };
+                let index = mouse.row.saturating_sub(inner.y.saturating_add(intro)) as usize;
+                if index < state.jobs.len() {
+                    state.job_cursor = index;
+                }
+            }
+            View::FoundryOverview => {
+                let [_summary, _rail, packages, _status] = foundry_setup_areas(inner);
+                if contains(packages, &mouse) && !state.model_manager.packages.is_empty() {
+                    state.model_manager.package_cursor =
+                        (mouse.row.saturating_sub(packages.y.saturating_add(1)) as usize / 2)
+                            .min(state.model_manager.packages.len().saturating_sub(1));
+                }
+            }
+            View::Models => {
+                let [filters, search, list, _status] = foundry_catalog_areas(inner);
+                let [source, role, _count] = catalog_filter_areas(filters);
+                if contains(source, &mouse) && activate {
+                    state.model_manager.source = state.model_manager.source.next();
+                    return Some(refresh_model_catalog_command(state));
+                }
+                if contains(role, &mouse) && activate {
+                    state.model_manager.category = state.model_manager.category.next();
+                    return Some(refresh_model_catalog_command(state));
+                }
+                if contains(search, &mouse) {
+                    state.model_manager.searching = true;
+                    set_editor_cursor_from_column(
+                        &mut state.model_manager.query,
+                        mouse.column.saturating_sub(search.x) as usize,
+                    );
+                } else if contains(list, &mouse) && !state.model_manager.entries.is_empty() {
+                    state.model_manager.cursor = (mouse.row.saturating_sub(list.y) as usize)
+                        .min(state.model_manager.entries.len().saturating_sub(1));
+                }
+            }
+            _ => {}
         }
         return None;
     }
-    if contains(activity, &mouse) {
-        return handle_activity_mouse(state, mouse, activity, activate);
+    if areas.inspector.width > 0 && contains(areas.inspector, &mouse) {
+        update(state, Action::SetFocusPane(FocusPane::Inspector));
+        let inner = bordered_inner(areas.inspector);
+        if matches!(state.view, View::FoundryOverview | View::Models) {
+            let [_details, tuning, actions] = foundry_inspector_areas(inner);
+            let controls = foundry_controls(state);
+            let index = if contains(tuning, &mouse) {
+                Some(mouse.row.saturating_sub(tuning.y.saturating_add(1)) as usize)
+            } else if contains(actions, &mouse) {
+                Some(4 + mouse.row.saturating_sub(actions.y.saturating_add(1)) as usize)
+            } else {
+                None
+            };
+            if let Some(index) = index.filter(|index| *index < controls.len()) {
+                state.model_manager.inspector_cursor = index;
+                if activate {
+                    return execute_foundry_control(state, controls[index], true);
+                }
+            }
+        }
+        return None;
     }
     None
 }
@@ -448,162 +486,13 @@ fn citation_pdf_target(
                     .find(|document| &document.title == title)
             })
         })?;
-    Some((document.source.clone(), page))
-}
-
-fn citation_targets(state: &AppState) -> Vec<(String, u32)> {
-    let mut targets = Vec::new();
-    for citation in &state.chat.citations {
-        let Some(target) = citation_pdf_target(state, citation) else {
-            continue;
-        };
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
-        if targets.len() == 4 {
-            break;
-        }
-    }
-    targets
-}
-
-fn handle_library_mouse(
-    state: &mut AppState,
-    mouse: MouseEvent,
-    area: Rect,
-    activate: bool,
-) -> Option<UiCommand> {
-    let inner = bordered_inner(area);
-    update(state, Action::SetFocus(FocusPanel::Sources));
-    update(state, Action::SetInputMode(InputMode::Nav));
-    let actions_y = inner.bottom().saturating_sub(4);
-    if mouse.row >= actions_y && activate {
-        let relative = mouse.column.saturating_sub(inner.x);
-        match mouse.row.saturating_sub(actions_y) {
-            0 => match relative.saturating_mul(3) / inner.width.max(1) {
-                0 => {
-                    state.creating_workspace = false;
-                    state.overlay = Some(Overlay::Workspaces);
-                }
-                1 => start_workspace_creation(state),
-                _ => {
-                    state.profile_cursor = state.active_profile_index();
-                    state.overlay = Some(Overlay::WorkspaceProfile);
-                }
-            },
-            1 => match relative.saturating_mul(3) / inner.width.max(1) {
-                0 => {
-                    state.library.filtering = true;
-                    state.input_mode = InputMode::Text;
-                }
-                1 => {
-                    state.library.filter = state.library.filter.next();
-                    state.asset_cursor = 0;
-                }
-                _ => {
-                    state.library.sort = state.library.sort.next();
-                    state.asset_cursor = 0;
-                }
-            },
-            2 => {
-                return match relative.saturating_mul(3) / inner.width.max(1) {
-                    0 => activate_selection(state),
-                    1 => toggle_selected_library_job(state),
-                    _ => retry_selected_library_job(state),
-                };
-            }
-            _ => {
-                return match relative.saturating_mul(3) / inner.width.max(1) {
-                    0 => {
-                        if selected_library_document(state).is_some() {
-                            state.overlay = Some(Overlay::DocumentDetails);
-                        }
-                        None
-                    }
-                    1 => {
-                        if let Some(document) = selected_library_document(state) {
-                            let tags = state
-                                .document_tags
-                                .get(&document.id)
-                                .cloned()
-                                .unwrap_or_default()
-                                .join(", ");
-                            state.tag_editor.set(tags);
-                            state.overlay = Some(Overlay::DocumentTags);
-                        }
-                        None
-                    }
-                    _ => {
-                        if selected_library_document(state).is_some() {
-                            state.overlay = Some(Overlay::ConfirmDocumentDelete);
-                        } else {
-                            hide_selected_library_job(state);
-                        }
-                        None
-                    }
-                };
-            }
-        }
-        return None;
-    }
-    let jobs = visible_library_jobs(state);
-    let active_jobs = jobs.len();
-    let jobs_end = inner.y.saturating_add(1 + active_jobs as u16 * 2);
-    if mouse.row >= inner.y.saturating_add(1) && mouse.row < jobs_end {
-        state.asset_cursor = (mouse.row.saturating_sub(inner.y + 1) / 2) as usize;
-        return if activate {
-            toggle_selected_library_job(state)
-        } else {
-            None
-        };
-    }
-    let document_start = jobs_end;
-    if mouse.row >= document_start {
-        let index = mouse.row.saturating_sub(document_start) as usize;
-        let documents = visible_document_indices(state);
-        if let Some(document_index) = documents.get(index).copied() {
-            state.asset_cursor = active_jobs + index;
-            state.document_cursor = document_index;
-            if activate {
-                let document = &state.documents[document_index];
-                return Some(UiCommand::OpenPdf {
-                    path: document.source.clone(),
-                    page: None,
-                });
-            }
-        }
-    }
-    None
-}
-
-fn handle_activity_mouse(
-    state: &mut AppState,
-    mouse: MouseEvent,
-    area: Rect,
-    activate: bool,
-) -> Option<UiCommand> {
-    update(state, Action::SetFocus(FocusPanel::Activity));
-    update(state, Action::SetInputMode(InputMode::Nav));
-    let inner = bordered_inner(area);
-    let actions_y = inner.bottom().saturating_sub(3);
-    if mouse.row < actions_y {
-        state.job_cursor = (mouse.row.saturating_sub(inner.y) as usize / 2)
-            .min(state.jobs.len().saturating_sub(1));
-        return None;
-    }
-    if !activate {
-        return None;
-    }
-    let relative_x = mouse.column.saturating_sub(inner.x);
-    let action = relative_x.saturating_mul(3) / inner.width.max(1);
-    match action {
-        0 => Some(UiCommand::RefreshJobs),
-        1 => cancel_active(state),
-        _ => {
-            update(state, Action::NotificationDismissed);
-            None
-        }
-    }
+    Some((
+        document
+            .managed_source
+            .clone()
+            .unwrap_or_else(|| document.source.clone()),
+        page,
+    ))
 }
 
 fn handle_overlay_mouse(
@@ -690,18 +579,20 @@ fn handle_overlay_mouse(
             }
             None
         }
-        Overlay::ModelManager => handle_model_manager_mouse(state, mouse, screen, activate),
         Overlay::ConfirmModelDelete => {
             handle_delete_model_confirm_mouse(state, mouse, screen, activate)
         }
         Overlay::FileBrowser => handle_file_browser_mouse(state, mouse, screen, activate),
         Overlay::ConfirmImport => handle_confirm_import_mouse(state, mouse, screen, activate),
         Overlay::DocumentDetails => {
-            let area = centered(66, 19, screen);
+            let area = centered(70, 26, screen);
             if activate && contains(area, &mouse) && mouse.row >= area.bottom().saturating_sub(3) {
                 if mouse.column < area.x + area.width / 2 {
                     return selected_library_document(state).map(|document| UiCommand::OpenPdf {
-                        path: document.source.clone(),
+                        path: document
+                            .managed_source
+                            .clone()
+                            .unwrap_or_else(|| document.source.clone()),
                         page: None,
                     });
                 }
@@ -919,122 +810,6 @@ fn handle_delete_model_confirm_mouse(
     }
 }
 
-fn handle_model_manager_mouse(
-    state: &mut AppState,
-    mouse: MouseEvent,
-    screen: Rect,
-    activate: bool,
-) -> Option<UiCommand> {
-    let [area, sidebar, search, list, _details, footer] = model_manager_areas(screen);
-    if !contains(area, &mouse) {
-        return None;
-    }
-    if contains(sidebar, &mouse) {
-        let row = mouse.row.saturating_sub(sidebar.y);
-        if (1..=3).contains(&row) {
-            let source = [
-                ModelSource::Installed,
-                ModelSource::Ollama,
-                ModelSource::HuggingFace,
-            ][row.saturating_sub(1) as usize];
-            if source != state.model_manager.source {
-                state.model_manager.source = source;
-                return Some(refresh_model_catalog_command(state));
-            }
-        } else if (6..=9).contains(&row) {
-            let category = [
-                ModelCategory::Chat,
-                ModelCategory::Vl,
-                ModelCategory::Embedding,
-                ModelCategory::Rerank,
-            ][row.saturating_sub(6) as usize];
-            if category != state.model_manager.category {
-                state.model_manager.category = category;
-                return Some(refresh_model_catalog_command(state));
-            }
-        } else if row >= 12 {
-            let index = row.saturating_sub(12) as usize;
-            if index < state.model_manager.packages.len() {
-                state.model_manager.package_cursor = index;
-            }
-        }
-        return None;
-    }
-    if contains(search, &mouse) {
-        state.model_manager.searching = true;
-        set_editor_cursor_from_column(
-            &mut state.model_manager.query,
-            mouse.column.saturating_sub(search.x.saturating_add(11)) as usize,
-        );
-        return None;
-    }
-    if contains(list, &mouse) {
-        let index = mouse.row.saturating_sub(list.y) as usize;
-        if index < state.model_manager.entries.len() {
-            state.model_manager.cursor = index;
-        }
-        return None;
-    }
-    if contains(footer, &mouse) && activate {
-        if mouse.row == footer.y.saturating_add(1) {
-            let controls = [
-                format!("Fit {}", state.model_manager.profile.label()),
-                format!("Quant {}", state.model_manager.quantization.label()),
-                format!("Context {}K", state.model_manager.context_tokens / 1024),
-                format!("Purge {}", state.model_manager.memory_policy.label()),
-            ];
-            let labels = controls.iter().map(String::as_str).collect::<Vec<_>>();
-            match compact_control_at(mouse.column, footer.x, &labels, 0, 2) {
-                Some(0) => {
-                    apply_next_profile(state);
-                    return Some(refresh_model_catalog_command(state));
-                }
-                Some(1) => {
-                    state.model_manager.quantization = state.model_manager.quantization.next();
-                    return Some(refresh_model_catalog_command(state));
-                }
-                Some(2) => {
-                    state.model_manager.context_tokens = match state.model_manager.context_tokens {
-                        4_096 => 8_192,
-                        8_192 => 16_384,
-                        16_384 => 32_768,
-                        _ => 4_096,
-                    };
-                    return Some(refresh_model_catalog_command(state));
-                }
-                Some(3) => {
-                    state.model_manager.memory_policy = state.model_manager.memory_policy.next()
-                }
-                _ => {}
-            }
-        } else if mouse.row == footer.y.saturating_add(2) {
-            return match compact_control_at(
-                mouse.column,
-                footer.x,
-                &[
-                    "Download",
-                    "Load temporarily",
-                    "Unload",
-                    "Refresh",
-                    "Apply stack",
-                    "Delete",
-                ],
-                0,
-                3,
-            ) {
-                Some(0) => pull_selected_model(state),
-                Some(1) => load_or_pull_selected_model(state),
-                Some(2) => unload_selected_model(state),
-                Some(3) => Some(refresh_model_catalog_command(state)),
-                Some(4) => pull_selected_package(state),
-                Some(5) => request_model_delete(state),
-                _ => None,
-            };
-        }
-    }
-    None
-}
-
 fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
     let next = matches!(mouse.kind, MouseEventKind::ScrollDown);
     match state.overlay {
@@ -1059,7 +834,6 @@ fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
             );
         }
         Some(Overlay::Help) => {}
-        Some(Overlay::ModelManager) => move_model_cursor(state, next),
         Some(Overlay::ConfirmModelDelete) => {}
         Some(Overlay::FileBrowser) => move_file_browser_cursor(state, next),
         Some(Overlay::ConfirmImport) => {}
@@ -1083,21 +857,22 @@ fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
         Some(Overlay::DocumentTags) => {}
         None => {
             let [_header, body, _footer] = screen_areas(screen);
-            let panels = dashboard_areas(body);
-            let focuses = [
-                FocusPanel::Chat,
-                FocusPanel::Sources,
-                FocusPanel::Models,
-                FocusPanel::Activity,
-            ];
-            if let Some((_, focus)) = panels
-                .iter()
-                .zip(focuses)
-                .find(|(area, _)| contains(**area, &mouse))
-            {
-                update(state, Action::SetFocus(focus));
+            let areas = app_areas(body, state.focus_pane);
+            if areas.sidebar.width > 0 && contains(areas.sidebar, &mouse) {
+                update(state, Action::SetFocusPane(FocusPane::Sidebar));
+                update(state, Action::SetInputMode(InputMode::Nav));
+                move_sidebar_view(state, next);
+            } else if areas.workspace.width > 0 && contains(areas.workspace, &mouse) {
+                update(state, Action::SetFocusPane(FocusPane::Workspace));
                 update(state, Action::SetInputMode(InputMode::Nav));
                 move_selection(state, next);
+            } else if areas.inspector.width > 0 && contains(areas.inspector, &mouse) {
+                update(state, Action::SetFocusPane(FocusPane::Inspector));
+                state.inspector_scroll = if next {
+                    state.inspector_scroll.saturating_add(1)
+                } else {
+                    state.inspector_scroll.saturating_sub(1)
+                };
             }
         }
     }
@@ -1158,7 +933,7 @@ fn handle_paste(state: &mut AppState, text: &str) {
     } else if state.overlay == Some(Overlay::CustomProfileEditor) && state.custom_profile_field == 0
     {
         state.custom_profile_name.insert_str(text);
-    } else if state.overlay == Some(Overlay::ModelManager) && state.model_manager.searching {
+    } else if state.view == View::Models && state.model_manager.searching {
         state.model_manager.query.insert_str(text);
     } else if state.overlay == Some(Overlay::Palette) {
         state.palette.query.insert_str(text);
@@ -1173,6 +948,10 @@ fn handle_paste(state: &mut AppState, text: &str) {
 }
 
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        update(state, Action::QuitRequested);
+        return None;
+    }
     if let Some(overlay) = state.overlay {
         return handle_overlay(state, overlay, key);
     }
@@ -1201,9 +980,9 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         update(
             state,
             if key.code == KeyCode::Tab {
-                Action::FocusNext
+                Action::FocusPaneNext
             } else {
-                Action::FocusPrevious
+                Action::FocusPanePrevious
             },
         );
         return None;
@@ -1217,12 +996,12 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
 fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<UiCommand>> {
     let command = match code {
         KeyCode::Char('c') => {
-            update(state, Action::Navigate(Route::Chat));
+            update(state, Action::QuitRequested);
             None
         }
         KeyCode::Char('s') => {
-            update(state, Action::SetFocus(FocusPanel::Sources));
-            update(state, Action::SetInputMode(InputMode::Nav));
+            update(state, Action::NavigateView(View::Sources));
+            update(state, Action::SetFocusPane(FocusPane::Workspace));
             None
         }
         KeyCode::Char('l') => {
@@ -1231,17 +1010,18 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             None
         }
         KeyCode::Char('h') => {
-            update(state, Action::SetFocus(FocusPanel::Models));
-            update(state, Action::SetInputMode(InputMode::Nav));
-            None
+            update(state, Action::NavigateView(View::FoundryOverview));
+            update(state, Action::SetFocusPane(FocusPane::Workspace));
+            Some(refresh_model_catalog_command(state))
         }
         KeyCode::Char('m') => {
-            update(state, Action::SetFocus(FocusPanel::Models));
-            update(state, Action::SetInputMode(InputMode::Nav));
-            None
+            update(state, Action::NavigateView(View::Models));
+            update(state, Action::SetFocusPane(FocusPane::Workspace));
+            Some(refresh_model_catalog_command(state))
         }
         KeyCode::Char('a') => {
-            update(state, Action::Navigate(Route::Jobs));
+            update(state, Action::NavigateView(View::Activity));
+            update(state, Action::SetFocusPane(FocusPane::Workspace));
             None
         }
         KeyCode::Char('t') => {
@@ -1405,9 +1185,17 @@ fn selected_library_job(state: &AppState) -> Option<&omarag_domain::JobSnapshot>
 }
 
 fn selected_library_document(state: &AppState) -> Option<&DocumentSummary> {
+    if state.view == View::Books {
+        return selected_book_document(state);
+    }
     let jobs = visible_library_jobs(state).len();
     let index = state.asset_cursor.checked_sub(jobs)?;
     let document = *visible_document_indices(state).get(index)?;
+    state.documents.get(document)
+}
+
+fn selected_book_document(state: &AppState) -> Option<&DocumentSummary> {
+    let document = *visible_document_indices(state).get(state.asset_cursor)?;
     state.documents.get(document)
 }
 
@@ -1460,6 +1248,7 @@ fn retry_selected_library_job(state: &AppState) -> Option<UiCommand> {
     Some(UiCommand::Ingest {
         workspace: job.workspace_id.clone(),
         request,
+        preflight_id: None,
     })
 }
 
@@ -1549,7 +1338,7 @@ fn undo_last_action(state: &mut AppState) -> Option<UiCommand> {
                 .clone()
                 .map(|workspace| UiCommand::RestoreDocument {
                     workspace,
-                    document,
+                    document: *document,
                 })
         }
         UndoAction::HiddenJob(job) => {
@@ -1561,6 +1350,7 @@ fn undo_last_action(state: &mut AppState) -> Option<UiCommand> {
             Some(UiCommand::Ingest {
                 workspace: job.workspace_id,
                 request,
+                preflight_id: None,
             })
         }
         UndoAction::ProfileChanged {
@@ -1590,7 +1380,6 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
         }
         Overlay::Workspaces => handle_workspace_overlay(state, key),
         Overlay::Palette => handle_palette(state, key),
-        Overlay::ModelManager => handle_model_manager(state, key),
         Overlay::ConfirmModelDelete => match key.code {
             KeyCode::Enter | KeyCode::Char('y') => confirm_model_delete(state),
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -1615,7 +1404,10 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
             }
             KeyCode::Enter | KeyCode::Char('o') => {
                 selected_library_document(state).map(|document| UiCommand::OpenPdf {
-                    path: document.source.clone(),
+                    path: document
+                        .managed_source
+                        .clone()
+                        .unwrap_or_else(|| document.source.clone()),
                     page: None,
                 })
             }
@@ -2216,6 +2008,7 @@ fn request_import_confirmation(state: &mut AppState) -> Option<UiCommand> {
     };
     state.overlay = Some(Overlay::ConfirmImport);
     Some(UiCommand::AnalyzeImport {
+        workspace: state.active_workspace.clone()?,
         selected: state.file_browser.selected.clone(),
         existing: state
             .documents
@@ -2242,6 +2035,18 @@ fn confirm_file_browser_import(state: &mut AppState) -> Option<UiCommand> {
     if state.library.preflight.busy {
         return None;
     }
+    if let Some(error) = state.library.preflight.error.clone() {
+        notify(state, NotificationLevel::Error, &error);
+        return None;
+    }
+    if state.library.preflight.server_preflight_id.is_none() {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "Book metadata preflight has not completed yet.",
+        );
+        return None;
+    }
     let paths = state
         .library
         .preflight
@@ -2265,14 +2070,33 @@ fn confirm_file_browser_import(state: &mut AppState) -> Option<UiCommand> {
     state.overlay = None;
     update(state, Action::ImportStarted);
     let profile = state.active_profile_settings();
+    let mut request = IngestRequest {
+        processing_profile: profile.processing_profile,
+        duplicate_policy: profile.duplicate_policy,
+        validity_policy: profile.validity_policy,
+        ..IngestRequest::files(paths)
+    };
+    for source in &mut request.sources {
+        let canonical = std::fs::canonicalize(&source.path)
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        if let Some(book) = state.library.preflight.books.iter().find(|book| {
+            book.source == source.path
+                || canonical.as_ref().is_some_and(|path| path == &book.source)
+        }) {
+            source.path = book.source.clone();
+            source.candidate_id = Some(book.candidate_id.clone());
+            source.fingerprint = Some(book.fingerprint.clone());
+            source.metadata = Some(omarag_domain::BookMetadata {
+                confirmed: true,
+                ..book.metadata.clone()
+            });
+        }
+    }
     Some(UiCommand::Ingest {
         workspace,
-        request: IngestRequest {
-            processing_profile: profile.processing_profile,
-            duplicate_policy: profile.duplicate_policy,
-            validity_policy: profile.validity_policy,
-            ..IngestRequest::files(paths)
-        },
+        request,
+        preflight_id: state.library.preflight.server_preflight_id.clone(),
     })
 }
 
@@ -2528,6 +2352,106 @@ fn handle_model_manager(state: &mut AppState, key: KeyEvent) -> Option<UiCommand
     }
 }
 
+fn handle_foundry_inspector_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+    let controls = foundry_controls(state);
+    if controls.is_empty() {
+        return None;
+    }
+    state.model_manager.inspector_cursor = state
+        .model_manager
+        .inspector_cursor
+        .min(controls.len().saturating_sub(1));
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.model_manager.inspector_cursor =
+                (state.model_manager.inspector_cursor + controls.len() - 1) % controls.len();
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.model_manager.inspector_cursor =
+                (state.model_manager.inspector_cursor + 1) % controls.len();
+            None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            let control = controls[state.model_manager.inspector_cursor];
+            if matches!(
+                control,
+                FoundryControl::Profile
+                    | FoundryControl::Quantization
+                    | FoundryControl::Context
+                    | FoundryControl::Memory
+            ) {
+                execute_foundry_control(state, control, false)
+            } else {
+                update(state, Action::SetFocusPane(FocusPane::Workspace));
+                None
+            }
+        }
+        KeyCode::Right | KeyCode::Enter => {
+            let control = controls[state.model_manager.inspector_cursor];
+            execute_foundry_control(state, control, true)
+        }
+        _ => None,
+    }
+}
+
+fn execute_foundry_control(
+    state: &mut AppState,
+    control: FoundryControl,
+    forward: bool,
+) -> Option<UiCommand> {
+    match control {
+        FoundryControl::Profile => {
+            if forward {
+                apply_next_profile(state);
+            } else {
+                apply_previous_profile(state);
+            }
+            Some(refresh_model_catalog_command(state))
+        }
+        FoundryControl::Quantization => {
+            state.model_manager.quantization = if forward {
+                state.model_manager.quantization.next()
+            } else {
+                state.model_manager.quantization.previous()
+            };
+            Some(refresh_model_catalog_command(state))
+        }
+        FoundryControl::Context => {
+            state.model_manager.context_tokens = match (state.model_manager.context_tokens, forward)
+            {
+                (4_096, true) => 8_192,
+                (8_192, true) => 16_384,
+                (16_384, true) => 32_768,
+                (_, true) => 4_096,
+                (4_096, false) => 32_768,
+                (8_192, false) => 4_096,
+                (16_384, false) => 8_192,
+                (_, false) => 16_384,
+            };
+            Some(refresh_model_catalog_command(state))
+        }
+        FoundryControl::Memory => {
+            state.model_manager.memory_policy = if forward {
+                state.model_manager.memory_policy.next()
+            } else {
+                match state.model_manager.memory_policy {
+                    ModelMemoryPolicy::Saver => ModelMemoryPolicy::Manual,
+                    ModelMemoryPolicy::Balanced => ModelMemoryPolicy::Saver,
+                    ModelMemoryPolicy::Manual => ModelMemoryPolicy::Balanced,
+                }
+            };
+            None
+        }
+        FoundryControl::InstallStack => pull_selected_package(state),
+        FoundryControl::Download => pull_selected_model(state),
+        FoundryControl::Load => load_or_pull_selected_model(state),
+        FoundryControl::Unload => unload_selected_model(state),
+        FoundryControl::Delete => request_model_delete(state),
+        FoundryControl::Refresh => Some(refresh_model_catalog_command(state)),
+    }
+}
+
 fn refresh_model_catalog_command(state: &mut AppState) -> UiCommand {
     state.model_manager.busy = true;
     state.model_manager.cursor = 0;
@@ -2544,6 +2468,19 @@ fn refresh_model_catalog_command(state: &mut AppState) -> UiCommand {
 
 fn apply_next_profile(state: &mut AppState) {
     state.model_manager.profile = state.model_manager.profile.next();
+    apply_profile_defaults(state);
+}
+
+fn apply_previous_profile(state: &mut AppState) {
+    state.model_manager.profile = match state.model_manager.profile {
+        HardwareProfile::Eco => HardwareProfile::Quality,
+        HardwareProfile::Laptop => HardwareProfile::Eco,
+        HardwareProfile::Quality => HardwareProfile::Laptop,
+    };
+    apply_profile_defaults(state);
+}
+
+fn apply_profile_defaults(state: &mut AppState) {
     match state.model_manager.profile {
         HardwareProfile::Eco => {
             state.model_manager.quantization = ModelQuantization::Q3Km;
@@ -2682,7 +2619,7 @@ fn confirm_model_delete(state: &mut AppState) -> Option<UiCommand> {
     let model = state.model_manager.delete_candidate.take()?;
     state.model_manager.busy = true;
     state.model_manager.transfer_status = format!("Deleting {model}");
-    state.overlay = Some(Overlay::ModelManager);
+    state.overlay = None;
     Some(UiCommand::DeleteModel {
         confirm: model.clone(),
         model,
@@ -2691,7 +2628,7 @@ fn confirm_model_delete(state: &mut AppState) -> Option<UiCommand> {
 
 fn cancel_model_delete(state: &mut AppState) {
     state.model_manager.delete_candidate = None;
-    state.overlay = Some(Overlay::ModelManager);
+    state.overlay = None;
 }
 
 fn downloadable_model_name(state: &AppState, entry: &omarag_app::ModelCatalogEntry) -> String {
@@ -2761,20 +2698,24 @@ fn handle_palette(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
 
 fn execute_palette(state: &mut AppState, command: PaletteCommand) -> Option<UiCommand> {
     update(state, Action::CloseOverlay);
-    let route = match command {
-        PaletteCommand::Chat => Some(Route::Chat),
-        PaletteCommand::Library => Some(Route::Library),
-        PaletteCommand::Sources => Some(Route::Sources),
-        PaletteCommand::Jobs => Some(Route::Jobs),
-        PaletteCommand::Search => Some(Route::Search),
-        PaletteCommand::Quality => Some(Route::Quality),
-        PaletteCommand::Backups => Some(Route::Backups),
-        PaletteCommand::Settings => Some(Route::Settings),
-        PaletteCommand::System => Some(Route::System),
+    let view = match command {
+        PaletteCommand::Chat => Some(View::Conversation),
+        PaletteCommand::History => Some(View::History),
+        PaletteCommand::Library => Some(View::Books),
+        PaletteCommand::Indexing => Some(View::Indexing),
+        PaletteCommand::Sources => Some(View::Sources),
+        PaletteCommand::Jobs => Some(View::Activity),
+        PaletteCommand::Search => Some(View::Retrieval),
+        PaletteCommand::Quality => Some(View::Quality),
+        PaletteCommand::Backups => Some(View::Backups),
+        PaletteCommand::Settings => Some(View::Settings),
+        PaletteCommand::Foundry => Some(View::FoundryOverview),
+        PaletteCommand::Models => Some(View::Models),
+        PaletteCommand::System => Some(View::System),
         _ => None,
     };
-    if let Some(route) = route {
-        update(state, Action::Navigate(route));
+    if let Some(view) = view {
+        update(state, Action::NavigateView(view));
         return None;
     }
     match command {
@@ -3052,6 +2993,7 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
             Some(UiCommand::Ingest {
                 workspace,
                 request: IngestRequest::file(path),
+                preflight_id: None,
             })
         }
         Route::Sources => {
@@ -3098,7 +3040,106 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
 }
 
 fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
-    if state.focus == FocusPanel::Activity {
+    if state.focus_pane == FocusPane::Sidebar {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => move_sidebar_view(state, false),
+            KeyCode::Down | KeyCode::Char('j') => move_sidebar_view(state, true),
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                update(state, Action::SetFocusPane(FocusPane::Workspace));
+            }
+            KeyCode::Char('i') if matches!(state.view, View::Books | View::Indexing) => {
+                open_file_browser(state);
+            }
+            KeyCode::Char('?') => {
+                update(state, Action::OpenOverlay(Overlay::Help));
+            }
+            KeyCode::Char(':') => {
+                update(state, Action::OpenOverlay(Overlay::Palette));
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    let in_foundry = matches!(state.view, View::FoundryOverview | View::Models);
+    if state.view == View::Models && state.model_manager.searching {
+        return handle_model_manager(state, key);
+    }
+    if in_foundry
+        && (matches!(
+            key.code,
+            KeyCode::Char(
+                '[' | ']'
+                    | '/'
+                    | 'q'
+                    | 'c'
+                    | 'f'
+                    | 'p'
+                    | 'r'
+                    | 'a'
+                    | 'b'
+                    | 'd'
+                    | 'l'
+                    | 'u'
+                    | 'x'
+                    | 's'
+                    | '1'
+                    | '2'
+                    | '3'
+            ) | KeyCode::Delete
+        ) || (key.modifiers.contains(KeyModifiers::SHIFT)
+            && matches!(key.code, KeyCode::Left | KeyCode::Right)))
+    {
+        if key.code == KeyCode::Char('s') {
+            state.model_manager.source = state.model_manager.source.next();
+            return Some(refresh_model_catalog_command(state));
+        }
+        return handle_model_manager(state, key);
+    }
+
+    if state.focus_pane == FocusPane::Inspector {
+        if in_foundry
+            && matches!(
+                key.code,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Enter
+                    | KeyCode::Char('j' | 'k' | 'h')
+            )
+        {
+            return handle_foundry_inspector_key(state, key);
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.inspector_scroll = state.inspector_scroll.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.inspector_scroll = state.inspector_scroll.saturating_add(1)
+            }
+            KeyCode::PageUp => state.inspector_scroll = state.inspector_scroll.saturating_sub(8),
+            KeyCode::PageDown => state.inspector_scroll = state.inspector_scroll.saturating_add(8),
+            KeyCode::Left | KeyCode::Char('h') => {
+                update(state, Action::SetFocusPane(FocusPane::Workspace));
+            }
+            KeyCode::Char('[') => move_citation(state, false),
+            KeyCode::Char(']') => move_citation(state, true),
+            KeyCode::Char('o') => return selected_citation_command(state, false),
+            KeyCode::Char('v') => return selected_citation_command(state, true),
+            KeyCode::Char('c') => return selected_citation_copy(state),
+            KeyCode::Char('?') => {
+                update(state, Action::OpenOverlay(Overlay::Help));
+            }
+            KeyCode::Char(':') => {
+                update(state, Action::OpenOverlay(Overlay::Palette));
+            }
+            _ => {}
+        }
+        return None;
+    }
+
+    if matches!(state.view, View::Activity | View::Indexing) {
         match key.code {
             KeyCode::Char('r') => return Some(UiCommand::RefreshJobs),
             KeyCode::Char('s') => return cancel_active(state),
@@ -3109,7 +3150,31 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             _ => {}
         }
     }
-    if state.focus == FocusPanel::Sources {
+    if in_foundry
+        && matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k') | KeyCode::Enter
+        )
+    {
+        if key.code == KeyCode::Enter
+            && ((state.view == View::Models && state.model_manager.entries.is_empty())
+                || (state.view == View::FoundryOverview && state.model_manager.packages.is_empty()))
+        {
+            return Some(refresh_model_catalog_command(state));
+        }
+        if state.view == View::FoundryOverview {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => move_package_cursor(state, false),
+                KeyCode::Down | KeyCode::Char('j') => move_package_cursor(state, true),
+                KeyCode::Enter => return pull_selected_package(state),
+                _ => {}
+            }
+            return None;
+        }
+        return handle_model_manager(state, key);
+    }
+
+    if state.view == View::Books {
         match key.code {
             KeyCode::Char('/') | KeyCode::Char('s') => {
                 state.library.filtering = true;
@@ -3126,10 +3191,14 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
                 state.asset_cursor = 0;
                 return None;
             }
-            KeyCode::Char('i') => {
+            KeyCode::Char('n') => {
                 if selected_library_document(state).is_some() {
                     state.overlay = Some(Overlay::DocumentDetails);
                 }
+                return None;
+            }
+            KeyCode::Char('i') => {
+                open_file_browser(state);
                 return None;
             }
             KeyCode::Char('t') => {
@@ -3170,7 +3239,8 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             _ => {}
         }
     }
-    if state.focus == FocusPanel::Chat {
+
+    if state.view == View::Conversation {
         match key.code {
             KeyCode::Char('[') => {
                 move_citation(state, false);
@@ -3184,7 +3254,7 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             KeyCode::Char('v') => return selected_citation_command(state, true),
             KeyCode::Char('c') => return selected_citation_copy(state),
             KeyCode::Char('h') => {
-                state.overlay = Some(Overlay::ChatHistory);
+                update(state, Action::NavigateView(View::History));
                 return None;
             }
             KeyCode::Char('r') => return repeat_current_question(state),
@@ -3196,6 +3266,32 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             _ => {}
         }
     }
+
+    match state.view {
+        View::Retrieval | View::Sources if key.code == KeyCode::Char('/') => {
+            state.input_mode = InputMode::Text;
+            return None;
+        }
+        View::History if key.code == KeyCode::Char('r') => {
+            if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
+                state.chat.question.set(session.question);
+                update(state, Action::NavigateView(View::Conversation));
+                return repeat_current_question(state);
+            }
+        }
+        View::History if key.code == KeyCode::Char('x') => {
+            if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
+                let workspace = state
+                    .active_workspace
+                    .as_ref()
+                    .and_then(|id| state.workspaces.iter().find(|item| &item.id == id))
+                    .map_or("Library".into(), |item| item.name.clone());
+                return Some(UiCommand::ExportChat { workspace, session });
+            }
+        }
+        _ => {}
+    }
+
     match key.code {
         KeyCode::Char(':') => {
             update(state, Action::OpenOverlay(Overlay::Palette));
@@ -3204,10 +3300,10 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
             update(state, Action::OpenOverlay(Overlay::Help));
         }
         KeyCode::Left | KeyCode::Char('h') => {
-            update(state, Action::FocusPrevious);
+            update(state, Action::FocusPanePrevious);
         }
         KeyCode::Right | KeyCode::Char('l') => {
-            update(state, Action::FocusNext);
+            update(state, Action::FocusPaneNext);
         }
         KeyCode::Up | KeyCode::Char('k') => move_selection(state, false),
         KeyCode::Down | KeyCode::Char('j') => move_selection(state, true),
@@ -3228,25 +3324,28 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
 }
 
 fn move_selection(state: &mut AppState, next: bool) {
-    match state.focus {
-        FocusPanel::Navigation => {
-            const LEN: usize = 9;
-            state.nav_cursor = if next {
-                (state.nav_cursor + 1) % LEN
-            } else {
-                (state.nav_cursor + LEN - 1) % LEN
-            };
-        }
-        FocusPanel::Chat => {
+    if state.focus_pane == FocusPane::Sidebar {
+        move_sidebar_view(state, next);
+        return;
+    }
+    if state.focus_pane == FocusPane::Inspector {
+        state.inspector_scroll = if next {
+            state.inspector_scroll.saturating_add(1)
+        } else {
+            state.inspector_scroll.saturating_sub(1)
+        };
+        return;
+    }
+    match state.view {
+        View::Conversation => {
             state.chat_scroll = if next {
                 state.chat_scroll.saturating_add(1)
             } else {
                 state.chat_scroll.saturating_sub(1)
             };
         }
-        FocusPanel::Import => {}
-        FocusPanel::Sources => {
-            let len = visible_library_jobs(state).len() + visible_document_indices(state).len();
+        View::Books => {
+            let len = visible_document_indices(state).len();
             if len > 0 {
                 state.asset_cursor = if next {
                     (state.asset_cursor + 1) % len
@@ -3256,21 +3355,36 @@ fn move_selection(state: &mut AppState, next: bool) {
                 sync_document_cursor(state);
             }
         }
-        FocusPanel::Hardware => {
+        View::Retrieval => {
+            let len = state.search.results.len();
+            if len > 0 {
+                state.search.cursor = if next {
+                    (state.search.cursor + 1) % len
+                } else {
+                    (state.search.cursor + len - 1) % len
+                };
+            }
+        }
+        View::Sources => {
+            let len = state.sources.len();
+            if len > 0 {
+                state.source_cursor = if next {
+                    (state.source_cursor + 1) % len
+                } else {
+                    (state.source_cursor + len - 1) % len
+                };
+            }
+        }
+        View::FoundryOverview => move_package_cursor(state, next),
+        View::Models => move_model_cursor(state, next),
+        View::System => {
             state.hardware_cursor = if next {
                 (state.hardware_cursor + 1) % 5
             } else {
                 (state.hardware_cursor + 4) % 5
             };
         }
-        FocusPanel::Models => {
-            state.model_cursor = if next {
-                (state.model_cursor + 1) % 4
-            } else {
-                (state.model_cursor + 3) % 4
-            };
-        }
-        FocusPanel::Activity => {
+        View::Indexing | View::Activity => {
             update(
                 state,
                 if next {
@@ -3280,6 +3394,62 @@ fn move_selection(state: &mut AppState, next: bool) {
                 },
             );
         }
+        View::History => {
+            let len = state
+                .active_workspace
+                .as_ref()
+                .and_then(|id| state.chat_sessions.get(id))
+                .map_or(0, Vec::len);
+            if len > 0 {
+                state.history_cursor = if next {
+                    (state.history_cursor + 1) % len
+                } else {
+                    (state.history_cursor + len - 1) % len
+                };
+            }
+        }
+        View::Backups => {
+            let len = state.backups.len();
+            if len > 0 {
+                state.backup_cursor = if next {
+                    (state.backup_cursor + 1) % len
+                } else {
+                    (state.backup_cursor + len - 1) % len
+                };
+            }
+        }
+        View::Quality | View::Settings => {}
+    }
+}
+
+fn move_sidebar_view(state: &mut AppState, next: bool) {
+    let mut views = sidebar_navigation_rows(state)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    views.extend([View::Activity, View::Settings]);
+    views.dedup();
+    let current = views
+        .iter()
+        .position(|view| *view == state.view)
+        .unwrap_or(0);
+    let index = if next {
+        (current + 1) % views.len()
+    } else {
+        (current + views.len() - 1) % views.len()
+    };
+    update(state, Action::NavigateView(views[index]));
+    update(state, Action::SetFocusPane(FocusPane::Sidebar));
+}
+
+fn move_package_cursor(state: &mut AppState, next: bool) {
+    let len = state.model_manager.packages.len();
+    if len > 0 {
+        state.model_manager.package_cursor = if next {
+            (state.model_manager.package_cursor + 1) % len
+        } else {
+            (state.model_manager.package_cursor + len - 1) % len
+        };
     }
 }
 
@@ -3290,24 +3460,22 @@ fn move_selection_many(state: &mut AppState, next: bool, count: usize) {
 }
 
 fn activate_selection(state: &mut AppState) -> Option<UiCommand> {
-    match state.focus {
-        FocusPanel::Navigation => activate_navigation(state),
-        FocusPanel::Chat => {
-            update(state, Action::Navigate(Route::Chat));
+    if state.focus_pane == FocusPane::Sidebar {
+        update(state, Action::SetFocusPane(FocusPane::Workspace));
+        return None;
+    }
+    match state.view {
+        View::Conversation => {
             update(state, Action::SetInputMode(InputMode::Text));
             None
         }
-        FocusPanel::Import => {
-            open_file_browser(state);
-            None
-        }
-        FocusPanel::Sources => {
-            if selected_library_job(state).is_some() {
-                return toggle_selected_library_job(state);
-            }
+        View::Books => {
             if let Some(document) = selected_library_document(state) {
                 Some(UiCommand::OpenPdf {
-                    path: document.source.clone(),
+                    path: document
+                        .managed_source
+                        .clone()
+                        .unwrap_or_else(|| document.source.clone()),
                     page: None,
                 })
             } else {
@@ -3316,30 +3484,38 @@ fn activate_selection(state: &mut AppState) -> Option<UiCommand> {
                 None
             }
         }
-        FocusPanel::Models => open_model_manager(state),
-        FocusPanel::Activity => toggle_selected_job(state),
-        _ => None,
+        View::Indexing | View::Activity => toggle_selected_job(state),
+        View::FoundryOverview => {
+            if state.model_manager.packages.is_empty() {
+                Some(refresh_model_catalog_command(state))
+            } else {
+                pull_selected_package(state)
+            }
+        }
+        View::Models => {
+            if state.model_manager.entries.is_empty() {
+                Some(refresh_model_catalog_command(state))
+            } else {
+                load_or_pull_selected_model(state)
+            }
+        }
+        View::History => {
+            if let Some(session) = active_sessions(state).get(state.history_cursor).cloned() {
+                state.chat.question.set(session.question);
+                state.chat.answer = session.answer;
+                state.chat.citations = session.citations;
+                state.citation_cursor = 0;
+                update(state, Action::NavigateView(View::Conversation));
+            }
+            None
+        }
+        View::Retrieval | View::Sources | View::Settings => {
+            state.input_mode = InputMode::Text;
+            None
+        }
+        View::Backups => state.active_workspace.clone().map(UiCommand::CreateBackup),
+        View::Quality | View::System => None,
     }
-}
-
-fn open_model_manager(state: &mut AppState) -> Option<UiCommand> {
-    update(state, Action::OpenOverlay(Overlay::ModelManager));
-    Some(refresh_model_catalog_command(state))
-}
-
-fn activate_navigation(state: &mut AppState) -> Option<UiCommand> {
-    let code = match state.nav_cursor {
-        0 => KeyCode::Char('c'),
-        1 => KeyCode::Char('s'),
-        2 => KeyCode::Char('h'),
-        3 => KeyCode::Char('m'),
-        4 => KeyCode::Char('a'),
-        5 => KeyCode::Char('t'),
-        6 => KeyCode::Char('w'),
-        7 => KeyCode::Char('p'),
-        _ => KeyCode::Char('q'),
-    };
-    handle_ctrl_shortcut(state, code).flatten()
 }
 
 fn toggle_selected_job(state: &mut AppState) -> Option<UiCommand> {
@@ -3550,6 +3726,7 @@ mod tests {
         assert_eq!(state.overlay, Some(Overlay::ConfirmImport));
         assert!(matches!(analyze, Some(UiCommand::AnalyzeImport { .. })));
         state.library.preflight = ImportPreflight {
+            server_preflight_id: Some("preflight-test".into()),
             pdfs: vec![
                 root.join("a.pdf").to_string_lossy().into_owned(),
                 folder.join("b.pdf").to_string_lossy().into_owned(),
@@ -3587,8 +3764,31 @@ mod tests {
     fn tab_moves_focus_instead_of_changing_level() {
         let mut state = AppState::default();
         handle_event(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, FocusPanel::Import);
+        assert_eq!(state.focus_pane, FocusPane::Inspector);
         assert_eq!(state.interaction_level, InteractionLevel::Simple);
+    }
+
+    #[test]
+    fn ctrl_c_requests_a_clean_shutdown() {
+        let mut state = AppState::default();
+        handle_event(
+            &mut state,
+            modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(state.quit_requested);
+    }
+
+    #[test]
+    fn ctrl_c_closes_from_confirmation_overlays() {
+        let mut state = AppState {
+            overlay: Some(Overlay::ConfirmModelDelete),
+            ..AppState::default()
+        };
+        handle_event(
+            &mut state,
+            modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+        assert!(state.quit_requested);
     }
 
     #[test]
@@ -3599,73 +3799,84 @@ mod tests {
         handle_event(&mut state, key(KeyCode::Char('k')));
         assert_eq!(state.chat_scroll, 0);
         handle_event(&mut state, key(KeyCode::Left));
-        assert_eq!(state.focus, FocusPanel::Activity);
+        assert_eq!(state.focus_pane, FocusPane::Sidebar);
         handle_event(
             &mut state,
             modified_key(KeyCode::Char('t'), KeyModifiers::CONTROL),
         );
         assert_eq!(state.theme_index, 1);
         handle_event(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, FocusPanel::Chat);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
         handle_event(
             &mut state,
             modified_key(KeyCode::Char('h'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.focus, FocusPanel::Models);
+        assert_eq!(state.view, View::FoundryOverview);
+        state.model_manager.packages = vec![
+            omarag_app::ModelPackage::default(),
+            omarag_app::ModelPackage::default(),
+        ];
         handle_event(&mut state, key(KeyCode::Down));
-        assert_eq!(state.model_cursor, 1);
-        handle_event(
+        assert_eq!(state.model_manager.package_cursor, 1);
+        let command = handle_event(
             &mut state,
             modified_key(KeyCode::Char('m'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.focus, FocusPanel::Models);
+        assert_eq!(state.view, View::Models);
+        assert!(matches!(
+            command,
+            Some(UiCommand::RefreshModelCatalog { .. })
+        ));
         handle_event(
             &mut state,
             modified_key(KeyCode::Char('a'), KeyModifiers::CONTROL),
         );
-        assert_eq!(state.focus, FocusPanel::Activity);
+        assert_eq!(state.view, View::Activity);
     }
 
     #[test]
-    fn mouse_clicks_focus_and_activate_dashboard_controls() {
+    fn mouse_clicks_focus_and_activate_shell_controls() {
         let screen = Rect::new(0, 0, 160, 40);
-        let [header, body, _footer] = screen_areas(screen);
-        let [chat, _library, compute, _activity] = dashboard_areas(body);
+        let [_header, body, _footer] = screen_areas(screen);
         let mut state = AppState::default();
+        let areas = app_areas(body, state.focus_pane);
 
         handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                chat.x + 3,
-                chat.bottom() - 2,
+                areas.workspace.x + 3,
+                areas.workspace.bottom() - 2,
             ),
             screen,
         );
-        assert_eq!(state.focus, FocusPanel::Chat);
+        assert_eq!(state.focus_pane, FocusPane::Workspace);
         assert_eq!(state.input_mode, InputMode::Text);
 
         handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                compute.right() - 4,
-                compute.y + 2,
+                areas.sidebar.x + 3,
+                areas.sidebar.y + 7,
             ),
             screen,
         );
-        assert_eq!(state.focus, FocusPanel::Models);
+        assert_eq!(state.view, View::FoundryOverview);
+        assert_eq!(state.focus_pane, FocusPane::Sidebar);
 
+        let areas = app_areas(body, state.focus_pane);
         handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                header_import_area(header).x + 2,
-                header_import_area(header).y + 1,
+                areas.sidebar.x + 3,
+                areas.sidebar.y + 4,
             ),
             screen,
         );
-        assert_eq!(state.focus, FocusPanel::Import);
+        assert_eq!(state.view, View::Books);
+        handle_event(&mut state, key(KeyCode::Char('i')));
         assert_eq!(state.overlay, Some(Overlay::FileBrowser));
     }
 
@@ -3673,12 +3884,12 @@ mod tests {
     fn mouse_wheel_and_middle_button_cover_chat_and_themes() {
         let screen = Rect::new(0, 0, 160, 40);
         let [_header, body, _footer] = screen_areas(screen);
-        let [chat, ..] = dashboard_areas(body);
         let mut state = AppState::default();
+        let workspace = app_areas(body, state.focus_pane).workspace;
 
         handle_mouse(
             &mut state,
-            mouse(MouseEventKind::ScrollDown, chat.x + 2, chat.y + 2),
+            mouse(MouseEventKind::ScrollDown, workspace.x + 2, workspace.y + 2),
             screen,
         );
         assert_eq!(state.chat_scroll, 1);
@@ -3726,11 +3937,11 @@ mod tests {
     #[test]
     fn model_manager_opens_and_builds_quantized_download_commands() {
         let mut state = AppState {
-            focus: FocusPanel::Models,
+            view: View::Models,
             ..AppState::default()
         };
         let command = handle_event(&mut state, key(KeyCode::Enter));
-        assert_eq!(state.overlay, Some(Overlay::ModelManager));
+        assert_eq!(state.overlay, None);
         assert!(matches!(
             command,
             Some(UiCommand::RefreshModelCatalog {
@@ -3756,11 +3967,61 @@ mod tests {
     }
 
     #[test]
-    fn model_manager_tabs_support_mouse_and_shift_arrows() {
-        let screen = Rect::new(0, 0, 160, 40);
-        let [_area, sidebar, _search, _list, _details, _footer] = model_manager_areas(screen);
+    fn catalog_search_accepts_arbitrary_text_without_an_overlay() {
         let mut state = AppState {
-            overlay: Some(Overlay::ModelManager),
+            view: View::Models,
+            ..AppState::default()
+        };
+        handle_event(&mut state, key(KeyCode::Char('/')));
+        handle_event(&mut state, key(KeyCode::Char('z')));
+        handle_event(&mut state, key(KeyCode::Char('e')));
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+        assert_eq!(state.model_manager.query.value, "ze");
+        assert!(!state.model_manager.searching);
+        assert!(matches!(
+            command,
+            Some(UiCommand::RefreshModelCatalog { query, .. }) if query == "ze"
+        ));
+    }
+
+    #[test]
+    fn foundry_inspector_changes_tuning_and_runs_contextual_actions() {
+        let mut state = AppState {
+            view: View::Models,
+            focus_pane: FocusPane::Inspector,
+            ..AppState::default()
+        };
+        state.model_manager.entries = vec![omarag_app::ModelCatalogEntry {
+            id: "local/model:2b".into(),
+            source: ModelSource::Installed,
+            installed: true,
+            ..omarag_app::ModelCatalogEntry::default()
+        }];
+
+        let command = handle_event(&mut state, key(KeyCode::Right));
+        assert_eq!(state.model_manager.profile, HardwareProfile::Quality);
+        assert!(matches!(
+            command,
+            Some(UiCommand::RefreshModelCatalog { .. })
+        ));
+
+        state.model_manager.busy = false;
+        for _ in 0..4 {
+            handle_event(&mut state, key(KeyCode::Down));
+        }
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+        assert!(matches!(
+            command,
+            Some(UiCommand::PreloadModel { model, .. }) if model == "local/model:2b"
+        ));
+    }
+
+    #[test]
+    fn integrated_foundry_filters_and_recommendations_support_mouse() {
+        let screen = Rect::new(0, 0, 160, 40);
+        let [_header, body, _footer] = screen_areas(screen);
+        let mut state = AppState {
+            view: View::Models,
             ..AppState::default()
         };
         state.model_manager.packages = (1..=3)
@@ -3772,13 +4033,16 @@ mod tests {
             })
             .collect();
 
-        // Providers, roles and stacks are direct rows in the left navigation.
+        let panes = app_areas(body, FocusPane::Workspace);
+        let workspace = bordered_inner(panes.workspace);
+        let [filters, _search, _list, _status] = foundry_catalog_areas(workspace);
+        let [source, role, _count] = catalog_filter_areas(filters);
         let command = handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                sidebar.x + 3,
-                sidebar.y + 2,
+                source.x + 2,
+                source.y,
             ),
             screen,
         );
@@ -3788,47 +4052,57 @@ mod tests {
             Some(UiCommand::RefreshModelCatalog { .. })
         ));
 
-        handle_mouse(
-            &mut state,
-            mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                sidebar.x + 3,
-                sidebar.y + 13,
-            ),
-            screen,
-        );
-        assert_eq!(state.model_manager.package_cursor, 1);
-        handle_event(&mut state, key(KeyCode::Char('3')));
-        assert_eq!(state.model_manager.package_cursor, 2);
-
         let command = handle_mouse(
             &mut state,
-            mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                sidebar.x + 3,
-                sidebar.y + 8,
-            ),
+            mouse(MouseEventKind::Down(MouseButton::Left), role.x + 2, role.y),
             screen,
         );
-        assert_eq!(state.model_manager.category, ModelCategory::Embedding);
+        assert_eq!(state.model_manager.category, ModelCategory::Vl);
         assert!(matches!(
             command,
             Some(UiCommand::RefreshModelCatalog { .. })
         ));
 
-        handle_event(
+        state.model_manager.busy = false;
+        let inspector = bordered_inner(panes.inspector);
+        let [_details, tuning, _actions] = foundry_inspector_areas(inspector);
+        let command = handle_mouse(
             &mut state,
-            modified_key(KeyCode::Right, KeyModifiers::SHIFT),
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                tuning.x + 2,
+                tuning.y + 2,
+            ),
+            screen,
         );
-        assert_eq!(state.model_manager.category, ModelCategory::Rerank);
-        handle_event(&mut state, modified_key(KeyCode::Left, KeyModifiers::SHIFT));
-        assert_eq!(state.model_manager.category, ModelCategory::Embedding);
+        assert_eq!(state.model_manager.quantization, ModelQuantization::Q5Km);
+        assert!(matches!(
+            command,
+            Some(UiCommand::RefreshModelCatalog { .. })
+        ));
+
+        state.view = View::FoundryOverview;
+        state.focus_pane = FocusPane::Workspace;
+        state.model_manager.busy = false;
+        let panes = app_areas(body, FocusPane::Workspace);
+        let workspace = bordered_inner(panes.workspace);
+        let [_summary, _rail, packages, _status] = foundry_setup_areas(workspace);
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                packages.x + 2,
+                packages.y + 3,
+            ),
+            screen,
+        );
+        assert_eq!(state.model_manager.package_cursor, 1);
     }
 
     #[test]
     fn model_manager_preload_uses_context_and_temporary_residency() {
         let mut state = AppState {
-            overlay: Some(Overlay::ModelManager),
+            view: View::Models,
             ..AppState::default()
         };
         state.model_manager.entries = vec![omarag_app::ModelCatalogEntry {
@@ -3849,9 +4123,9 @@ mod tests {
     }
 
     #[test]
-    fn model_delete_requires_confirmation_and_returns_to_manager() {
+    fn model_delete_requires_confirmation_and_returns_to_catalog() {
         let mut state = AppState {
-            overlay: Some(Overlay::ModelManager),
+            view: View::Models,
             ..AppState::default()
         };
         state.model_manager.entries = vec![omarag_app::ModelCatalogEntry {
@@ -3869,7 +4143,8 @@ mod tests {
         );
 
         handle_event(&mut state, key(KeyCode::Esc));
-        assert_eq!(state.overlay, Some(Overlay::ModelManager));
+        assert_eq!(state.overlay, None);
+        assert_eq!(state.view, View::Models);
         assert!(state.model_manager.delete_candidate.is_none());
 
         handle_event(&mut state, key(KeyCode::Delete));
@@ -3879,7 +4154,8 @@ mod tests {
             Some(UiCommand::DeleteModel { model, confirm })
                 if model == "local/model:2b" && confirm == model
         ));
-        assert_eq!(state.overlay, Some(Overlay::ModelManager));
+        assert_eq!(state.overlay, None);
+        assert_eq!(state.view, View::Models);
         assert!(state.model_manager.busy);
     }
 
@@ -3903,13 +4179,13 @@ mod tests {
             screen,
         );
         assert!(matches!(command, Some(UiCommand::DeleteModel { .. })));
-        assert_eq!(state.overlay, Some(Overlay::ModelManager));
+        assert_eq!(state.overlay, None);
     }
 
     #[test]
     fn model_stack_install_deduplicates_shared_chat_and_vl_model() {
         let mut state = AppState {
-            overlay: Some(Overlay::ModelManager),
+            view: View::FoundryOverview,
             ..AppState::default()
         };
         state.model_manager.packages.push(omarag_app::ModelPackage {
@@ -4050,6 +4326,7 @@ mod tests {
         handle_event(&mut state, key(KeyCode::Enter));
 
         state.library.preflight.pdfs = vec!["/tmp/manual.pdf".into()];
+        state.library.preflight.server_preflight_id = Some("preflight-test".into());
         state.file_browser.selected = vec!["/tmp/manual.pdf".into()];
         state.overlay = Some(Overlay::ConfirmImport);
         let command = handle_event(&mut state, key(KeyCode::Enter));
@@ -4099,7 +4376,7 @@ mod tests {
     #[test]
     fn library_filter_uses_slash_and_persists_query() {
         let mut state = AppState {
-            focus: FocusPanel::Sources,
+            view: View::Books,
             route: Route::Library,
             ..AppState::default()
         };

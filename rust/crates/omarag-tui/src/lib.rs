@@ -1,13 +1,13 @@
 pub mod input;
 
 use input::{filtered_palette_commands, fuzzy_score};
-#[cfg(test)]
-use omarag_app::ModelQuantization;
 use omarag_app::{
-    AppState, EditorState, FocusPanel, InputMode, LibraryFilter, LibrarySort, ModelCatalogEntry,
-    ModelCategory, ModelFit, ModelPackage, ModelSource, NotificationLevel, Overlay,
+    AppState, EditorState, FocusPane, InputMode, InteractionLevel, LibraryFilter, LibrarySort,
+    ModelCatalogEntry, ModelFit, ModelPackage, ModelSource, Overlay, PrimarySection, View,
     WorkspaceProfile,
 };
+#[cfg(test)]
+use omarag_app::{ModelCategory, ModelQuantization};
 use omarag_domain::{JobSnapshot, JobStatus};
 use ratatui::{
     Frame,
@@ -22,12 +22,12 @@ use ratatui_image::{
     thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
 };
 use ratatui_textarea::{CursorMove, TextArea};
-use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub name: &'static str,
     pub background: Color,
+    pub surface: Color,
     pub panel: Color,
     pub text: Color,
     pub muted: Color,
@@ -48,13 +48,48 @@ impl Theme {
     pub const fn at(index: usize) -> Self {
         match index % Self::COUNT {
             0 => Self {
-                name: "Blueprint",
+                name: "Aqua Slate",
+                background: rgb(0x0D1117),
+                surface: rgb(0x111820),
+                panel: rgb(0x161D25),
+                text: rgb(0xDCE7EA),
+                muted: rgb(0x81909B),
+                border: rgb(0x34434D),
+                focus: rgb(0x5FD7D7),
+                cyan: rgb(0x67D4E8),
+                green: rgb(0x8FD19E),
+                yellow: rgb(0xE7C66A),
+                red: rgb(0xEE7B86),
+                purple: rgb(0xB8A1E3),
+                orange: rgb(0xE9A66B),
+                selection: rgb(0x1D333A),
+            },
+            1 => Self {
+                name: "One Dark",
+                background: rgb(0x1E2127),
+                surface: rgb(0x242831),
+                panel: rgb(0x282C34),
+                text: rgb(0xABB2BF),
+                muted: rgb(0x7F848E),
+                border: rgb(0x3E4451),
+                focus: rgb(0x61AFEF),
+                cyan: rgb(0x56B6C2),
+                green: rgb(0x98C379),
+                yellow: rgb(0xE5C07B),
+                red: rgb(0xE06C75),
+                purple: rgb(0xC678DD),
+                orange: rgb(0xD19A66),
+                selection: rgb(0x2C4057),
+            },
+            2 => Self {
+                name: "Catppuccin Mocha",
                 background: rgb(0x11111B),
+                surface: rgb(0x181825),
                 panel: rgb(0x1E1E2E),
                 text: rgb(0xCDD6F4),
                 muted: rgb(0xA6ADC8),
-                border: rgb(0x585B70),
-                focus: rgb(0xF38BA8),
+                border: rgb(0x45475A),
+                focus: rgb(0x89DCEB),
                 cyan: rgb(0x89DCEB),
                 green: rgb(0xA6E3A1),
                 yellow: rgb(0xF9E2AF),
@@ -63,53 +98,22 @@ impl Theme {
                 orange: rgb(0xFAB387),
                 selection: rgb(0x313244),
             },
-            1 => Self {
-                name: "Nord Harbor",
-                background: rgb(0x2E3440),
-                panel: rgb(0x3B4252),
-                text: rgb(0xECEFF4),
-                muted: rgb(0xD8DEE9),
-                border: rgb(0x4C566A),
-                focus: rgb(0x88C0D0),
-                cyan: rgb(0x8FBCBB),
-                green: rgb(0xA3BE8C),
-                yellow: rgb(0xEBCB8B),
-                red: rgb(0xBF616A),
-                purple: rgb(0xB48EAD),
-                orange: rgb(0xD08770),
-                selection: rgb(0x434C5E),
-            },
-            2 => Self {
-                name: "Warm Workshop",
-                background: rgb(0x1A1814),
-                panel: rgb(0x28241E),
-                text: rgb(0xF2E6D0),
-                muted: rgb(0xB9A98D),
-                border: rgb(0x5C5245),
-                focus: rgb(0xF0A868),
-                cyan: rgb(0x77C4C9),
-                green: rgb(0x98C379),
-                yellow: rgb(0xE5C07B),
-                red: rgb(0xE06C75),
-                purple: rgb(0xC678DD),
-                orange: rgb(0xD19A66),
-                selection: rgb(0x3A332A),
-            },
             _ => Self {
-                name: "Paper Plan",
-                background: rgb(0xF4F1E8),
-                panel: rgb(0xE8E2D5),
-                text: rgb(0x263238),
-                muted: rgb(0x607D8B),
-                border: rgb(0xA8A295),
-                focus: rgb(0x176B87),
-                cyan: rgb(0x00838F),
-                green: rgb(0x2E7D32),
-                yellow: rgb(0xA15C00),
-                red: rgb(0xC62828),
-                purple: rgb(0x6A1B9A),
-                orange: rgb(0xE65100),
-                selection: rgb(0xD8E4E7),
+                name: "Solarized Lite",
+                background: rgb(0xFDF6E3),
+                surface: rgb(0xEEE8D5),
+                panel: rgb(0xF5EEDC),
+                text: rgb(0x586E75),
+                muted: rgb(0x839496),
+                border: rgb(0xC9C2AD),
+                focus: rgb(0x268BD2),
+                cyan: rgb(0x2AA198),
+                green: rgb(0x859900),
+                yellow: rgb(0xB58900),
+                red: rgb(0xDC322F),
+                purple: rgb(0x6C71C4),
+                orange: rgb(0xCB4B16),
+                selection: rgb(0xDDE7E5),
             },
         }
     }
@@ -213,15 +217,24 @@ pub fn render_with_previews(
         Block::default().style(Style::default().bg(theme.background).fg(theme.text)),
         frame.area(),
     );
+    if frame.area().width < 80 || frame.area().height < 24 {
+        render_minimum_size(frame, frame.area(), theme);
+        return;
+    }
     let [header, body, footer] = screen_areas(frame.area());
     render_header(frame, header, state, theme, metrics);
-    let [chat, library, compute, activity] = dashboard_areas(body);
-    render_chat(frame, chat, state, theme, metrics, previews);
-    render_library(frame, library, state, theme);
-    render_compute(frame, compute, state, theme, metrics);
-    render_activity(frame, activity, state, theme, metrics);
+    let areas = app_areas(body, state.focus_pane);
+    if areas.sidebar.width > 0 {
+        render_sidebar(frame, areas.sidebar, state, theme);
+    }
+    if areas.workspace.width > 0 {
+        render_workspace(frame, areas.workspace, state, theme, metrics, previews);
+    }
+    if areas.inspector.width > 0 {
+        render_inspector(frame, areas.inspector, state, theme, metrics, previews);
+    }
     render_footer(frame, footer, state, theme);
-    render_overlay(frame, state, theme, metrics);
+    render_overlay(frame, state, theme);
 }
 
 fn render_header(
@@ -252,133 +265,2016 @@ fn render_header(
         .style(Style::default().bg(theme.panel).fg(theme.text));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if area.width < 110 {
-        let mut import = shortcut_words(theme, &[("Index new PDFs", 'I', theme.orange)]);
-        import.spans.insert(0, Span::raw("  "));
-        import.spans.push(Span::styled(
-            "  Enter / I",
-            Style::default().fg(theme.muted),
-        ));
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::styled(
-                    " ◐ ORACLE OF DÆDALUS",
-                    Style::default()
-                        .fg(pulse_color)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Line::styled(
-                    truncate(
-                        " OFFLINE RETRIEVAL-AUGMENTED COMMAND-LINE ENVIRONMENT",
-                        inner.width as usize,
-                    ),
-                    Style::default().fg(theme.muted),
-                ),
-                import,
-            ]),
-            inner,
-        );
-        return;
-    }
-    // Keep the call-to-action on the exact same axis as Library and Activity.
-    let [wordmark, signal] =
-        Layout::horizontal([Constraint::Percentage(67), Constraint::Percentage(33)]).areas(inner);
-    let mirror_left = if ollama_active && pulse_phase.is_multiple_of(2) {
-        pulse_color
-    } else {
-        theme.green
-    };
-    let mirror_right = if ollama_active && !pulse_phase.is_multiple_of(2) {
-        pulse_color
-    } else {
-        theme.cyan
-    };
-    let logo_style = Style::default()
-        .fg(theme.green)
-        .add_modifier(Modifier::BOLD);
-    let mirror_style = |color| Style::default().fg(color).add_modifier(Modifier::BOLD);
-
+    let [identity, location, status] = Layout::horizontal([
+        Constraint::Percentage(42),
+        Constraint::Percentage(33),
+        Constraint::Percentage(25),
+    ])
+    .areas(inner);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(" ▟██▌", mirror_style(mirror_left)),
-                Span::styled("▐██▙", mirror_style(mirror_right)),
-                Span::styled("  ████▙  ▟███▙  ▟████  ██     █████", logo_style),
-            ]),
-            Line::from(vec![
-                Span::styled(" ██  ", mirror_style(mirror_left)),
-                Span::styled("  ██", mirror_style(mirror_right)),
-                Span::styled("  ████▘  █████  ██     ██     ████ ", logo_style),
-            ]),
-            Line::from(vec![
-                Span::styled(" ▜██▌", mirror_style(mirror_left)),
-                Span::styled("▐██▛", mirror_style(mirror_right)),
-                Span::styled("  ██ ▜▙  ██ ██  ▜████  █████  █████", logo_style),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    " OF DÆDALUS",
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("  //  ", Style::default().fg(theme.border)),
-                Span::styled(
-                    "OFFLINE RETRIEVAL-AUGMENTED COMMAND-LINE ENVIRONMENT",
-                    Style::default().fg(theme.muted),
-                ),
-            ]),
-        ]),
-        wordmark,
+        Paragraph::new(Line::from(vec![Span::styled(
+            " ◇ ORACLE OF DÆDALUS",
+            Style::default()
+                .fg(pulse_color)
+                .add_modifier(Modifier::BOLD),
+        )])),
+        identity,
     );
-    let block = shortcut_panel(
-        "Index new PDFs",
-        'I',
-        state.focus == FocusPanel::Import,
-        theme,
-    );
-    let button = block.inner(signal);
-    frame.render_widget(block, signal);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::styled("PDF or folder", Style::default().fg(theme.text)),
-            Line::styled("Enter / I", Style::default().fg(theme.muted)),
-        ])
-        .alignment(Alignment::Center),
-        button,
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                state.view.section().label().to_ascii_uppercase(),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled("  /  ", Style::default().fg(theme.border)),
+            Span::styled(
+                state.view.label(),
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        location,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("● ", Style::default().fg(pulse_color)),
+            Span::styled(state.connection.label(), Style::default().fg(theme.muted)),
+            Span::styled(format!("  {}", theme.name), Style::default().fg(theme.text)),
+        ]))
+        .alignment(Alignment::Right),
+        status,
     );
 }
 
 pub(crate) fn screen_areas(area: Rect) -> [Rect; 3] {
     Layout::vertical([
-        Constraint::Length(5),
+        Constraint::Length(2),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .areas(area)
 }
 
-pub(crate) fn dashboard_areas(area: Rect) -> [Rect; 4] {
-    let [top, bottom] =
-        Layout::vertical([Constraint::Percentage(66), Constraint::Percentage(34)]).areas(area);
-    let columns = [Constraint::Percentage(67), Constraint::Percentage(33)];
-    let [chat, library] = Layout::horizontal(columns).areas(top);
-    let [compute, activity] = Layout::horizontal(columns).areas(bottom);
-    [chat, library, compute, activity]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct AppAreas {
+    pub sidebar: Rect,
+    pub workspace: Rect,
+    pub inspector: Rect,
 }
 
-pub(crate) fn header_import_area(area: Rect) -> Rect {
-    if area.width < 110 {
-        Rect::new(
-            area.x,
-            area.y.saturating_add(2),
-            area.width,
-            1.min(area.height),
-        )
+pub(crate) fn app_areas(area: Rect, focus: FocusPane) -> AppAreas {
+    if area.width >= 120 {
+        let [sidebar, _, workspace, _, inspector] = Layout::horizontal([
+            Constraint::Length(24),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(38),
+        ])
+        .areas(area);
+        AppAreas {
+            sidebar,
+            workspace,
+            inspector,
+        }
+    } else if area.width >= 96 {
+        let [sidebar, _, stage] = Layout::horizontal([
+            Constraint::Length(22),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        if focus == FocusPane::Inspector {
+            AppAreas {
+                sidebar,
+                inspector: stage,
+                ..AppAreas::default()
+            }
+        } else {
+            AppAreas {
+                sidebar,
+                workspace: stage,
+                ..AppAreas::default()
+            }
+        }
     } else {
-        let inner = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
-        let [_wordmark, import] =
-            Layout::horizontal([Constraint::Percentage(67), Constraint::Percentage(33)])
-                .areas(inner);
-        import
+        match focus {
+            FocusPane::Sidebar => AppAreas {
+                sidebar: area,
+                ..AppAreas::default()
+            },
+            FocusPane::Workspace => AppAreas {
+                workspace: area,
+                ..AppAreas::default()
+            },
+            FocusPane::Inspector => AppAreas {
+                inspector: area,
+                ..AppAreas::default()
+            },
+        }
+    }
+}
+
+fn render_minimum_size(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
+    let message = centered(72, 9, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "◇ ORACLE OF DÆDALUS",
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::from(""),
+            Line::styled(
+                "The forge needs a little more room.",
+                Style::default().fg(theme.text),
+            ),
+            Line::styled(
+                format!("Current: {}×{}  ·  Minimum: 80×24", area.width, area.height),
+                Style::default().fg(theme.muted),
+            ),
+            Line::from(""),
+            Line::styled(
+                "Resize the terminal to continue.",
+                Style::default().fg(theme.yellow),
+            ),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.focus))
+                .style(Style::default().bg(theme.surface)),
+        ),
+        message,
+    );
+}
+
+fn section_views(section: PrimarySection, level: InteractionLevel) -> Vec<View> {
+    let candidates: &[View] = match section {
+        PrimarySection::Chat => &[View::Conversation, View::History, View::Retrieval],
+        PrimarySection::Library => &[
+            View::Books,
+            View::Indexing,
+            View::Sources,
+            View::Quality,
+            View::Backups,
+        ],
+        PrimarySection::Foundry => &[View::FoundryOverview, View::Models, View::System],
+        PrimarySection::Utilities => &[],
+    };
+    candidates
+        .iter()
+        .copied()
+        .filter(|view| level == InteractionLevel::Workshop || !view.advanced())
+        .collect()
+}
+
+fn nav_line(label: &str, active: bool, focused: bool, theme: &Theme) -> Line<'static> {
+    let marker = if active { "│" } else { " " };
+    let style = if active {
+        Style::default()
+            .fg(theme.focus)
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(theme.focus)),
+        Span::styled(if focused && active { " › " } else { "   " }, style),
+        Span::styled(label.to_owned(), style),
+    ])
+}
+
+fn sidebar_child_line(label: &str, active: bool, focused: bool, theme: &Theme) -> Line<'static> {
+    let style = if active {
+        Style::default()
+            .fg(theme.focus)
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            if active { "│" } else { " " },
+            Style::default().fg(theme.focus),
+        ),
+        Span::styled(if active && focused { "› " } else { "  " }, style),
+        Span::styled(label.to_owned(), style),
+    ])
+}
+
+fn sidebar_heading(label: &str, active: bool, theme: &Theme) -> Line<'static> {
+    Line::styled(
+        format!(" {label}"),
+        Style::default()
+            .fg(if active { theme.focus } else { theme.muted })
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+pub(crate) fn sidebar_navigation_rows(state: &AppState) -> Vec<Option<View>> {
+    let mut rows = Vec::new();
+    for section in PrimarySection::CORE.iter().copied() {
+        rows.push(Some(match section {
+            PrimarySection::Chat => View::Conversation,
+            PrimarySection::Library => View::Books,
+            PrimarySection::Foundry => View::FoundryOverview,
+            PrimarySection::Utilities => View::Activity,
+        }));
+        rows.extend(
+            section_views(section, state.interaction_level)
+                .into_iter()
+                .map(Some),
+        );
+    }
+    rows
+}
+
+fn render_sidebar(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let workspace = state
+        .active_workspace
+        .as_ref()
+        .and_then(|id| state.workspaces.iter().find(|item| &item.id == id))
+        .map_or("No library", |item| item.name.as_str());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default().fg(if state.focus_pane == FocusPane::Sidebar {
+                theme.focus
+            } else {
+                theme.border
+            }),
+        )
+        .title(Line::from(vec![
+            Span::styled(" ◇ ", Style::default().fg(theme.cyan)),
+            Span::styled(
+                truncate(workspace, area.width.saturating_sub(7) as usize),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ]))
+        .style(Style::default().bg(theme.surface).fg(theme.text));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let utility_height = 5.min(inner.height);
+    let [navigation, utilities] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(utility_height)]).areas(inner);
+
+    let section = state.view.section();
+    let mut lines = Vec::new();
+    for item in PrimarySection::CORE.iter().copied() {
+        lines.push(sidebar_heading(
+            &item.label().to_ascii_uppercase(),
+            item == section,
+            theme,
+        ));
+        for view in section_views(item, state.interaction_level) {
+            lines.push(sidebar_child_line(
+                view.label(),
+                state.view == view,
+                state.focus_pane == FocusPane::Sidebar,
+                theme,
+            ));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), navigation);
+
+    let active_jobs = state
+        .jobs
+        .values()
+        .filter(|job| !is_terminal(&job.status))
+        .count();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                " UTILITIES",
+                Style::default()
+                    .fg(theme.muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            nav_line(
+                &format!("Activity  {active_jobs}"),
+                state.view == View::Activity,
+                state.focus_pane == FocusPane::Sidebar,
+                theme,
+            ),
+            nav_line(
+                "Settings",
+                state.view == View::Settings,
+                state.focus_pane == FocusPane::Sidebar,
+                theme,
+            ),
+            Line::from(vec![
+                Span::styled("    ? ", Style::default().fg(theme.yellow)),
+                Span::styled("Help", Style::default().fg(theme.text)),
+            ]),
+            Line::styled(
+                format!("  {} mode", state.interaction_level.label()),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        utilities,
+    );
+}
+
+fn workspace_block(title: &str, focused: bool, theme: &Theme) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if focused { theme.focus } else { theme.border }))
+        .title(Line::from(vec![
+            Span::styled(" ─ ", Style::default().fg(theme.focus)),
+            Span::styled(
+                title.to_owned(),
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ", Style::default()),
+        ]))
+        .style(Style::default().bg(theme.background).fg(theme.text))
+}
+
+fn render_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    previews: &mut [ChatImagePreview],
+) {
+    let block = workspace_block(
+        state.view.label(),
+        state.focus_pane == FocusPane::Workspace,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width < 20 || inner.height < 4 {
+        return;
+    }
+    match state.view {
+        View::Conversation => render_chat_workspace(frame, inner, state, theme, metrics, previews),
+        View::History => render_history_workspace(frame, inner, state, theme),
+        View::Retrieval => render_retrieval_workspace(frame, inner, state, theme),
+        View::Books => render_books_workspace(frame, inner, state, theme),
+        View::Indexing => render_indexing_workspace(frame, inner, state, theme, metrics),
+        View::Sources => render_sources_workspace(frame, inner, state, theme),
+        View::Quality => render_quality_workspace(frame, inner, state, theme),
+        View::Backups => render_backups_workspace(frame, inner, state, theme),
+        View::FoundryOverview => render_foundry_workspace(frame, inner, state, theme, metrics),
+        View::Models => render_models_workspace(frame, inner, state, theme, metrics),
+        View::System => render_system_workspace(frame, inner, state, theme, metrics),
+        View::Activity => render_activity_workspace(frame, inner, state, theme, metrics),
+        View::Settings => render_settings_workspace(frame, inner, state, theme),
+    }
+}
+
+fn render_chat_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    previews: &mut [ChatImagePreview],
+) {
+    let input_height = if area.height >= 9 { 3 } else { 1 };
+    let [body, input] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(area);
+    let evidence_height = if state.chat.citations.is_empty() || area.height < 18 {
+        0
+    } else {
+        body.height.min(10)
+    };
+    let [answer, evidence] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(evidence_height)]).areas(body);
+    let text = if let Some(error) = &state.chat.error {
+        Text::from(vec![
+            Line::styled("Answer failed", Style::default().fg(theme.red)),
+            Line::from(error.clone()),
+        ])
+    } else if state.chat.answer.is_empty() {
+        Text::from(vec![
+            Line::from(""),
+            Line::styled(
+                if state.chat.request_pending || state.chat.active_run.is_some() {
+                    format!(
+                        "{} Searching your library…",
+                        spinner(metrics.animation_tick)
+                    )
+                } else {
+                    "Ask a question across your private library.".into()
+                },
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::from(""),
+            Line::styled(
+                "Answers stay local and carry their evidence into the inspector.",
+                Style::default().fg(theme.muted),
+            ),
+        ])
+    } else {
+        highlighted_answer(&state.chat.answer, state.citation_cursor, theme)
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((state.chat_scroll, 0)),
+        answer,
+    );
+    if evidence_height > 0 {
+        render_chat_evidence(frame, evidence, state, theme, previews);
+    }
+    render_inline_editor(
+        frame,
+        input,
+        &state.chat.question,
+        "Ask your library · Enter send · Ctrl+E evidence",
+        state.focus_pane == FocusPane::Workspace && state.input_mode == InputMode::Text,
+        theme,
+    );
+}
+
+fn render_books_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let [summary, list, actions] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Fill(1),
+        Constraint::Length(3),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} books", state.documents.len()),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  ·  {}  ·  {}",
+                        state.library.filter.label(),
+                        state.library.sort.label()
+                    ),
+                    Style::default().fg(theme.muted),
+                ),
+            ]),
+            Line::styled(
+                "/ search  ·  I add PDFs  ·  F filter  ·  O sort",
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        summary,
+    );
+    let documents = library_documents(state);
+    let items = if documents.is_empty() {
+        vec![ListItem::new(vec![
+            Line::styled("No indexed books yet", Style::default().fg(theme.muted)),
+            Line::styled(
+                "Press I to add a PDF or folder.",
+                Style::default().fg(theme.focus),
+            ),
+        ])]
+    } else {
+        documents
+            .iter()
+            .map(|document| {
+                let detail = state.library.details.get(&document.id);
+                let pages = document
+                    .page_count
+                    .map_or("?".into(), |value| value.to_string());
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(" PDF  ", Style::default().fg(theme.cyan)),
+                        Span::styled(
+                            &document.title,
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::styled(
+                        format!(
+                            "      {pages} pages · {} · {}",
+                            document.status,
+                            detail.map_or("size unknown".into(), |item| format_bytes(
+                                item.size_bytes
+                            ))
+                        ),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    if !documents.is_empty() {
+        list_state.select(Some(
+            state.asset_cursor.min(documents.len().saturating_sub(1)),
+        ));
+    }
+    frame.render_stateful_widget(
+        List::new(items).highlight_symbol("│› ").highlight_style(
+            Style::default()
+                .bg(theme.selection)
+                .fg(theme.focus)
+                .add_modifier(Modifier::BOLD),
+        ),
+        list,
+        &mut list_state,
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            shortcut_words(
+                theme,
+                &[
+                    ("Open", 'O', theme.green),
+                    ("Info", 'N', theme.cyan),
+                    ("Tags", 'T', theme.yellow),
+                    ("Delete", 'D', theme.red),
+                ],
+            ),
+            Line::styled(
+                "Enter opens the selected book",
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        actions,
+    );
+}
+
+fn render_indexing_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    let [intro, jobs, actions] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(2),
+    ])
+    .areas(area);
+    let active = state
+        .jobs
+        .values()
+        .filter(|job| !is_terminal(&job.status))
+        .count();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("{} active", active),
+                    Style::default()
+                        .fg(if active > 0 {
+                            theme.yellow
+                        } else {
+                            theme.green
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  ·  {} total jobs", state.jobs.len()),
+                    Style::default().fg(theme.muted),
+                ),
+            ]),
+            Line::styled(
+                "Import is a pipeline: discover → parse → chunk → embed → verify",
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled("I add PDFs or folders", Style::default().fg(theme.focus)),
+        ]),
+        intro,
+    );
+    let items = if state.jobs.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No indexing runs",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        state
+            .jobs
+            .values()
+            .map(|job| activity_item(job, theme))
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.jobs.is_empty())
+            .then_some(state.job_cursor.min(state.jobs.len().saturating_sub(1))),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        jobs,
+        &mut list_state,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", spinner(metrics.animation_tick)),
+                Style::default().fg(if active > 0 {
+                    theme.yellow
+                } else {
+                    theme.muted
+                }),
+            ),
+            Span::styled(
+                "Space pause/resume  ·  X cancel  ·  R refresh",
+                Style::default().fg(theme.muted),
+            ),
+        ])),
+        actions,
+    );
+}
+
+fn render_history_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let sessions = state
+        .active_workspace
+        .as_ref()
+        .and_then(|id| state.chat_sessions.get(id))
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let items = if sessions.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No saved conversations",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        sessions
+            .iter()
+            .map(|session| {
+                ListItem::new(vec![
+                    Line::styled(
+                        truncate(&session.question, area.width.saturating_sub(4) as usize),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Line::styled(
+                        format!(
+                            "{} · {} citations",
+                            session.created_at,
+                            session.citations.len()
+                        ),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!sessions.is_empty())
+            .then_some(state.history_cursor.min(sessions.len().saturating_sub(1))),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        area,
+        &mut list_state,
+    );
+}
+
+fn render_retrieval_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let [search, results] =
+        Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(area);
+    render_inline_editor(
+        frame,
+        search,
+        &state.search.query,
+        "Search chunks · Enter run",
+        state.focus_pane == FocusPane::Workspace && state.input_mode == InputMode::Text,
+        theme,
+    );
+    let items = if state.search.results.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "Run a retrieval query to inspect ranking.",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        state
+            .search
+            .results
+            .iter()
+            .map(|hit| {
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{:.3}  ", hit.score.unwrap_or_default()),
+                            Style::default()
+                                .fg(theme.green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("pages {:?}", hit.pages),
+                            Style::default().fg(theme.cyan),
+                        ),
+                    ]),
+                    Line::styled(
+                        truncate(
+                            &hit.content.replace('\n', " "),
+                            area.width.saturating_sub(3) as usize,
+                        ),
+                        Style::default().fg(theme.text),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.search.results.is_empty()).then_some(
+            state
+                .search
+                .cursor
+                .min(state.search.results.len().saturating_sub(1)),
+        ),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        results,
+        &mut list_state,
+    );
+}
+
+fn render_sources_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let [list, editor] = Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(area);
+    let items = if state.sources.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No reusable sources",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        state
+            .sources
+            .iter()
+            .map(|source| {
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            if source.enabled { "● " } else { "○ " },
+                            Style::default().fg(if source.enabled {
+                                theme.green
+                            } else {
+                                theme.muted
+                            }),
+                        ),
+                        Span::styled(
+                            &source.name,
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", source.source_type),
+                            Style::default().fg(theme.cyan),
+                        ),
+                    ]),
+                    Line::styled(
+                        truncate(&source.location, area.width.saturating_sub(4) as usize),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.sources.is_empty()).then_some(
+            state
+                .source_cursor
+                .min(state.sources.len().saturating_sub(1)),
+        ),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        list,
+        &mut list_state,
+    );
+    render_inline_editor(
+        frame,
+        editor,
+        &state.source_location,
+        "Add file, directory, or URL",
+        state.input_mode == InputMode::Text,
+        theme,
+    );
+}
+
+fn render_quality_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let lines = state.quality.as_ref().map_or_else(
+        || {
+            vec![Line::styled(
+                "No quality report loaded.",
+                Style::default().fg(theme.muted),
+            )]
+        },
+        |quality| {
+            let mut lines = vec![
+                Line::styled(
+                    quality.status.to_ascii_uppercase(),
+                    Style::default()
+                        .fg(if quality.failed_jobs == 0 {
+                            theme.green
+                        } else {
+                            theme.yellow
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::from(format!("Documents          {}", quality.document_count)),
+                Line::from(format!("Completed imports  {}", quality.completed_imports)),
+                Line::from(format!("Failed jobs        {}", quality.failed_jobs)),
+                Line::from(""),
+                Line::styled("ISSUES", Style::default().fg(theme.muted)),
+            ];
+            if quality.issues.is_empty() {
+                lines.push(Line::styled(
+                    "✓ No issues detected",
+                    Style::default().fg(theme.green),
+                ));
+            } else {
+                lines.extend(quality.issues.iter().map(|issue| {
+                    Line::styled(format!("! {issue}"), Style::default().fg(theme.yellow))
+                }));
+            }
+            lines
+        },
+    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
+fn render_backups_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let items = if state.backups.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No backups yet · press B to create one",
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        state
+            .backups
+            .iter()
+            .map(|backup| {
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            if backup.verified { "✓ " } else { "! " },
+                            Style::default().fg(if backup.verified {
+                                theme.green
+                            } else {
+                                theme.yellow
+                            }),
+                        ),
+                        Span::styled(
+                            &backup.id,
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {}", format_bytes(backup.size_bytes)),
+                            Style::default().fg(theme.cyan),
+                        ),
+                    ]),
+                    Line::styled(&backup.created_at, Style::default().fg(theme.muted)),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.backups.is_empty()).then_some(
+            state
+                .backup_cursor
+                .min(state.backups.len().saturating_sub(1)),
+        ),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        area,
+        &mut list_state,
+    );
+}
+
+fn render_filter_chip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    accent: Color,
+    theme: &Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                label.to_owned(),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default()),
+            Span::styled(value.to_owned(), Style::default().fg(theme.text)),
+            Span::styled(" ›", Style::default().fg(theme.muted)),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        area,
+    );
+}
+
+fn model_transfer_line(
+    state: &AppState,
+    metrics: &RuntimeMetrics,
+    theme: &Theme,
+    width: u16,
+) -> Line<'static> {
+    if state.model_manager.busy {
+        let mut spans = vec![
+            Span::styled(
+                format!("{} ", spinner(metrics.animation_tick)),
+                Style::default().fg(theme.yellow),
+            ),
+            Span::styled(
+                truncate(
+                    &state.model_manager.transfer_status,
+                    width.saturating_sub(20) as usize,
+                ),
+                Style::default().fg(theme.text),
+            ),
+        ];
+        if state.model_manager.transfer_total > 0 {
+            let ratio = state.model_manager.transfer_completed as f64
+                / state.model_manager.transfer_total as f64;
+            let filled = (ratio.clamp(0.0, 1.0) * 10.0).round() as usize;
+            spans.extend([
+                Span::raw("  "),
+                Span::styled("█".repeat(filled), Style::default().fg(theme.green)),
+                Span::styled("░".repeat(10 - filled), Style::default().fg(theme.border)),
+                Span::styled(
+                    format!(" {:>3.0}%", ratio * 100.0),
+                    Style::default().fg(theme.yellow),
+                ),
+            ]);
+        }
+        Line::from(spans)
+    } else {
+        Line::from(vec![
+            Span::styled("● READY", Style::default().fg(theme.green)),
+            Span::styled(
+                if state.model_manager.transfer_status.is_empty() {
+                    "  Select an item; details and actions are on the right.".into()
+                } else {
+                    format!("  {}", state.model_manager.transfer_status)
+                },
+                Style::default().fg(theme.muted),
+            ),
+        ])
+    }
+}
+
+fn render_foundry_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    let [summary, rail, packages, status] = foundry_setup_areas(area);
+    let profile = state
+        .model_manager
+        .profile
+        .label()
+        .split(" ·")
+        .next()
+        .unwrap_or("Local");
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    "LOCAL MODELS",
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  {} · {} · {}K",
+                        profile,
+                        state.model_manager.quantization.label(),
+                        state.model_manager.context_tokens / 1024
+                    ),
+                    Style::default().fg(theme.text),
+                ),
+            ]),
+            Line::styled(
+                hardware_recommendation(metrics),
+                Style::default().fg(theme.muted),
+            ),
+        ]),
+        summary,
+    );
+
+    let configured = configured_models(state);
+    let selected_package = state
+        .model_manager
+        .packages
+        .get(state.model_manager.package_cursor);
+    let mut rail_spans = Vec::new();
+    for (index, (role, name)) in configured.iter().enumerate() {
+        let loaded = metrics
+            .loaded_models
+            .iter()
+            .any(|model| model_matches(&model.name, name));
+        let configured = name != "not configured";
+        let recommended = selected_package.is_some_and(|package| {
+            package
+                .models
+                .iter()
+                .any(|model| model.role.label() == role)
+        });
+        if index > 0 {
+            rail_spans.push(Span::styled(" ─ ", Style::default().fg(theme.border)));
+        }
+        rail_spans.push(Span::styled(
+            if loaded {
+                "● "
+            } else if configured {
+                "◆ "
+            } else if recommended {
+                "◇ "
+            } else {
+                "○ "
+            },
+            Style::default().fg(if loaded {
+                theme.green
+            } else if configured {
+                theme.cyan
+            } else if recommended {
+                theme.orange
+            } else {
+                theme.muted
+            }),
+        ));
+        rail_spans.push(Span::styled(
+            role.to_ascii_uppercase(),
+            Style::default()
+                .fg(if configured { theme.text } else { theme.muted })
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(rail_spans),
+            Line::styled(
+                format!(
+                    "{} loaded · ◆ configured · ◇ selected · ○ open",
+                    metrics.loaded_models.len()
+                ),
+                Style::default().fg(theme.muted),
+            ),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Model rail "),
+        ),
+        rail,
+    );
+
+    let items = if state.model_manager.packages.is_empty() {
+        vec![ListItem::new(vec![
+            Line::styled(
+                if state.model_manager.busy {
+                    "Finding the best local setup…"
+                } else {
+                    "No recommendations loaded. Press R to scan the catalog."
+                },
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                "Recommendations use available memory, context and quantization.",
+                Style::default().fg(theme.muted),
+            ),
+        ])]
+    } else {
+        state
+            .model_manager
+            .packages
+            .iter()
+            .map(|package| {
+                let fit_color = match package.fit {
+                    ModelFit::Comfortable => theme.green,
+                    ModelFit::Tight => theme.yellow,
+                };
+                ListItem::new(vec![
+                    Line::from(vec![
+                        Span::styled(
+                            format!("#{} ", package.recommended_rank),
+                            Style::default()
+                                .fg(theme.orange)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            package.name.clone(),
+                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(
+                                "  {} · {}",
+                                package.fit.label(),
+                                human_memory(package.total_estimated_memory)
+                            ),
+                            Style::default().fg(fit_color),
+                        ),
+                    ]),
+                    Line::styled(
+                        format!("   {}", package.summary),
+                        Style::default().fg(theme.muted),
+                    ),
+                ])
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.model_manager.packages.is_empty()).then_some(
+            state
+                .model_manager
+                .package_cursor
+                .min(state.model_manager.packages.len().saturating_sub(1)),
+        ),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(theme.border))
+                    .title(" Recommended for this device "),
+            ),
+        packages,
+        &mut list_state,
+    );
+    frame.render_widget(
+        Paragraph::new(model_transfer_line(state, metrics, theme, status.width)),
+        status,
+    );
+}
+
+fn render_models_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    let [filters, search, list, status] = foundry_catalog_areas(area);
+    let [source, role, count] = catalog_filter_areas(filters);
+    render_filter_chip(
+        frame,
+        source,
+        "S Source",
+        state.model_manager.source.label(),
+        theme.focus,
+        theme,
+    );
+    render_filter_chip(
+        frame,
+        role,
+        "[ ] Role",
+        state.model_manager.category.label(),
+        theme.purple,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!("{} compatible", state.model_manager.compatible),
+            Style::default().fg(theme.muted),
+        ))
+        .alignment(Alignment::Right)
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme.border)),
+        ),
+        count,
+    );
+    render_inline_editor(
+        frame,
+        search,
+        &state.model_manager.query,
+        "/ search catalog",
+        state.model_manager.searching,
+        theme,
+    );
+    let items = if state.model_manager.entries.is_empty() {
+        vec![ListItem::new(Line::styled(
+            if state.model_manager.busy {
+                "Loading model catalog…"
+            } else {
+                "Press R to load the model catalog."
+            },
+            Style::default().fg(theme.muted),
+        ))]
+    } else {
+        state
+            .model_manager
+            .entries
+            .iter()
+            .map(|entry| {
+                let loaded = metrics
+                    .loaded_models
+                    .iter()
+                    .any(|model| model_matches(&model.name, &entry.id));
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        if loaded {
+                            "● "
+                        } else if entry.installed {
+                            "◆ "
+                        } else {
+                            "○ "
+                        },
+                        Style::default().fg(if loaded {
+                            theme.green
+                        } else if entry.installed {
+                            theme.cyan
+                        } else {
+                            theme.muted
+                        }),
+                    ),
+                    Span::styled(
+                        truncate(&entry.id, list.width.saturating_sub(30) as usize),
+                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(
+                            "  {} · {}{}",
+                            entry.fit.label(),
+                            human_memory(entry.estimated_memory),
+                            entry
+                                .recommended_rank
+                                .map_or(String::new(), |rank| format!(" · #{rank}"))
+                        ),
+                        Style::default().fg(match entry.fit {
+                            ModelFit::Comfortable => theme.green,
+                            ModelFit::Tight => theme.yellow,
+                        }),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let mut list_state = ListState::default();
+    list_state.select(
+        (!state.model_manager.entries.is_empty()).then_some(
+            state
+                .model_manager
+                .cursor
+                .min(state.model_manager.entries.len().saturating_sub(1)),
+        ),
+    );
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection)),
+        list,
+        &mut list_state,
+    );
+    let mut status_lines = vec![model_transfer_line(state, metrics, theme, status.width)];
+    if state.model_manager.truncated {
+        status_lines.push(Line::styled(
+            "Hub scan capped · search scans matching repositories",
+            Style::default().fg(theme.orange),
+        ));
+    }
+    frame.render_widget(Paragraph::new(status_lines), status);
+}
+
+fn render_system_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    let backend = state
+        .backend
+        .as_ref()
+        .map_or("not connected".into(), |meta| {
+            format!("{} · API {}", meta.backend_id, meta.api_version)
+        });
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("RUNTIME", Style::default().fg(theme.muted)),
+            Line::from(vec![
+                Span::styled("Backend     ", Style::default().fg(theme.muted)),
+                Span::styled(backend, Style::default().fg(theme.text)),
+            ]),
+            Line::from(vec![
+                Span::styled("Connection  ", Style::default().fg(theme.muted)),
+                Span::styled(state.connection.label(), Style::default().fg(theme.green)),
+            ]),
+            Line::from(vec![
+                Span::styled("CPU         ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("{} threads · {:.0}%", metrics.cpu_count, metrics.cpu_usage),
+                    Style::default().fg(theme.cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Memory      ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!(
+                        "{} / {}",
+                        human_memory(metrics.memory_used),
+                        human_memory(metrics.memory_total)
+                    ),
+                    Style::default().fg(theme.cyan),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Theme       ", Style::default().fg(theme.muted)),
+                Span::styled(theme.name, Style::default().fg(theme.focus)),
+            ]),
+            Line::from(""),
+            Line::styled(
+                "All inference and retrieval services remain local.",
+                Style::default().fg(theme.muted),
+            ),
+        ])
+        .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn render_activity_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    render_indexing_workspace(frame, area, state, theme, metrics);
+}
+
+fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
+    let [intro, editor, hints] = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Fill(1),
+        Constraint::Length(2),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "WORKSPACE CONFIGURATION",
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                "Advanced YAML. Changes are explicit and versioned.",
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                if state.config_dirty {
+                    "● Unsaved changes"
+                } else {
+                    "✓ Saved"
+                },
+                Style::default().fg(if state.config_dirty {
+                    theme.yellow
+                } else {
+                    theme.green
+                }),
+            ),
+        ]),
+        intro,
+    );
+    render_inline_editor(
+        frame,
+        editor,
+        &state.config_editor,
+        "Workspace YAML",
+        state.input_mode == InputMode::Text,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new("Enter edit · Ctrl+Enter save · Ctrl+T theme")
+            .style(Style::default().fg(theme.muted)),
+        hints,
+    );
+}
+
+fn inspector_block(title: &str, focused: bool, theme: &Theme) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Line::from(vec![
+            Span::styled(" ─ ", Style::default().fg(theme.focus)),
+            Span::styled(
+                title.to_owned(),
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .border_style(Style::default().fg(if focused { theme.focus } else { theme.border }))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FoundryControl {
+    Profile,
+    Quantization,
+    Context,
+    Memory,
+    InstallStack,
+    Download,
+    Load,
+    Unload,
+    Delete,
+    Refresh,
+}
+
+pub(crate) fn foundry_controls(state: &AppState) -> Vec<FoundryControl> {
+    let mut controls = vec![
+        FoundryControl::Profile,
+        FoundryControl::Quantization,
+        FoundryControl::Context,
+        FoundryControl::Memory,
+    ];
+    match state.view {
+        View::FoundryOverview => {
+            if !state.model_manager.packages.is_empty() {
+                controls.push(FoundryControl::InstallStack);
+            }
+            controls.push(FoundryControl::Refresh);
+        }
+        View::Models => {
+            if let Some(entry) = state.model_manager.entries.get(state.model_manager.cursor) {
+                if entry.installed || entry.source == ModelSource::Installed {
+                    controls.extend([FoundryControl::Load, FoundryControl::Unload]);
+                    if entry.source == ModelSource::Installed {
+                        controls.push(FoundryControl::Delete);
+                    }
+                } else {
+                    controls.push(FoundryControl::Download);
+                }
+            }
+            controls.push(FoundryControl::Refresh);
+        }
+        _ => {}
+    }
+    controls
+}
+
+fn foundry_control_line(
+    control: FoundryControl,
+    state: &AppState,
+    selected: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let (key, label, value, accent) = match control {
+        FoundryControl::Profile => (
+            "F",
+            "Profile",
+            state
+                .model_manager
+                .profile
+                .label()
+                .split(" ·")
+                .next()
+                .unwrap_or("Local")
+                .to_owned(),
+            theme.green,
+        ),
+        FoundryControl::Quantization => (
+            "Q",
+            "Quant",
+            state.model_manager.quantization.label().to_owned(),
+            theme.purple,
+        ),
+        FoundryControl::Context => (
+            "C",
+            "Context",
+            format!("{}K", state.model_manager.context_tokens / 1024),
+            theme.cyan,
+        ),
+        FoundryControl::Memory => (
+            "P",
+            "Memory",
+            state.model_manager.memory_policy.label().to_owned(),
+            theme.orange,
+        ),
+        FoundryControl::InstallStack => {
+            let installed = state
+                .model_manager
+                .packages
+                .get(state.model_manager.package_cursor)
+                .is_some_and(|package| package.models.iter().all(|model| model.installed));
+            (
+                "A",
+                if installed { "Stack" } else { "Install" },
+                if installed {
+                    "Installed"
+                } else {
+                    "selected stack"
+                }
+                .to_owned(),
+                if installed { theme.green } else { theme.orange },
+            )
+        }
+        FoundryControl::Download => ("D", "Download", "selected model".to_owned(), theme.green),
+        FoundryControl::Load => ("L", "Load", "temporarily".to_owned(), theme.cyan),
+        FoundryControl::Unload => ("U", "Unload", "selected model".to_owned(), theme.yellow),
+        FoundryControl::Delete => ("X", "Delete", "local model".to_owned(), theme.red),
+        FoundryControl::Refresh => ("R", "Refresh", "catalog".to_owned(), theme.yellow),
+    };
+    let base = if selected {
+        Style::default().bg(theme.selection).fg(theme.text)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    Line::from(vec![
+        Span::styled(if selected { "› " } else { "  " }, base),
+        Span::styled(key, base.fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {label:<9}"), base),
+        Span::styled(
+            value,
+            base.fg(if selected { theme.text } else { theme.muted }),
+        ),
+        Span::styled(
+            if matches!(
+                control,
+                FoundryControl::Profile
+                    | FoundryControl::Quantization
+                    | FoundryControl::Context
+                    | FoundryControl::Memory
+            ) {
+                "  ‹ ›"
+            } else {
+                ""
+            },
+            base.fg(theme.muted),
+        ),
+    ])
+}
+
+fn render_foundry_inspector(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+) {
+    let [details, tuning, actions] = foundry_inspector_areas(area);
+    let detail_lines = match state.view {
+        View::FoundryOverview => state
+            .model_manager
+            .packages
+            .get(state.model_manager.package_cursor)
+            .map_or_else(
+                || {
+                    vec![
+                        Line::styled("NO SETUP SELECTED", Style::default().fg(theme.muted)),
+                        Line::from(""),
+                        Line::styled(
+                            "Press R to build recommendations for this device.",
+                            Style::default().fg(theme.muted),
+                        ),
+                    ]
+                },
+                |package| package_details(package, theme),
+            ),
+        View::Models => state
+            .model_manager
+            .entries
+            .get(state.model_manager.cursor)
+            .map_or_else(
+                || {
+                    vec![
+                        Line::styled("NO MODEL SELECTED", Style::default().fg(theme.muted)),
+                        Line::from(""),
+                        Line::styled(
+                            "Press R to load the catalog or change the filters.",
+                            Style::default().fg(theme.muted),
+                        ),
+                    ]
+                },
+                |entry| model_details(entry, state, metrics, theme).lines,
+            ),
+        _ => Vec::new(),
+    };
+    frame.render_widget(
+        Paragraph::new(detail_lines)
+            .wrap(Wrap { trim: false })
+            .scroll((state.inspector_scroll, 0)),
+        details,
+    );
+
+    let controls = foundry_controls(state);
+    let focused = state.focus_pane == FocusPane::Inspector;
+    let tuning_lines = controls
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, control)| {
+            foundry_control_line(
+                *control,
+                state,
+                focused && state.model_manager.inspector_cursor == index,
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(tuning_lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Tuning "),
+        ),
+        tuning,
+    );
+    let action_lines = controls
+        .iter()
+        .skip(4)
+        .enumerate()
+        .map(|(index, control)| {
+            let index = index + 4;
+            foundry_control_line(
+                *control,
+                state,
+                focused && state.model_manager.inspector_cursor == index,
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(action_lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Actions "),
+        ),
+        actions,
+    );
+}
+
+fn render_inspector(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    _previews: &mut [ChatImagePreview],
+) {
+    let title = match state.view {
+        View::Conversation | View::Retrieval => "Evidence",
+        View::Books => "Book details",
+        View::Indexing | View::Activity => "Run details",
+        View::FoundryOverview => "Stack details",
+        View::Models => "Model details",
+        View::System => "Runtime details",
+        View::Settings => "Configuration",
+        _ => "Details",
+    };
+    let block = inspector_block(title, state.focus_pane == FocusPane::Inspector, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if matches!(state.view, View::FoundryOverview | View::Models) {
+        render_foundry_inspector(frame, inner, state, theme, metrics);
+        return;
+    }
+    let lines = inspector_lines(state, theme, metrics, inner.width);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((state.inspector_scroll, 0)),
+        inner,
+    );
+}
+
+fn inspector_lines(
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    width: u16,
+) -> Vec<Line<'static>> {
+    match state.view {
+        View::Conversation | View::Retrieval => {
+            if state.chat.citations.is_empty() {
+                return vec![
+                    Line::styled("NO EVIDENCE SELECTED", Style::default().fg(theme.muted)),
+                    Line::from(""),
+                    Line::styled(
+                        "Ask a question. Sources and page anchors will appear here.",
+                        Style::default().fg(theme.muted),
+                    ),
+                ];
+            }
+            let mut lines = vec![
+                Line::styled(
+                    format!("{} CITATIONS", state.chat.citations.len()),
+                    Style::default().fg(theme.muted),
+                ),
+                Line::styled(
+                    format!("Evidence mode · {}", state.chat.evidence_mode),
+                    Style::default().fg(theme.cyan),
+                ),
+                Line::from(""),
+            ];
+            for (index, citation) in state.chat.citations.iter().enumerate() {
+                let selected = index == state.citation_cursor;
+                let page = citation
+                    .pages
+                    .first()
+                    .map_or("?".into(), |page| page.to_string());
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(
+                            "{}{} ",
+                            if selected { "│" } else { " " },
+                            citation.evidence_id.as_deref().unwrap_or("E?")
+                        ),
+                        Style::default().fg(if selected { theme.focus } else { theme.yellow }),
+                    ),
+                    Span::styled(
+                        truncate(
+                            citation.document_title.as_deref().unwrap_or("Source"),
+                            width.saturating_sub(6) as usize,
+                        ),
+                        Style::default()
+                            .fg(if selected { theme.focus } else { theme.text })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                lines.push(Line::styled(
+                    format!(
+                        "    page {page} · {} anchors",
+                        citation.primary_anchors.len()
+                    ),
+                    Style::default().fg(theme.muted),
+                ));
+                if selected {
+                    if let Some(heading) = citation.headings.last() {
+                        lines.push(Line::styled(
+                            format!("    {heading}"),
+                            Style::default().fg(theme.cyan),
+                        ));
+                    }
+                    lines.push(Line::from(""));
+                }
+            }
+            lines.push(Line::styled(
+                "[ ] select  ·  O open  ·  V preview",
+                Style::default().fg(theme.muted),
+            ));
+            lines
+        }
+        View::Books => {
+            let documents = library_documents(state);
+            let Some(document) =
+                documents.get(state.asset_cursor.min(documents.len().saturating_sub(1)))
+            else {
+                return vec![Line::styled(
+                    "Select a book to inspect it.",
+                    Style::default().fg(theme.muted),
+                )];
+            };
+            let detail = state.library.details.get(&document.id);
+            let tags = state
+                .document_tags
+                .get(&document.id)
+                .map_or("—".into(), |tags| tags.join(", "));
+            vec![
+                Line::styled(
+                    document.title.clone(),
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::styled("SOURCE", Style::default().fg(theme.muted)),
+                Line::styled(document.source.clone(), Style::default().fg(theme.text)),
+                Line::from(""),
+                Line::from(format!(
+                    "Pages      {}",
+                    document
+                        .page_count
+                        .map_or("?".into(), |value| value.to_string())
+                )),
+                Line::from(format!("Status     {}", document.status)),
+                Line::from(format!("Parser     {}", document.parser_id)),
+                Line::from(format!(
+                    "Edition    {}",
+                    document
+                        .book
+                        .as_ref()
+                        .and_then(|book| book.edition_label.as_deref())
+                        .unwrap_or("—")
+                )),
+                Line::from(format!(
+                    "Evidence   {}% provenance",
+                    document.quality.as_ref().map_or(0, |quality| {
+                        (quality.provenance_coverage * 100.0).round() as u32
+                    })
+                )),
+                Line::from(format!(
+                    "Size       {}",
+                    detail.map_or("unknown".into(), |item| format_bytes(item.size_bytes))
+                )),
+                Line::from(format!("Tags       {tags}")),
+                Line::from(""),
+                Line::styled(
+                    "Enter open · N info · T tags",
+                    Style::default().fg(theme.muted),
+                ),
+            ]
+        }
+        View::Indexing | View::Activity => {
+            let jobs = state.jobs.values().collect::<Vec<_>>();
+            let Some(job) = jobs.get(state.job_cursor.min(jobs.len().saturating_sub(1))) else {
+                return vec![Line::styled(
+                    "No run selected.",
+                    Style::default().fg(theme.muted),
+                )];
+            };
+            vec![
+                Line::styled(
+                    job.kind.to_ascii_uppercase(),
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::from(format!("Status     {:?}", job.status)),
+                Line::from(format!("Progress   {:.0}%", job.progress * 100.0)),
+                Line::from(format!("Phase      {}", job.phase)),
+                Line::from(format!("Updated    {}", job.updated_at)),
+                Line::from(""),
+                Line::styled(
+                    "Space pause/resume · X cancel",
+                    Style::default().fg(theme.muted),
+                ),
+            ]
+        }
+        View::Models => {
+            let Some(entry) = state.model_manager.entries.get(state.model_manager.cursor) else {
+                return vec![
+                    Line::styled("MODEL DETAILS", Style::default().fg(theme.muted)),
+                    Line::from(""),
+                    Line::styled(
+                        "Load the catalog and select a model.",
+                        Style::default().fg(theme.muted),
+                    ),
+                ];
+            };
+            vec![
+                Line::styled(
+                    entry.id.clone(),
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(entry.source.label(), Style::default().fg(theme.cyan)),
+                Line::from(""),
+                Line::styled(entry.description.clone(), Style::default().fg(theme.text)),
+                Line::from(""),
+                Line::from(format!("Category    {}", entry.category.label())),
+                Line::from(format!("Fit         {}", entry.fit.label())),
+                Line::from(format!(
+                    "Memory      {}",
+                    human_memory(entry.estimated_memory)
+                )),
+                Line::from(format!("Installed   {}", entry.installed)),
+                Line::from(format!(
+                    "Downloads   {}",
+                    entry.downloads.map_or("—".into(), format_count)
+                )),
+                Line::from(format!(
+                    "Likes       {}",
+                    entry.likes.map_or("—".into(), format_count)
+                )),
+                Line::from(format!(
+                    "Quant       {}",
+                    entry.quantization.as_deref().unwrap_or("auto")
+                )),
+                Line::from(""),
+                Line::styled(
+                    entry.capabilities.join(" · "),
+                    Style::default().fg(theme.muted),
+                ),
+            ]
+        }
+        View::FoundryOverview | View::System => {
+            let mut lines = vec![
+                Line::styled("LOCAL RUNTIME", Style::default().fg(theme.muted)),
+                Line::from(""),
+                Line::from(format!(
+                    "CPU       {:.0}% / {} threads",
+                    metrics.cpu_usage, metrics.cpu_count
+                )),
+                Line::from(format!(
+                    "Memory    {} / {}",
+                    human_memory(metrics.memory_used),
+                    human_memory(metrics.memory_total)
+                )),
+                Line::from(format!(
+                    "GPU       {}",
+                    metrics.gpu_name.as_deref().unwrap_or("system graphics")
+                )),
+                Line::from(format!(
+                    "VRAM      {} / {}",
+                    human_memory(metrics.vram_used),
+                    human_memory(metrics.vram_total)
+                )),
+                Line::from(""),
+                Line::styled("RESIDENT MODELS", Style::default().fg(theme.muted)),
+            ];
+            if metrics.loaded_models.is_empty() {
+                lines.push(Line::styled("○ none", Style::default().fg(theme.muted)));
+            } else {
+                lines.extend(metrics.loaded_models.iter().map(|model| {
+                    Line::from(vec![
+                        Span::styled("● ", Style::default().fg(theme.green)),
+                        Span::styled(model.name.clone(), Style::default().fg(theme.text)),
+                    ])
+                }));
+            }
+            lines
+        }
+        View::History => vec![Line::styled(
+            "Select a conversation to restore, rerun, edit, or export it.",
+            Style::default().fg(theme.muted),
+        )],
+        View::Sources => state.sources.get(state.source_cursor).map_or_else(
+            || {
+                vec![Line::styled(
+                    "Select a source.",
+                    Style::default().fg(theme.muted),
+                )]
+            },
+            |source| {
+                vec![
+                    Line::styled(
+                        source.name.clone(),
+                        Style::default()
+                            .fg(theme.focus)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::from(""),
+                    Line::from(format!("Type      {}", source.source_type)),
+                    Line::from(format!("Enabled   {}", source.enabled)),
+                    Line::from(format!("Created   {}", source.created_at)),
+                    Line::from(""),
+                    Line::styled(source.location.clone(), Style::default().fg(theme.muted)),
+                ]
+            },
+        ),
+        View::Quality => vec![Line::styled(
+            "Quality checks summarize ingestion health and surface actionable issues.",
+            Style::default().fg(theme.muted),
+        )],
+        View::Backups => vec![Line::styled(
+            "Backups are local, checksummed snapshots of this library.",
+            Style::default().fg(theme.muted),
+        )],
+        View::Settings => vec![
+            Line::styled(
+                if state.config_dirty {
+                    "UNSAVED"
+                } else {
+                    "SAVED"
+                },
+                Style::default()
+                    .fg(if state.config_dirty {
+                        theme.yellow
+                    } else {
+                        theme.green
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::from(""),
+            Line::styled(
+                "Settings apply to the active library. Ctrl+Enter writes the current YAML using its ETag.",
+                Style::default().fg(theme.muted),
+            ),
+        ],
     }
 }
 
@@ -399,127 +2295,49 @@ pub(crate) fn file_browser_areas(screen: Rect) -> [Rect; 4] {
 }
 
 pub(crate) fn confirm_import_area(screen: Rect) -> Rect {
-    centered(62, 15, screen)
+    centered(72, 22, screen)
 }
 
-pub(crate) fn model_manager_areas(screen: Rect) -> [Rect; 6] {
-    let area = centered(90, 36, screen);
-    let inner = Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
-    let [body, footer] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(5)]).areas(inner);
-    let [sidebar, workspace] =
-        Layout::horizontal([Constraint::Percentage(24), Constraint::Percentage(76)]).areas(body);
-    let [search, results] =
-        Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(workspace);
-    let [list, details] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(results);
-    [area, sidebar, search, list, details, footer]
+pub(crate) fn foundry_setup_areas(area: Rect) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(4),
+        Constraint::Fill(1),
+        Constraint::Length(2),
+    ])
+    .areas(area)
+}
+
+pub(crate) fn foundry_catalog_areas(area: Rect) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Fill(1),
+        Constraint::Length(2),
+    ])
+    .areas(area)
+}
+
+pub(crate) fn catalog_filter_areas(area: Rect) -> [Rect; 3] {
+    Layout::horizontal([
+        Constraint::Percentage(35),
+        Constraint::Percentage(35),
+        Constraint::Percentage(30),
+    ])
+    .areas(area)
+}
+
+pub(crate) fn foundry_inspector_areas(area: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(6),
+        Constraint::Length(6),
+    ])
+    .areas(area)
 }
 
 pub(crate) fn delete_model_confirm_area(screen: Rect) -> Rect {
     centered(52, 9, screen)
-}
-
-fn render_chat(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    theme: &Theme,
-    metrics: &RuntimeMetrics,
-    previews: &mut [ChatImagePreview],
-) {
-    let block = panel("Chat", state.focus == FocusPanel::Chat, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let input_height = if inner.height >= 7 { 3 } else { 1 };
-    let [body, input] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(inner);
-    let evidence_height = if state.chat.answer.is_empty() || state.chat.citations.is_empty() {
-        0
-    } else {
-        body.height.min(10)
-    };
-    let [answer_block, evidence] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(evidence_height)]).areas(body);
-    let marker_height =
-        u16::from(!state.chat.answer.is_empty() && !state.chat.citations.is_empty());
-    let [answer, markers] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(marker_height)])
-            .areas(answer_block);
-    let text = if let Some(error) = &state.chat.error {
-        Text::from(vec![
-            Line::styled("Answer failed", Style::default().fg(theme.red)),
-            Line::from(error.as_str()),
-        ])
-    } else if state.chat.answer.is_empty() {
-        let message = if state.chat.request_pending || state.chat.active_run.is_some() {
-            format!(
-                "{} Searching and composing…",
-                spinner(metrics.animation_tick)
-            )
-        } else {
-            "Ask your library. Press Enter to type.".into()
-        };
-        Text::from(vec![
-            Line::styled(
-                message,
-                Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
-            ),
-            Line::from(""),
-            Line::styled(
-                format!(
-                    "Evidence: {} · {} citations",
-                    state.chat.evidence_mode,
-                    state.chat.citations.len()
-                ),
-                Style::default().fg(theme.muted),
-            ),
-        ])
-    } else {
-        highlighted_answer(&state.chat.answer, state.citation_cursor, theme)
-    };
-    frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((state.chat_scroll, 0)),
-        answer,
-    );
-    if evidence_height > 0 {
-        let mut marker_spans = vec![Span::styled(" Evidence ", Style::default().fg(theme.muted))];
-        for index in 0..state.chat.citations.len().min(9) {
-            marker_spans.push(Span::styled(
-                format!("[{}]", index + 1),
-                Style::default()
-                    .fg(if index == state.citation_cursor {
-                        theme.background
-                    } else {
-                        theme.orange
-                    })
-                    .bg(if index == state.citation_cursor {
-                        theme.focus
-                    } else {
-                        theme.panel
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ));
-            marker_spans.push(Span::raw(" "));
-        }
-        frame.render_widget(Paragraph::new(Line::from(marker_spans)), markers);
-        render_chat_evidence(frame, evidence, state, theme, previews);
-    }
-    render_inline_editor(
-        frame,
-        input,
-        &state.chat.question,
-        "Enter ask · Ctrl+E evidence",
-        state.focus == FocusPanel::Chat && state.input_mode == InputMode::Text,
-        theme,
-    );
 }
 
 fn render_chat_evidence(
@@ -697,177 +2515,6 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
     )
 }
 
-fn render_library(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let workspace = state
-        .active_workspace
-        .as_ref()
-        .and_then(|id| {
-            state
-                .workspaces
-                .iter()
-                .find(|workspace| &workspace.id == id)
-        })
-        .map_or("No library", |workspace| workspace.name.as_str());
-    let title = format!("Library · {workspace}");
-    let block = panel(&title, state.focus == FocusPanel::Sources, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [content, actions] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(4)]).areas(inner);
-    let jobs = library_jobs(state);
-    let documents = library_documents(state);
-    let profile = state.active_profile_settings().name;
-    let mut items = vec![ListItem::new(Line::from(vec![
-        Span::styled(" ◇ ", Style::default().fg(theme.purple)),
-        Span::styled(
-            format!("{} docs", documents.len()),
-            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                "  {} · {} · {profile}",
-                state.library.filter.label(),
-                state.library.sort.label()
-            ),
-            Style::default().fg(theme.muted),
-        ),
-    ]))];
-    for job in &jobs {
-        let sources = job
-            .payload
-            .get("sources")
-            .and_then(|sources| sources.as_array());
-        let total = sources.map_or(0, Vec::len);
-        let current = ((job.progress * total as f64).floor() as usize).min(total.saturating_sub(1));
-        let source = sources
-            .and_then(|sources| sources.get(current))
-            .and_then(|source| source.get("location").or_else(|| source.get("path")))
-            .and_then(|path| path.as_str())
-            .and_then(|path| std::path::Path::new(path).file_name())
-            .and_then(|name| name.to_str())
-            .unwrap_or("import");
-        let color = if job.status == JobStatus::Failed {
-            theme.red
-        } else {
-            theme.orange
-        };
-        items.push(ListItem::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    if job.status == JobStatus::Failed {
-                        " ! "
-                    } else {
-                        " ◆ "
-                    },
-                    Style::default().fg(color),
-                ),
-                Span::styled(truncate(source, 25), Style::default().fg(theme.text)),
-                Span::styled(
-                    format!("  {:.0}%", job.progress * 100.0),
-                    Style::default().fg(color),
-                ),
-            ]),
-            Line::styled(
-                format!(
-                    "   {} · {}/{} files",
-                    truncate(&job.phase, 24),
-                    current.saturating_add(1).min(total),
-                    total
-                ),
-                Style::default().fg(theme.muted),
-            ),
-        ]));
-    }
-    for document in &documents {
-        let detail = state.library.details.get(&document.id);
-        let size = detail.map_or(String::new(), |detail| format_bytes(detail.size_bytes));
-        items.push(asset_item(
-            "PDF",
-            &document.title,
-            if size.is_empty() {
-                document.status.clone()
-            } else {
-                size
-            },
-            theme.cyan,
-            theme,
-        ));
-    }
-    if documents.is_empty() && jobs.is_empty() {
-        items.push(ListItem::new(Line::styled(
-            "   Import PDFs to build this library",
-            Style::default().fg(theme.muted),
-        )));
-    }
-    let selected = 1 + state
-        .asset_cursor
-        .min(jobs.len() + documents.len().saturating_sub(1));
-    let mut list_state = ListState::default();
-    if !jobs.is_empty() || !documents.is_empty() {
-        list_state.select(Some(selected));
-    }
-    frame.render_stateful_widget(
-        List::new(items).highlight_symbol("›").highlight_style(
-            Style::default()
-                .bg(theme.selection)
-                .fg(theme.cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        content,
-        &mut list_state,
-    );
-    let controls = if state.library.filtering {
-        vec![
-            Line::from(vec![
-                Span::styled(" Search  ", Style::default().fg(theme.cyan)),
-                Span::styled(
-                    &state.library.query.value,
-                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::styled("Enter apply   Esc close", Style::default().fg(theme.muted)),
-            Line::from(""),
-            Line::from(""),
-        ]
-    } else {
-        vec![
-            shortcut_columns(
-                theme,
-                &[
-                    ("Libraries", 'L', theme.purple),
-                    ("New", 'N', theme.green),
-                    ("Profile", 'P', theme.orange),
-                ],
-            ),
-            shortcut_columns(
-                theme,
-                &[
-                    ("Search", 'S', theme.cyan),
-                    ("Filter", 'F', theme.yellow),
-                    ("Sort", 'O', theme.purple),
-                ],
-            ),
-            shortcut_columns(
-                theme,
-                &[
-                    ("View", 'V', theme.cyan),
-                    ("Pause", 'U', theme.yellow),
-                    ("Retry", 'R', theme.green),
-                ],
-            ),
-            shortcut_columns(
-                theme,
-                &[
-                    ("Info", 'I', theme.cyan),
-                    ("Tags", 'T', theme.purple),
-                    ("Delete", 'D', theme.red),
-                ],
-            ),
-        ]
-    };
-    frame.render_widget(Paragraph::new(controls), actions);
-}
-
 fn shortcut_words(theme: &Theme, words: &[(&str, char, Color)]) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, (word, key, color)) in words.iter().enumerate() {
@@ -875,20 +2522,6 @@ fn shortcut_words(theme: &Theme, words: &[(&str, char, Color)]) -> Line<'static>
             spans.push(Span::raw("   "));
         }
         spans.extend(shortcut_word(theme, word, *key, *color));
-    }
-    Line::from(spans)
-}
-
-fn shortcut_columns(theme: &Theme, words: &[(&str, char, Color)]) -> Line<'static> {
-    const COLUMN_WIDTH: usize = 12;
-    let mut spans = Vec::new();
-    for (index, (word, key, color)) in words.iter().enumerate() {
-        spans.extend(shortcut_word(theme, word, *key, *color));
-        if index + 1 < words.len() {
-            spans.push(Span::raw(
-                " ".repeat(COLUMN_WIDTH.saturating_sub(word.chars().count())),
-            ));
-        }
     }
     Line::from(spans)
 }
@@ -936,10 +2569,19 @@ fn library_documents(state: &AppState) -> Vec<&omarag_domain::DocumentSummary> {
         .iter()
         .filter(|document| {
             let search_text = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {} {}",
                 document.title,
                 document.source,
                 document.status,
+                document
+                    .book
+                    .as_ref()
+                    .map_or(String::new(), |book| book.authors.join(" ")),
+                document
+                    .book
+                    .as_ref()
+                    .and_then(|book| book.edition_label.clone())
+                    .unwrap_or_default(),
                 state
                     .document_tags
                     .get(&document.id)
@@ -1013,245 +2655,6 @@ fn library_documents(state: &AppState) -> Vec<&omarag_domain::DocumentSummary> {
     documents
 }
 
-fn render_compute(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    theme: &Theme,
-    metrics: &RuntimeMetrics,
-) {
-    let memory_percent = if metrics.memory_total == 0 {
-        0.0
-    } else {
-        metrics.memory_used as f64 / metrics.memory_total as f64 * 100.0
-    };
-    let title = format!(
-        "Compute bay · {} active · Enter manage",
-        metrics.loaded_models.len()
-    );
-    let block = panel(
-        &title,
-        matches!(state.focus, FocusPanel::Hardware | FocusPanel::Models),
-        theme,
-    );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [content, status] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-    let [hardware, models] =
-        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(content);
-    let [hardware_title, hardware_data] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(hardware);
-    let [models_title, models_data] =
-        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(models);
-
-    frame.render_widget(
-        Paragraph::new(" HARDWARE TELEMETRY").style(
-            Style::default()
-                .fg(theme.green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        hardware_title,
-    );
-    frame.render_widget(
-        Paragraph::new(" MODEL ROLES").style(
-            Style::default()
-                .fg(theme.purple)
-                .add_modifier(Modifier::BOLD),
-        ),
-        models_title,
-    );
-
-    let hardware_rows = [
-        (
-            "CPU",
-            format!("{:.0}%", metrics.cpu_usage),
-            load_color(f64::from(metrics.cpu_usage), theme),
-        ),
-        (
-            "Memory",
-            format!(
-                "{}/{} · {memory_percent:.0}%",
-                human_memory(metrics.memory_used),
-                human_memory(metrics.memory_total)
-            ),
-            load_color(memory_percent, theme),
-        ),
-        (
-            "VRAM*",
-            if metrics.vram_total == 0 {
-                "shared / unknown".into()
-            } else {
-                format!(
-                    "{}/{} · {:.0}%",
-                    human_memory(metrics.vram_used),
-                    human_memory(metrics.vram_total),
-                    metrics.vram_used as f64 / metrics.vram_total as f64 * 100.0
-                )
-            },
-            load_color(
-                if metrics.vram_total == 0 {
-                    0.0
-                } else {
-                    metrics.vram_used as f64 / metrics.vram_total as f64 * 100.0
-                },
-                theme,
-            ),
-        ),
-        (
-            "GPU",
-            metrics
-                .gpu_name
-                .as_deref()
-                .unwrap_or("system graphics")
-                .to_owned(),
-            theme.orange,
-        ),
-        ("Threads", metrics.cpu_count.to_string(), theme.cyan),
-    ];
-    let hardware_items = hardware_rows.into_iter().map(|(label, value, color)| {
-        ListItem::new(Line::from(vec![
-            Span::styled(format!(" {label:<8}"), Style::default().fg(theme.muted)),
-            Span::styled(
-                truncate(&value, hardware.width.saturating_sub(11) as usize),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-        ]))
-    });
-    frame.render_widget(
-        List::new(hardware_items).block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(theme.border)),
-        ),
-        hardware_data,
-    );
-
-    let configured = configured_models(state);
-    let model_items = configured.iter().map(|(role, name)| {
-        let loaded = metrics
-            .loaded_models
-            .iter()
-            .any(|model| model_matches(&model.name, name));
-        ListItem::new(Line::from(vec![
-            Span::styled(format!(" {role:<10}"), Style::default().fg(theme.muted)),
-            Span::styled(
-                if loaded { "● " } else { "○ " },
-                Style::default().fg(if loaded { theme.green } else { theme.yellow }),
-            ),
-            Span::styled(
-                truncate(name, models.width.saturating_sub(17) as usize),
-                Style::default().fg(theme.text),
-            ),
-        ]))
-    });
-    let mut list_state = ListState::default();
-    list_state.select(Some(
-        state.model_cursor.min(configured.len().saturating_sub(1)),
-    ));
-    frame.render_stateful_widget(
-        List::new(model_items)
-            .highlight_symbol("›")
-            .highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        models_data,
-        &mut list_state,
-    );
-
-    let runtime_status = metrics.loaded_models.first().map_or_else(
-        || hardware_recommendation(metrics),
-        |model| {
-            format!(
-                "OLLAMA ACTIVE  {} · model VRAM {} · ctx {} · {}",
-                model.name,
-                human_memory(model.size_vram),
-                model.context_length,
-                model.quantization
-            )
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                truncate(&runtime_status, status.width.saturating_sub(25) as usize),
-                Style::default()
-                    .fg(theme.purple)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ·  *desktop + AI", Style::default().fg(theme.muted)),
-        ])),
-        status,
-    );
-}
-
-fn render_activity(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    theme: &Theme,
-    metrics: &RuntimeMetrics,
-) {
-    let block = panel("Activity", state.focus == FocusPanel::Activity, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let [jobs, actions] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(3)]).areas(inner);
-    let items = if state.jobs.is_empty() {
-        vec![ListItem::new(Line::styled(
-            " No jobs",
-            Style::default().fg(theme.muted),
-        ))]
-    } else {
-        state
-            .jobs
-            .values()
-            .map(|job| activity_item(job, theme))
-            .collect()
-    };
-    let mut list_state = ListState::default();
-    list_state.select(Some(state.job_cursor.min(items.len().saturating_sub(1))));
-    frame.render_stateful_widget(
-        List::new(items).highlight_symbol("›").highlight_style(
-            Style::default()
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD),
-        ),
-        jobs,
-        &mut list_state,
-    );
-    let notice = state.notifications.first().map_or_else(
-        || Line::styled(" Ready", Style::default().fg(theme.green)),
-        |notification| {
-            let color = match notification.level {
-                NotificationLevel::Info => theme.cyan,
-                NotificationLevel::Warning => theme.yellow,
-                NotificationLevel::Error => theme.red,
-            };
-            Line::styled(
-                format!(" {}", truncate(&notification.message, 36)),
-                Style::default().fg(color),
-            )
-        },
-    );
-    let running = state.jobs.values().any(|job| !is_terminal(&job.status));
-    let mut activity_controls = shortcut_columns(
-        theme,
-        &[
-            ("Refresh", 'R', theme.cyan),
-            ("Stop", 'S', theme.red),
-            ("Clear", 'C', theme.yellow),
-        ],
-    );
-    activity_controls.spans.push(Span::styled(
-        format!("  {}", spinner(metrics.animation_tick)),
-        Style::default().fg(if running { theme.yellow } else { theme.muted }),
-    ));
-    frame.render_widget(Paragraph::new(vec![notice, activity_controls]), actions);
-}
-
 fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
     let mode = if state.input_mode == InputMode::Text {
         "TYPE"
@@ -1291,30 +2694,43 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
         None if state.input_mode == InputMode::Text => {
             &[("Enter", "Apply"), ("Esc", "Finish"), ("←→", "Cursor")]
         }
-        None => match state.focus {
-            FocusPanel::Chat => &[
-                ("Enter", "Ask"),
-                ("[ ]", "Citations"),
-                ("O", "Open"),
-                ("V", "View"),
-                ("H", "History"),
-                ("X", "Export"),
+        None => match state.focus_pane {
+            FocusPane::Sidebar => &[
+                ("↑↓", "Navigate"),
+                ("Enter", "Open"),
+                ("I", "Add PDFs"),
+                ("?", "Help"),
             ],
-            FocusPanel::Import => &[("Enter", "Add"), ("I", "Knowledge"), ("Mouse", "Open")],
-            FocusPanel::Sources => &[
-                ("↑↓", "Select"),
-                ("V", "View"),
-                ("S", "Search"),
-                ("F", "Filter"),
-                ("I", "Info"),
-                ("T", "Tags"),
-                ("D", "Remove"),
+            FocusPane::Workspace => match state.view {
+                View::Conversation => &[
+                    ("Enter", "Ask"),
+                    ("[ ]", "Citations"),
+                    ("H", "History"),
+                    ("X", "Export"),
+                ],
+                View::Books => &[
+                    ("↑↓", "Select"),
+                    ("Enter", "Open"),
+                    ("I", "Add PDFs"),
+                    ("/", "Search"),
+                ],
+                View::FoundryOverview | View::Models => &[
+                    ("↑↓", "Select"),
+                    ("[ ]", "Role"),
+                    ("/", "Search"),
+                    ("R", "Refresh"),
+                ],
+                View::Indexing | View::Activity => {
+                    &[("↑↓", "Select"), ("Space", "Pause/resume"), ("X", "Cancel")]
+                }
+                _ => &[("↑↓", "Move"), ("Enter", "Open"), ("Tab", "Next pane")],
+            },
+            FocusPane::Inspector => &[
+                ("↑↓", "Inspect"),
+                ("←→", "Adjust"),
+                ("Enter", "Apply"),
+                ("Tab", "Next pane"),
             ],
-            FocusPanel::Models | FocusPanel::Hardware => {
-                &[("Enter", "Models"), ("F", "Fit"), ("Q", "Quantize")]
-            }
-            FocusPanel::Activity => &[("↑↓", "Select"), ("Space", "Pause/resume"), ("X", "Cancel")],
-            FocusPanel::Navigation => &[("Enter", "Open")],
         },
     };
     let mut spans = vec![Span::styled(
@@ -1359,21 +2775,12 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
     );
 }
 
-fn render_overlay(
-    frame: &mut Frame<'_>,
-    state: &AppState,
-    theme: &Theme,
-    metrics: &RuntimeMetrics,
-) {
+fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
     match state.overlay {
         Some(Overlay::Palette) => render_palette(frame, state, theme),
         Some(Overlay::Workspaces) => render_libraries(frame, state, theme),
         Some(Overlay::Help) => render_help(frame, theme),
-        Some(Overlay::ModelManager) => render_model_manager(frame, state, theme, metrics),
-        Some(Overlay::ConfirmModelDelete) => {
-            render_model_manager(frame, state, theme, metrics);
-            render_delete_model_confirm(frame, state, theme);
-        }
+        Some(Overlay::ConfirmModelDelete) => render_delete_model_confirm(frame, state, theme),
         Some(Overlay::FileBrowser) => render_file_browser(frame, state, theme),
         Some(Overlay::ConfirmImport) => {
             render_file_browser(frame, state, theme);
@@ -1627,13 +3034,46 @@ fn render_confirm_import(frame: &mut Frame<'_>, state: &AppState, theme: &Theme)
             Style::default().fg(theme.muted),
         ));
     }
+    if !preflight.books.is_empty() {
+        lines.push(Line::styled(
+            "CONFIRM DETECTED BOOK IDENTITY",
+            Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+        ));
+        for book in preflight.books.iter().take(3) {
+            let edition = book
+                .metadata
+                .edition_label
+                .as_deref()
+                .unwrap_or("edition unknown");
+            let authors = if book.metadata.authors.is_empty() {
+                "author unknown".into()
+            } else {
+                book.metadata.authors.join(", ")
+            };
+            lines.push(Line::styled(
+                format!(
+                    "  {} · {} · {}",
+                    truncate(&book.metadata.title, 28),
+                    truncate(&authors, 20),
+                    edition
+                ),
+                Style::default().fg(theme.text),
+            ));
+            if !book.issues.is_empty() {
+                lines.push(Line::styled(
+                    format!("    Check: {}", book.issues.join(" · ")),
+                    Style::default().fg(theme.yellow),
+                ));
+            }
+        }
+    }
     if let Some(error) = &preflight.error {
         lines.push(Line::styled(error, Style::default().fg(theme.red)));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(
-            " Enter / Y  Queue import",
+            " Enter / Y  Confirm metadata & queue",
             Style::default()
                 .fg(theme.orange)
                 .add_modifier(Modifier::BOLD),
@@ -1648,12 +3088,16 @@ fn render_confirm_import(frame: &mut Frame<'_>, state: &AppState, theme: &Theme)
 }
 
 fn overlay_selected_document(state: &AppState) -> Option<&omarag_domain::DocumentSummary> {
-    let index = state.asset_cursor.checked_sub(library_jobs(state).len())?;
+    let index = if state.view == View::Books {
+        state.asset_cursor
+    } else {
+        state.asset_cursor.checked_sub(library_jobs(state).len())?
+    };
     library_documents(state).get(index).copied()
 }
 
 fn render_document_details(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
-    let area = centered(66, 19, frame.area());
+    let area = centered(70, 26, frame.area());
     frame.render_widget(Clear, area);
     let Some(document) = overlay_selected_document(state) else {
         return;
@@ -1679,8 +3123,68 @@ fn render_document_details(frame: &mut Frame<'_>, state: &AppState, theme: &Them
             ),
         ]),
         Line::from(vec![
+            Span::styled("Edition      ", Style::default().fg(theme.muted)),
+            Span::raw(
+                document
+                    .book
+                    .as_ref()
+                    .and_then(|book| book.edition_label.as_deref())
+                    .unwrap_or("not confirmed"),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Authors      ", Style::default().fg(theme.muted)),
+            Span::raw(
+                document
+                    .book
+                    .as_ref()
+                    .map_or("not confirmed".into(), |book| {
+                        if book.authors.is_empty() {
+                            "not confirmed".into()
+                        } else {
+                            book.authors.join(", ")
+                        }
+                    }),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("ISBN         ", Style::default().fg(theme.muted)),
+            Span::raw(document.book.as_ref().map_or("—".into(), |book| {
+                if book.isbn.is_empty() {
+                    "—".into()
+                } else {
+                    book.isbn.join(", ")
+                }
+            })),
+        ]),
+        Line::from(vec![
             Span::styled("Parser       ", Style::default().fg(theme.muted)),
-            Span::raw(format!("{} · Hybrid ≤384", document.parser_id)),
+            Span::raw(format!("{} · structure-aware Hybrid", document.parser_id)),
+        ]),
+        Line::from(vec![
+            Span::styled("Conversion   ", Style::default().fg(theme.muted)),
+            Span::raw(document.cache_status.as_deref().unwrap_or("legacy")),
+        ]),
+        Line::from(vec![
+            Span::styled("Pipeline     ", Style::default().fg(theme.muted)),
+            Span::raw(format!(
+                "{} OCR · {} text · {} VL pages",
+                document
+                    .pipeline_stats
+                    .get("ocr_pages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                document
+                    .pipeline_stats
+                    .get("text_pages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+                document
+                    .pipeline_stats
+                    .get("vl_pages")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default(),
+            )),
         ]),
         Line::from(vec![
             Span::styled("Size         ", Style::default().fg(theme.muted)),
@@ -1688,10 +3192,24 @@ fn render_document_details(frame: &mut Frame<'_>, state: &AppState, theme: &Them
         ]),
         Line::from(vec![
             Span::styled("Chunks       ", Style::default().fg(theme.muted)),
+            Span::raw(document.quality.as_ref().map_or_else(
+                || {
+                    detail
+                        .and_then(|item| item.chunks)
+                        .map_or("provided by Haiku".into(), |chunks| chunks.to_string())
+                },
+                |quality| quality.chunks.to_string(),
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled("Provenance   ", Style::default().fg(theme.muted)),
             Span::raw(
-                detail
-                    .and_then(|item| item.chunks)
-                    .map_or("provided by Haiku".into(), |chunks| chunks.to_string()),
+                document
+                    .quality
+                    .as_ref()
+                    .map_or("unknown".into(), |quality| {
+                        format!("{:.0}%", quality.provenance_coverage * 100.0)
+                    }),
             ),
         ]),
         Line::from(vec![
@@ -2093,399 +3611,6 @@ fn render_delete_model_confirm(frame: &mut Frame<'_>, state: &AppState, theme: &
     );
 }
 
-fn render_model_manager(
-    frame: &mut Frame<'_>,
-    state: &AppState,
-    theme: &Theme,
-    metrics: &RuntimeMetrics,
-) {
-    let [area, sidebar, search, list_area, details_area, footer] =
-        model_manager_areas(frame.area());
-    frame.render_widget(Clear, area);
-    let block = panel("Model foundry · three hardware-matched stacks", true, theme);
-    frame.render_widget(block, area);
-    let mut navigation = vec![Line::styled(
-        " PROVIDERS",
-        Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
-    )];
-    navigation.extend(
-        [
-            ModelSource::Installed,
-            ModelSource::Ollama,
-            ModelSource::HuggingFace,
-        ]
-        .into_iter()
-        .map(|source| {
-            let active = source == state.model_manager.source;
-            Line::styled(
-                format!(" {} {}", if active { "›" } else { " " }, source.label()),
-                if active {
-                    Style::default()
-                        .fg(theme.background)
-                        .bg(theme.cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.muted)
-                },
-            )
-        }),
-    );
-    navigation.push(Line::from(""));
-    navigation.push(Line::styled(
-        " ROLES",
-        Style::default()
-            .fg(theme.purple)
-            .add_modifier(Modifier::BOLD),
-    ));
-    navigation.extend(
-        [
-            ModelCategory::Chat,
-            ModelCategory::Vl,
-            ModelCategory::Embedding,
-            ModelCategory::Rerank,
-        ]
-        .into_iter()
-        .map(|category| {
-            let active = category == state.model_manager.category;
-            Line::styled(
-                format!(" {} {}", if active { "›" } else { " " }, category.label()),
-                if active {
-                    Style::default()
-                        .fg(theme.background)
-                        .bg(theme.purple)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.muted)
-                },
-            )
-        }),
-    );
-    navigation.push(Line::from(""));
-    navigation.push(Line::styled(
-        " RECOMMENDED STACKS",
-        Style::default()
-            .fg(theme.orange)
-            .add_modifier(Modifier::BOLD),
-    ));
-    navigation.extend(
-        state
-            .model_manager
-            .packages
-            .iter()
-            .enumerate()
-            .map(|(index, package)| {
-                let active = index == state.model_manager.package_cursor;
-                Line::styled(
-                    format!(
-                        " {} #{} {}",
-                        if active { "›" } else { " " },
-                        package.recommended_rank,
-                        truncate(&package.name, sidebar.width.saturating_sub(8) as usize)
-                    ),
-                    if active {
-                        Style::default()
-                            .fg(theme.background)
-                            .bg(theme.orange)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.muted)
-                    },
-                )
-            }),
-    );
-    navigation.extend([
-        Line::from(""),
-        Line::styled(" Tab  provider", Style::default().fg(theme.muted)),
-        Line::styled(" ⇧←→ role · 1–3 stack", Style::default().fg(theme.muted)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(navigation).block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(theme.border)),
-        ),
-        sidebar,
-    );
-
-    let search_style = if state.model_manager.searching {
-        Style::default()
-            .fg(theme.yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.muted)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" / Search  ", search_style),
-            Span::styled(
-                if state.model_manager.query.value.is_empty() {
-                    "type a model or repository"
-                } else {
-                    state.model_manager.query.value.as_str()
-                },
-                Style::default().fg(if state.model_manager.query.value.is_empty() {
-                    theme.muted
-                } else {
-                    theme.text
-                }),
-            ),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(theme.border)),
-        ),
-        search,
-    );
-    if state.model_manager.searching {
-        let x = search.x
-            + 11
-            + UnicodeWidthStr::width(
-                &state.model_manager.query.value[..state
-                    .model_manager
-                    .query
-                    .cursor
-                    .min(state.model_manager.query.value.len())],
-            ) as u16;
-        frame.set_cursor_position((x.min(search.right().saturating_sub(1)), search.y));
-    }
-    let entries = state
-        .model_manager
-        .entries
-        .iter()
-        .map(|entry| {
-            let loaded = metrics
-                .loaded_models
-                .iter()
-                .any(|model| model_matches(&model.name, &entry.id));
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    entry
-                        .recommended_rank
-                        .map_or_else(|| "    ".into(), |rank| format!("#{rank} ")),
-                    Style::default()
-                        .fg(theme.orange)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    if loaded {
-                        " ● "
-                    } else if entry.installed {
-                        " ✓ "
-                    } else {
-                        " ○ "
-                    },
-                    Style::default().fg(if loaded {
-                        theme.green
-                    } else if entry.installed {
-                        theme.cyan
-                    } else {
-                        theme.muted
-                    }),
-                ),
-                Span::styled(
-                    truncate(&entry.id, list_area.width.saturating_sub(9) as usize),
-                    Style::default().fg(theme.text),
-                ),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let mut list_state = ListState::default();
-    if !entries.is_empty() {
-        list_state.select(Some(
-            state
-                .model_manager
-                .cursor
-                .min(entries.len().saturating_sub(1)),
-        ));
-    }
-    frame.render_stateful_widget(
-        List::new(entries)
-            .highlight_symbol("›")
-            .highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .fg(theme.cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(
-                Block::default()
-                    .borders(Borders::RIGHT)
-                    .border_style(Style::default().fg(theme.border)),
-            ),
-        list_area,
-        &mut list_state,
-    );
-
-    let model_text = state
-        .model_manager
-        .entries
-        .get(state.model_manager.cursor)
-        .map_or_else(
-            || {
-                Text::from(vec![
-                    Line::styled(
-                        if state.model_manager.busy {
-                            "Loading model catalog…"
-                        } else {
-                            "No matching models"
-                        },
-                        Style::default().fg(theme.muted),
-                    ),
-                    Line::from(""),
-                    Line::from("Use / to search or Tab to change source."),
-                ])
-            },
-            |entry| model_details(entry, state, metrics, theme),
-        );
-    let mut detail_lines = state
-        .model_manager
-        .packages
-        .get(state.model_manager.package_cursor)
-        .map_or_else(Vec::new, |package| package_details(package, theme));
-    if !detail_lines.is_empty() {
-        detail_lines.push(Line::styled(
-            "──────────────── selected model",
-            Style::default().fg(theme.border),
-        ));
-    }
-    detail_lines.extend(model_text.lines);
-    frame.render_widget(
-        Paragraph::new(Text::from(detail_lines))
-            .wrap(Wrap { trim: false })
-            .block(Block::default().padding(ratatui::widgets::Padding::horizontal(2))),
-        details_area,
-    );
-
-    let percent = if state.model_manager.transfer_total == 0 {
-        None
-    } else {
-        Some(
-            state.model_manager.transfer_completed as f64
-                / state.model_manager.transfer_total as f64
-                * 100.0,
-        )
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    "F",
-                    Style::default()
-                        .fg(theme.green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("it {}  ", state.model_manager.profile.label()),
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    "Q",
-                    Style::default()
-                        .fg(theme.purple)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("uant {}  ", state.model_manager.quantization.label()),
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    "C",
-                    Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("ontext {}K  ", state.model_manager.context_tokens / 1024),
-                    Style::default().fg(theme.text),
-                ),
-                Span::styled(
-                    "P",
-                    Style::default()
-                        .fg(theme.orange)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("urge {}", state.model_manager.memory_policy.label()),
-                    Style::default().fg(theme.text),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "D",
-                    Style::default()
-                        .fg(theme.green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("ownload   "),
-                Span::styled(
-                    "L",
-                    Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("oad temporarily   "),
-                Span::styled(
-                    "U",
-                    Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("nload   "),
-                Span::styled(
-                    "R",
-                    Style::default()
-                        .fg(theme.yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("efresh"),
-                Span::raw("   "),
-                Span::styled(
-                    "A",
-                    Style::default()
-                        .fg(theme.orange)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("pply stack"),
-                Span::raw("   "),
-                Span::styled(
-                    "X",
-                    Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" Delete"),
-            ]),
-            Line::styled(
-                if let Some(percent) = percent {
-                    format!("{} · {percent:.0}%", state.model_manager.transfer_status)
-                } else if state.model_manager.transfer_status.is_empty() {
-                    "Ready".into()
-                } else {
-                    state.model_manager.transfer_status.clone()
-                },
-                Style::default().fg(if state.model_manager.busy {
-                    theme.yellow
-                } else {
-                    theme.green
-                }),
-            ),
-            Line::styled(
-                format!(
-                    "Shift+←/→ role · 1–3 stack · Top 3 pinned · {}{}",
-                    hardware_recommendation(metrics),
-                    if state.model_manager.truncated {
-                        " · Hub scan capped; search scans matching repos"
-                    } else {
-                        ""
-                    }
-                ),
-                Style::default()
-                    .fg(theme.orange)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(theme.border)),
-        ),
-        footer,
-    );
-}
-
 fn package_details(package: &ModelPackage, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
@@ -2809,7 +3934,7 @@ fn render_libraries(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
 }
 
 fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
-    let area = centered(68, 22, frame.area());
+    let area = centered(68, 24, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(vec![
@@ -2817,8 +3942,8 @@ fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
                 "Movement",
                 Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
             ),
-            Line::from("Tab / Shift+Tab   next / previous panel"),
-            Line::from("Arrow keys         always act on the focused panel"),
+            Line::from("Tab / Shift+Tab   Sidebar / Workspace / Inspector"),
+            Line::from("Arrow keys         act on the focused pane"),
             Line::from("Enter              open, edit or pause/resume"),
             Line::from("Esc                leave text input"),
             Line::from("Mouse click/wheel   focus, activate and scroll"),
@@ -2830,11 +3955,12 @@ fn render_help(frame: &mut Frame<'_>, theme: &Theme) {
                     .fg(theme.purple)
                     .add_modifier(Modifier::BOLD),
             ),
-            Line::from("Ctrl+C Chat         Ctrl+S Library      Ctrl+H Compute"),
+            Line::from("Ctrl+C Quit         Ctrl+S Library      Ctrl+H Foundry"),
             Line::from("Ctrl+M Models       Ctrl+A Activity     Ctrl+T Theme"),
             Line::from("Ctrl+L Libraries    Ctrl+P Palette      Ctrl+Q Quit"),
-            Line::from("Ctrl+I Knowledge    N New library      Ctrl+E Evidence"),
+            Line::from("Ctrl+I Add PDFs     N New library      Ctrl+E Evidence"),
             Line::from("Ctrl+R Refresh      Ctrl+X Stop         Ctrl+D Clear"),
+            Line::from("/ Active search     : Command palette  ? Help"),
             Line::from(""),
             Line::styled(
                 "Text input",
@@ -2925,41 +4051,6 @@ fn panel<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
         .style(Style::default().bg(theme.panel).fg(theme.text))
 }
 
-fn shortcut_panel(title: &str, key: char, focused: bool, theme: &Theme) -> Block<'static> {
-    let accent = theme.orange;
-    let base = if focused {
-        Style::default()
-            .fg(theme.background)
-            .bg(accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(accent).add_modifier(Modifier::BOLD)
-    };
-    let key_style = base
-        .fg(if focused { theme.cyan } else { theme.green })
-        .add_modifier(Modifier::UNDERLINED);
-    let lower = title.to_ascii_lowercase();
-    let needle = key.to_ascii_lowercase().to_string();
-    let position = lower.find(&needle).unwrap_or_default();
-    let end = position + key.len_utf8();
-    let marker = if focused { " ◆ " } else { " " };
-    let title = Line::from(vec![
-        Span::styled(format!("{marker}{}", &title[..position]), base),
-        Span::styled(title[position..end].to_owned(), key_style),
-        Span::styled(format!("{} ", &title[end..]), base),
-    ]);
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(if focused {
-            BorderType::Thick
-        } else {
-            BorderType::Plain
-        })
-        .title(title)
-        .border_style(Style::default().fg(if focused { accent } else { theme.border }))
-        .style(Style::default().bg(theme.panel).fg(theme.text))
-}
-
 fn panel_accent(title: &str, theme: &Theme) -> Color {
     if title.starts_with("Nav") {
         theme.purple
@@ -2976,29 +4067,6 @@ fn panel_accent(title: &str, theme: &Theme) -> Color {
     } else {
         theme.focus
     }
-}
-
-fn asset_item(
-    icon: impl Into<String>,
-    label: impl Into<String>,
-    detail: impl Into<String>,
-    color: Color,
-    theme: &Theme,
-) -> ListItem<'static> {
-    let icon = icon.into();
-    let label = label.into();
-    let detail = detail.into();
-    ListItem::new(Line::from(vec![
-        Span::styled(
-            format!(" {icon} "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(truncate(&label, 24), Style::default().fg(theme.text)),
-        Span::styled(
-            format!("  {}", truncate(&detail, 12)),
-            Style::default().fg(theme.muted),
-        ),
-    ]))
 }
 
 fn activity_item<'a>(job: &'a JobSnapshot, theme: &Theme) -> ListItem<'a> {
@@ -3114,16 +4182,6 @@ fn config_model(content: &str, wanted_section: &str) -> Option<String> {
 fn model_matches(loaded: &str, configured: &str) -> bool {
     loaded == configured
         || loaded.trim_end_matches(":latest") == configured.trim_end_matches(":latest")
-}
-
-fn load_color(percent: f64, theme: &Theme) -> Color {
-    if percent >= 90.0 {
-        theme.red
-    } else if percent >= 70.0 {
-        theme.yellow
-    } else {
-        theme.green
-    }
 }
 
 fn job_color(job: &JobSnapshot, theme: &Theme) -> Color {
@@ -3295,23 +4353,12 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_contains_four_distinct_work_areas_and_header_import() {
-        for (width, height) in [(160, 42), (128, 36), (90, 24), (72, 20)] {
-            let content = rendered(width, height, &AppState::default(), Theme::default());
-            for title in [
-                "Chat",
-                "Library",
-                "Compute bay",
-                "Activity",
-                "Index new PDFs",
-            ] {
-                assert!(
-                    content.contains(title),
-                    "missing {title} at {width}x{height}"
-                );
-            }
-            assert!(!content.contains("Nav"));
+    fn wide_shell_contains_sidebar_workspace_and_inspector() {
+        let content = rendered(160, 42, &AppState::default(), Theme::default());
+        for title in ["CHAT", "LIBRARY", "FOUNDRY", "Conversation", "Evidence"] {
+            assert!(content.contains(title), "missing {title}");
         }
+        assert!(!content.contains("Index new PDFs"));
     }
 
     #[test]
@@ -3337,7 +4384,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_panel_has_a_high_contrast_title() {
+    fn focused_pane_has_a_high_contrast_accent() {
         let theme = Theme::default();
         let backend = TestBackend::new(120, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3350,12 +4397,12 @@ mod tests {
                 .buffer()
                 .content()
                 .iter()
-                .any(|cell| cell.bg == panel_accent("Chat", &theme))
+                .any(|cell| cell.fg == theme.focus)
         );
     }
 
     #[test]
-    fn mirrored_oracle_wordmark_pulses_only_with_ollama_activity() {
+    fn oracle_header_is_compact_and_reflects_activity() {
         let state = AppState::default();
         let idle = rendered_metrics(
             160,
@@ -3376,101 +4423,101 @@ mod tests {
                 ..RuntimeMetrics::default()
             },
         );
-        assert!(idle.contains("OF DÆDALUS"));
-        assert!(idle.contains("OFFLINE RETRIEVAL-AUGMENTED COMMAND-LINE ENVIRONMENT"));
-        assert!(idle.contains("Index new PDFs"));
-        assert!(!idle.contains("OLLAMA IDLE"));
+        assert!(idle.contains("ORACLE"));
+        assert!(idle.contains("Conversation"));
+        assert!(!idle.contains("LOCAL KNOWLEDGE"));
         assert_ne!(idle, active);
     }
 
     #[test]
-    fn dashboard_uses_a_compact_aligned_lower_row() {
-        let [chat, library, compute, activity] = dashboard_areas(Rect::new(0, 0, 160, 36));
-
-        assert!(compute.height < chat.height);
-        assert_eq!(chat.x, compute.x);
-        assert_eq!(library.x, activity.x);
-        assert_eq!(chat.width, compute.width);
-        assert_eq!(library.width, activity.width);
-        assert_eq!(chat.y, library.y);
-        assert_eq!(chat.height, library.height);
+    fn wide_geometry_uses_fixed_sidebar_and_inspector() {
+        let areas = app_areas(Rect::new(0, 0, 160, 36), FocusPane::Workspace);
+        assert_eq!(areas.sidebar.width, 24);
+        assert_eq!(areas.inspector.width, 38);
+        assert_eq!(areas.workspace.width, 96);
+        assert_eq!(areas.workspace.x, 25);
+        assert_eq!(areas.inspector.x, 122);
     }
 
     #[test]
-    fn add_knowledge_is_aligned_with_the_library_column() {
-        let screen = Rect::new(0, 0, 160, 42);
-        let [header, body, _footer] = screen_areas(screen);
-        let import = header_import_area(header);
-        let [_chat, library, _compute, activity] = dashboard_areas(body);
-
-        assert_eq!(import.x, library.x);
-        assert_eq!(import.width, library.width);
-        assert_eq!(library.x, activity.x);
-        assert_eq!(library.width, activity.width);
+    fn medium_geometry_swaps_workspace_for_inspector() {
+        let body = Rect::new(0, 0, 110, 27);
+        let workspace = app_areas(body, FocusPane::Workspace);
+        assert_eq!(workspace.sidebar.width, 22);
+        assert_eq!(workspace.workspace.width, 87);
+        assert_eq!(workspace.inspector.width, 0);
+        let inspector = app_areas(body, FocusPane::Inspector);
+        assert_eq!(inspector.sidebar.width, 22);
+        assert_eq!(inspector.workspace.width, 0);
+        assert_eq!(inspector.inspector.width, 87);
     }
 
     #[test]
-    fn dashboard_geometry_snapshot() {
-        let screen = Rect::new(0, 0, 160, 42);
-        let [header, body, footer] = screen_areas(screen);
-        let import = header_import_area(header);
-        let [chat, library, compute, activity] = dashboard_areas(body);
-        insta::assert_debug_snapshot!(
-            (header, import, chat, library, compute, activity, footer),
-            @r###"
-        (
-            Rect {
-                x: 0,
-                y: 0,
-                width: 160,
-                height: 5,
-            },
-            Rect {
-                x: 107,
-                y: 0,
-                width: 53,
-                height: 4,
-            },
-            Rect {
-                x: 0,
-                y: 5,
-                width: 107,
-                height: 24,
-            },
-            Rect {
-                x: 107,
-                y: 5,
-                width: 53,
-                height: 24,
-            },
-            Rect {
-                x: 0,
-                y: 29,
-                width: 107,
-                height: 12,
-            },
-            Rect {
-                x: 107,
-                y: 29,
-                width: 53,
-                height: 12,
-            },
-            Rect {
-                x: 0,
-                y: 41,
-                width: 160,
-                height: 1,
-            },
-        )
-        "###
+    fn narrow_geometry_shows_one_conceptual_pane() {
+        let body = Rect::new(0, 0, 80, 21);
+        let sidebar = app_areas(body, FocusPane::Sidebar);
+        let workspace = app_areas(body, FocusPane::Workspace);
+        let inspector = app_areas(body, FocusPane::Inspector);
+        assert_eq!(sidebar.sidebar, body);
+        assert_eq!(workspace.workspace, body);
+        assert_eq!(inspector.inspector, body);
+        assert_eq!(sidebar.workspace.width, 0);
+        assert_eq!(workspace.inspector.width, 0);
+    }
+
+    #[test]
+    fn undersized_terminal_renders_a_clear_message() {
+        let content = rendered(79, 23, &AppState::default(), Theme::default());
+        assert!(content.contains("Minimum: 80×24"));
+    }
+
+    #[test]
+    fn simple_mode_hides_advanced_context_views() {
+        assert_eq!(
+            section_views(PrimarySection::Library, InteractionLevel::Simple),
+            vec![View::Books, View::Indexing]
         );
+        assert!(
+            section_views(PrimarySection::Library, InteractionLevel::Workshop)
+                .contains(&View::Quality)
+        );
+    }
+
+    #[test]
+    fn sidebar_nests_children_directly_below_each_section() {
+        assert_eq!(
+            sidebar_navigation_rows(&AppState::default()),
+            vec![
+                Some(View::Conversation),
+                Some(View::Conversation),
+                Some(View::History),
+                Some(View::Books),
+                Some(View::Books),
+                Some(View::Indexing),
+                Some(View::FoundryOverview),
+                Some(View::FoundryOverview),
+                Some(View::Models),
+            ]
+        );
+        let advanced = AppState {
+            interaction_level: InteractionLevel::Workshop,
+            ..AppState::default()
+        };
+        assert_eq!(sidebar_navigation_rows(&advanced).len(), 14);
+    }
+
+    #[test]
+    fn all_visible_panes_have_complete_frames() {
+        let content = rendered(160, 42, &AppState::default(), Theme::default());
+        assert!(content.matches('┌').count() >= 3);
+        assert!(content.matches('┘').count() >= 3);
     }
 
     #[test]
     fn theme_action_cycles_at_runtime() {
         let mut state = AppState::default();
         update(&mut state, Action::CycleTheme);
-        assert_eq!(Theme::at(state.theme_index).name, "Nord Harbor");
+        assert_eq!(Theme::at(state.theme_index).name, "One Dark");
     }
 
     #[test]
@@ -3517,9 +4564,9 @@ mod tests {
     }
 
     #[test]
-    fn model_manager_renders_metadata_and_memory_controls() {
+    fn integrated_foundry_renders_setup_catalog_and_tuning() {
         let mut state = AppState {
-            overlay: Some(Overlay::ModelManager),
+            view: View::FoundryOverview,
             ..AppState::default()
         };
         state.model_manager.entries.push(ModelCatalogEntry {
@@ -3547,17 +4594,59 @@ mod tests {
                 installed: false,
             }],
         });
-        let content = rendered(140, 40, &state, Theme::default());
+        let setup = rendered(140, 40, &state, Theme::default());
         for expected in [
-            "Model foundry",
+            "Model rail",
+            "Recommended for this device",
             "Qwen Unified",
             "Qwen retrieval family",
+            "Tuning",
+            "Install",
+        ] {
+            assert!(setup.contains(expected), "missing {expected}");
+        }
+
+        state.view = View::Models;
+        let catalog = rendered(140, 40, &state, Theme::default());
+        for expected in [
+            "Catalog",
+            "S Source",
             "owner/tiny-GGUF",
             "A small multilingual model",
             "Download",
-            "Purge",
+            "Memory",
         ] {
-            assert!(content.contains(expected), "missing {expected}");
+            assert!(catalog.contains(expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn foundry_uses_the_shells_medium_and_narrow_pane_switching() {
+        let mut state = AppState {
+            view: View::FoundryOverview,
+            ..AppState::default()
+        };
+        state.model_manager.packages.push(ModelPackage {
+            name: "Balanced local".into(),
+            summary: "A compact setup for this device.".into(),
+            recommended_rank: 1,
+            ..ModelPackage::default()
+        });
+
+        let medium_workspace = rendered(110, 30, &state, Theme::default());
+        assert!(medium_workspace.contains("Recommended for this device"));
+        assert!(!medium_workspace.contains("Stack details"));
+
+        state.focus_pane = FocusPane::Inspector;
+        let medium_inspector = rendered(110, 30, &state, Theme::default());
+        assert!(medium_inspector.contains("Stack details"));
+        assert!(medium_inspector.contains("Tuning"));
+
+        state.focus_pane = FocusPane::Workspace;
+        let narrow_workspace = rendered(80, 24, &state, Theme::default());
+        assert!(narrow_workspace.contains("Model rail"));
+        state.focus_pane = FocusPane::Inspector;
+        let narrow_inspector = rendered(80, 24, &state, Theme::default());
+        assert!(narrow_inspector.contains("Actions"));
     }
 }

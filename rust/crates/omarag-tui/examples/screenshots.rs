@@ -1,6 +1,6 @@
 use omarag_app::{
     AppState, ConnectionState, FileBrowserEntry, ModelCatalogEntry, ModelCategory, ModelFit,
-    ModelPackage, ModelPackageItem, ModelSource, Overlay,
+    ModelPackage, ModelPackageItem, ModelSource, Overlay, View,
 };
 use omarag_domain::{DocumentSummary, WorkspaceSummary};
 use omarag_tui::{LoadedModel, RuntimeMetrics, Theme, render_with_metrics};
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     snapshot(&dashboard, &demo_metrics(), "dashboard", &output)?;
 
     let mut models = dashboard.clone();
-    models.overlay = Some(Overlay::ModelManager);
+    models.navigate_view(View::FoundryOverview);
     models.model_manager.source = ModelSource::Ollama;
     models.model_manager.category = ModelCategory::Embedding;
     models.model_manager.scanned = 187;
@@ -113,6 +113,14 @@ fn document(title: &str, pages: u32) -> DocumentSummary {
         parser_id: "docling".into(),
         status: "ready".into(),
         imported_at: "2026-07-26T20:00:00Z".into(),
+        fingerprint: None,
+        generation_id: None,
+        cache_status: Some("hit".into()),
+        pipeline_stats: Default::default(),
+        managed_source: None,
+        book: None,
+        quality: None,
+        pipeline_version: "textbook-v1".into(),
     }
 }
 
@@ -145,7 +153,7 @@ fn package(rank: u8, name: &str, summary: &str) -> ModelPackage {
             model: "qwen3-embedding:0.6b".into(),
             download_name: "qwen3-embedding:0.6b".into(),
             source: ModelSource::Ollama,
-            installed: true,
+            installed: rank == 3,
         }],
     }
 }
@@ -202,13 +210,13 @@ fn snapshot(
     )?;
     writeln!(
         svg,
-        r##"<rect width="100%" height="100%" fill="#11111b"/><g font-family="DejaVu Sans Mono, monospace" font-size="16">"##
+        r##"<rect width="100%" height="100%" fill="#0d1117"/><g font-family="DejaVu Sans Mono, monospace" font-size="16">"##
     )?;
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let cell = &buffer[(x, y)];
-            let bg = color(cell.bg, "#11111b");
-            if bg != "#11111b" {
+            let bg = color(cell.bg, "#0d1117");
+            if bg != "#0d1117" {
                 writeln!(
                     svg,
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="{}"/>"#,
@@ -221,7 +229,7 @@ fn snapshot(
             }
             let symbol = cell.symbol();
             if !symbol.trim().is_empty() {
-                let fg = color(cell.fg, "#cdd6f4");
+                let fg = color(cell.fg, "#e6e9ee");
                 writeln!(
                     svg,
                     r#"<text x="{}" y="{}" fill="{}">{}</text>"#,

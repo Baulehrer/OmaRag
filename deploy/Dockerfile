@@ -9,9 +9,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY python/ ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --extra haiku --no-dev --no-editable
+RUN /opt/omarag-venv/bin/python -m omarag_bridge.compat_probe
 
 FROM python:3.12-slim AS runtime
-ARG VERSION=0.5.0
+ARG VERSION=0.7.0
 LABEL org.opencontainers.image.title="Oracle of Daedalus" \
       org.opencontainers.image.description="Offline Retrieval-Augmented Command-Line Environment" \
       org.opencontainers.image.source="https://github.com/Baulehrer/oracle-of-daedalus" \
@@ -28,6 +29,14 @@ COPY --from=builder /opt/omarag-venv /opt/omarag-venv
 ENV PATH=/opt/omarag-venv/bin:$PATH \
     HOME=/var/lib/oracle-of-daedalus \
     OMARAG_DATA_DIR=/var/lib/oracle-of-daedalus \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072 \
+    TOKENIZERS_PARALLELISM=false \
+    OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4 \
+    OPENBLAS_NUM_THREADS=4 \
+    NUMEXPR_NUM_THREADS=4 \
+    RAYON_NUM_THREADS=4 \
     PYTHONUNBUFFERED=1
 WORKDIR /var/lib/oracle-of-daedalus
 VOLUME ["/var/lib/oracle-of-daedalus"]

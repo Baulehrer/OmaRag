@@ -105,6 +105,10 @@ pub struct WorkspaceManifest {
     pub path: String,
     pub read_only: bool,
     pub haiku_compatible_range: String,
+    #[serde(default = "default_haiku_update_policy")]
+    pub haiku_update_policy: String,
+    #[serde(default)]
+    pub haiku_last_verified: Option<String>,
     pub database_schema_version: String,
     pub embedding_provider: String,
     pub embedding_model: String,
@@ -117,7 +121,79 @@ pub struct WorkspaceManifest {
     pub etag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+fn default_haiku_update_policy() -> String {
+    "latest-gated".into()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookMetadata {
+    #[serde(default)]
+    pub work_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub edition_label: Option<String>,
+    #[serde(default)]
+    pub edition_number: Option<u32>,
+    #[serde(default)]
+    pub publication_year: Option<u32>,
+    #[serde(default)]
+    pub isbn: Vec<String>,
+    #[serde(default = "default_language")]
+    pub language: String,
+    #[serde(default)]
+    pub curriculum: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_document_status")]
+    pub document_status: String,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_to: Option<String>,
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+fn default_language() -> String {
+    "de".into()
+}
+
+fn default_document_status() -> String {
+    "active".into()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DocumentQuality {
+    #[serde(default = "default_quality_score")]
+    pub score: f64,
+    #[serde(default)]
+    pub pages_total: u32,
+    #[serde(default)]
+    pub native_text_pages: u32,
+    #[serde(default)]
+    pub ocr_pages: u32,
+    #[serde(default)]
+    pub chunks: u32,
+    #[serde(default)]
+    pub tables: u32,
+    #[serde(default)]
+    pub formulas: u32,
+    #[serde(default)]
+    pub pictures: u32,
+    #[serde(default)]
+    pub provenance_coverage: f64,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+const fn default_quality_score() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocumentSummary {
     pub id: String,
     pub title: String,
@@ -130,10 +206,30 @@ pub struct DocumentSummary {
     pub parser_id: String,
     pub status: String,
     pub imported_at: String,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub generation_id: Option<String>,
+    #[serde(default)]
+    pub cache_status: Option<String>,
+    #[serde(default)]
+    pub pipeline_stats: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub managed_source: Option<String>,
+    #[serde(default)]
+    pub book: Option<BookMetadata>,
+    #[serde(default)]
+    pub quality: Option<DocumentQuality>,
+    #[serde(default = "default_pipeline_version")]
+    pub pipeline_version: String,
 }
 
 fn default_docling_parser() -> String {
     "docling".into()
+}
+
+fn default_pipeline_version() -> String {
+    "textbook-v1".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +252,7 @@ pub struct CreateSource {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QualityReport {
     pub workspace_id: WorkspaceId,
     pub status: String,
@@ -165,6 +261,10 @@ pub struct QualityReport {
     pub failed_jobs: usize,
     #[serde(default)]
     pub issues: Vec<String>,
+    #[serde(default)]
+    pub latest_evaluation_id: Option<String>,
+    #[serde(default)]
+    pub retrieval_metrics: BTreeMap<String, f64>,
     pub generated_at: String,
 }
 
@@ -218,6 +318,22 @@ pub struct JobSnapshot {
     pub updated_at: String,
     pub last_event_id: Option<EventId>,
     pub checkpoint: Option<String>,
+    #[serde(default)]
+    pub progress_detail: Option<JobProgressDetail>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobProgressDetail {
+    pub current_document: Option<String>,
+    pub page_start: Option<u32>,
+    pub page_end: Option<u32>,
+    pub total_pages: Option<u32>,
+    #[serde(default)]
+    pub cache_hits: u32,
+    #[serde(default)]
+    pub recovered_segments: u32,
+    #[serde(default)]
+    pub memory_state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,6 +343,8 @@ pub struct SearchRequest {
     pub limit: u32,
     #[serde(default)]
     pub filters: BTreeMap<String, Value>,
+    #[serde(default = "default_document_policy")]
+    pub document_policy: String,
 }
 
 const fn default_search_limit() -> u32 {
@@ -239,6 +357,7 @@ impl SearchRequest {
             query: query.into(),
             limit: default_search_limit(),
             filters: BTreeMap::new(),
+            document_policy: default_document_policy(),
         }
     }
 }
@@ -254,6 +373,34 @@ pub struct SearchHit {
     pub document_title: Option<String>,
     #[serde(default)]
     pub metadata: BTreeMap<String, Value>,
+    #[serde(default = "default_search_type")]
+    pub search_type: String,
+}
+
+fn default_search_type() -> String {
+    "hybrid".into()
+}
+
+fn default_document_policy() -> String {
+    "current-only".into()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalTiming {
+    pub search_ms: f64,
+    pub total_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalExplanation {
+    pub query: String,
+    #[serde(default)]
+    pub candidates: Vec<SearchHit>,
+    #[serde(default)]
+    pub ranked: Vec<SearchHit>,
+    pub timing: RetrievalTiming,
+    #[serde(default)]
+    pub provider_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +443,8 @@ pub struct CitationAnchor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Citation {
+    #[serde(default)]
+    pub evidence_id: Option<String>,
     pub chunk_id: String,
     #[serde(default)]
     pub chunk_ids: Vec<String>,
@@ -322,6 +471,14 @@ pub struct Citation {
     pub excerpt: String,
     pub retrieval_rank: Option<u32>,
     pub rerank_score: Option<f64>,
+    #[serde(default)]
+    pub book: Option<BookMetadata>,
+    #[serde(default = "default_verification_status")]
+    pub verification_status: String,
+}
+
+fn default_verification_status() -> String {
+    "unverified".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -376,6 +533,52 @@ pub struct IngestSource {
     #[serde(rename = "type")]
     pub source_type: String,
     pub path: String,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub candidate_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<BookMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetadataProposal {
+    pub field: String,
+    pub value: Value,
+    pub source: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportCandidate {
+    pub id: String,
+    pub source: String,
+    pub fingerprint: String,
+    pub metadata: BookMetadata,
+    #[serde(default)]
+    pub proposals: Vec<MetadataProposal>,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportPreflightBatch {
+    pub id: String,
+    pub candidates: Vec<ImportCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreflightImportRequest {
+    pub sources: Vec<IngestSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommitImportRequest {
+    pub preflight_id: String,
+    pub sources: Vec<IngestSource>,
+    pub processing_profile: String,
+    pub duplicate_policy: String,
+    pub validity_policy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -408,6 +611,9 @@ impl IngestRequest {
                 .map(|path| IngestSource {
                     source_type: "file".into(),
                     path: path.into(),
+                    fingerprint: None,
+                    candidate_id: None,
+                    metadata: None,
                 })
                 .collect(),
             tags: Vec::new(),

@@ -12,6 +12,27 @@ from .models.domain import JobSnapshot, JobStatus, RunSnapshot, WorkspaceManifes
 from .models.errors import IdempotencyConflictError, NotFoundError
 from .models.events import DomainEvent
 
+DOCUMENT_FILTER_KEYS = frozenset(
+    {
+        "document_id",
+        "logical_document_id",
+        "document_ids",
+        "logical_document_ids",
+        "work_id",
+        "title",
+        "edition",
+        "edition_number",
+        "publication_year",
+        "document_status",
+        "language",
+        "author",
+        "authors",
+        "isbn",
+        "tags",
+    }
+)
+DOCUMENT_POLICIES = frozenset({"current-only", "all-editions"})
+
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -69,6 +90,7 @@ class StateStore:
                     result_json TEXT,
                     error_json TEXT,
                     checkpoint TEXT,
+                    progress_detail_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     last_event_id INTEGER
@@ -120,10 +142,112 @@ class StateStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(job_id, name)
                 );
+                CREATE TABLE IF NOT EXISTS ingest_segments (
+                    job_id TEXT NOT NULL REFERENCES jobs(id),
+                    source_index INTEGER NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    segment_index INTEGER NOT NULL,
+                    page_start INTEGER NOT NULL,
+                    page_end INTEGER NOT NULL,
+                    document_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'committed',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(job_id, source_index, page_start, page_end)
+                );
+                CREATE INDEX IF NOT EXISTS ingest_segments_generation_idx
+                    ON ingest_segments(generation_id, segment_index);
+                CREATE TABLE IF NOT EXISTS document_index (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    logical_document_id TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, logical_document_id),
+                    UNIQUE(workspace_id, fingerprint)
+                );
+                CREATE INDEX IF NOT EXISTS document_index_source_idx
+                    ON document_index(workspace_id, source_path);
+                CREATE TABLE IF NOT EXISTS conversion_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    last_used_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS import_preflights (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS book_records (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    logical_document_id TEXT NOT NULL,
+                    original_source TEXT NOT NULL,
+                    managed_source TEXT,
+                    fingerprint TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    quality_json TEXT NOT NULL DEFAULT '{}',
+                    pipeline_version TEXT NOT NULL DEFAULT 'textbook-v1',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, logical_document_id)
+                );
+                CREATE INDEX IF NOT EXISTS book_records_work_idx
+                    ON book_records(workspace_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS document_segments (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    logical_document_id TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    segment_document_id TEXT NOT NULL,
+                    page_start INTEGER NOT NULL,
+                    page_end INTEGER NOT NULL,
+                    PRIMARY KEY(workspace_id, segment_document_id)
+                );
+                CREATE INDEX IF NOT EXISTS document_segments_book_idx
+                    ON document_segments(workspace_id, logical_document_id, page_start);
+                CREATE TABLE IF NOT EXISTS chunk_manifest (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    logical_document_id TEXT NOT NULL,
+                    segment_document_id TEXT NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    chunk_order INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    pages_json TEXT NOT NULL DEFAULT '[]',
+                    headings_json TEXT NOT NULL DEFAULT '[]',
+                    labels_json TEXT NOT NULL DEFAULT '[]',
+                    refs_json TEXT NOT NULL DEFAULT '[]',
+                    PRIMARY KEY(workspace_id, chunk_id)
+                );
+                CREATE INDEX IF NOT EXISTS chunk_manifest_book_idx
+                    ON chunk_manifest(workspace_id, logical_document_id, chunk_order);
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    report_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS evaluations_workspace_idx
+                    ON evaluations(workspace_id, created_at DESC);
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (1, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (2, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (3, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (4, datetime('now'));
                 """
             )
+            job_columns = {
+                row["name"] for row in self._db.execute("PRAGMA table_info(jobs)").fetchall()
+            }
+            if "progress_detail_json" not in job_columns:
+                self._db.execute("ALTER TABLE jobs ADD COLUMN progress_detail_json TEXT")
             # A daemon crash must never leave an operation looking active.
             self._db.execute(
                 """UPDATE jobs SET status = ?, phase = 'interrupted', updated_at = ?
@@ -209,6 +333,25 @@ class StateStore:
                     "DELETE FROM job_checkpoints WHERE job_id IN "
                     "(SELECT id FROM jobs WHERE workspace_id = ?)",
                     (workspace_id,),
+                )
+                self._db.execute(
+                    "DELETE FROM ingest_segments WHERE job_id IN "
+                    "(SELECT id FROM jobs WHERE workspace_id = ?)",
+                    (workspace_id,),
+                )
+                self._db.execute(
+                    "DELETE FROM document_index WHERE workspace_id = ?", (workspace_id,)
+                )
+                self._db.execute("DELETE FROM evaluations WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute(
+                    "DELETE FROM chunk_manifest WHERE workspace_id = ?", (workspace_id,)
+                )
+                self._db.execute(
+                    "DELETE FROM document_segments WHERE workspace_id = ?", (workspace_id,)
+                )
+                self._db.execute("DELETE FROM book_records WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute(
+                    "DELETE FROM import_preflights WHERE workspace_id = ?", (workspace_id,)
                 )
                 self._db.execute(
                     "DELETE FROM idempotency_keys WHERE scope LIKE ?",
@@ -306,21 +449,35 @@ class StateStore:
             result=json.loads(row["result_json"]) if row["result_json"] else None,
             error=json.loads(row["error_json"]) if row["error_json"] else None,
             checkpoint=row["checkpoint"],
+            progress_detail=(
+                json.loads(row["progress_detail_json"]) if row["progress_detail_json"] else None
+            ),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_event_id=row["last_event_id"],
         )
 
     def update_job(self, job_id: str, **changes: Any) -> JobSnapshot:
-        allowed = {"status", "progress", "phase", "result", "error", "checkpoint", "last_event_id"}
+        allowed = {
+            "status",
+            "progress",
+            "phase",
+            "result",
+            "error",
+            "checkpoint",
+            "last_event_id",
+            "progress_detail",
+        }
         unknown = set(changes) - allowed
         if unknown:
             raise ValueError(f"Unsupported job fields: {unknown}")
         columns: list[str] = []
         values: list[Any] = []
         for key, value in changes.items():
-            column = f"{key}_json" if key in {"result", "error"} else key
-            if key in {"result", "error"} and value is not None:
+            column = f"{key}_json" if key in {"result", "error", "progress_detail"} else key
+            if key in {"result", "error", "progress_detail"} and value is not None:
+                if hasattr(value, "model_dump"):
+                    value = value.model_dump(mode="json")
                 value = json.dumps(value)
             columns.append(f"{column} = ?")
             values.append(value)
@@ -515,4 +672,428 @@ class StateStore:
                    ON CONFLICT(job_id, name) DO UPDATE SET data_json=excluded.data_json,
                    created_at=excluded.created_at""",
                 (job_id, name, json.dumps(data), now_iso()),
+            )
+
+    def checkpoint_data(self, job_id: str, name: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data_json FROM job_checkpoints WHERE job_id = ? AND name = ?",
+                (job_id, name),
+            ).fetchone()
+        return json.loads(row["data_json"]) if row else None
+
+    def record_segment(self, job_id: str, source_index: int, segment: dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO ingest_segments(
+                       job_id, source_index, fingerprint, generation_id, segment_index,
+                       page_start, page_end, document_id, status, metadata_json, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(job_id, source_index, page_start, page_end) DO UPDATE SET
+                       document_id=excluded.document_id, status=excluded.status,
+                       metadata_json=excluded.metadata_json""",
+                (
+                    job_id,
+                    source_index,
+                    segment["fingerprint"],
+                    segment["generation_id"],
+                    segment["segment_index"],
+                    segment["page_start"],
+                    segment["page_end"],
+                    segment["document_id"],
+                    segment.get("status", "committed"),
+                    json.dumps(segment.get("metadata", {})),
+                    now_iso(),
+                ),
+            )
+
+    def list_segments(self, job_id: str, source_index: int) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT * FROM ingest_segments WHERE job_id = ? AND source_index = ?
+                   ORDER BY segment_index""",
+                (job_id, source_index),
+            ).fetchall()
+        return [
+            {
+                "fingerprint": row["fingerprint"],
+                "generation_id": row["generation_id"],
+                "segment_index": row["segment_index"],
+                "page_start": row["page_start"],
+                "page_end": row["page_end"],
+                "document_id": row["document_id"],
+                "status": row["status"],
+                "metadata": json.loads(row["metadata_json"]),
+            }
+            for row in rows
+        ]
+
+    def clear_segments(self, job_id: str, source_index: int | None = None) -> None:
+        with self._lock:
+            if source_index is None:
+                self._db.execute("DELETE FROM ingest_segments WHERE job_id = ?", (job_id,))
+            else:
+                self._db.execute(
+                    "DELETE FROM ingest_segments WHERE job_id = ? AND source_index = ?",
+                    (job_id, source_index),
+                )
+
+    def document_by_fingerprint(self, workspace_id: str, fingerprint: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM document_index WHERE workspace_id = ? AND fingerprint = ?",
+                (workspace_id, fingerprint),
+            ).fetchone()
+        return self._document_index_row(row) if row else None
+
+    def document_by_source(self, workspace_id: str, source_path: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM document_index WHERE workspace_id = ? AND source_path = ?",
+                (workspace_id, source_path),
+            ).fetchone()
+        return self._document_index_row(row) if row else None
+
+    @staticmethod
+    def _document_index_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "workspace_id": row["workspace_id"],
+            "logical_document_id": row["logical_document_id"],
+            "source_path": row["source_path"],
+            "fingerprint": row["fingerprint"],
+            "generation_id": row["generation_id"],
+            "result": json.loads(row["result_json"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def upsert_document(
+        self, workspace_id: str, source_path: str, fingerprint: str, result: dict[str, Any]
+    ) -> None:
+        logical_id = str(result.get("logical_document_id") or result.get("document_id"))
+        generation_id = str(result.get("generation_id", ""))
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "DELETE FROM document_index WHERE workspace_id = ? AND source_path = ?",
+                    (workspace_id, source_path),
+                )
+                self._db.execute(
+                    """INSERT INTO document_index VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(workspace_id, logical_document_id) DO UPDATE SET
+                         source_path=excluded.source_path, fingerprint=excluded.fingerprint,
+                         generation_id=excluded.generation_id, result_json=excluded.result_json,
+                         updated_at=excluded.updated_at""",
+                    (
+                        workspace_id,
+                        logical_id,
+                        source_path,
+                        fingerprint,
+                        generation_id,
+                        json.dumps(result),
+                        now_iso(),
+                    ),
+                )
+                metadata = result.get("book_metadata") or {}
+                quality = result.get("quality") or {}
+                managed_source = result.get("managed_source") or result.get("source")
+                self._db.execute(
+                    """INSERT INTO book_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(workspace_id, logical_document_id) DO UPDATE SET
+                         original_source=excluded.original_source,
+                         managed_source=excluded.managed_source,
+                         fingerprint=excluded.fingerprint,
+                         generation_id=excluded.generation_id,
+                         metadata_json=excluded.metadata_json,
+                         quality_json=excluded.quality_json,
+                         pipeline_version=excluded.pipeline_version,
+                         updated_at=excluded.updated_at""",
+                    (
+                        workspace_id,
+                        logical_id,
+                        str(result.get("original_source") or source_path),
+                        str(managed_source) if managed_source else None,
+                        fingerprint,
+                        generation_id,
+                        json.dumps(metadata),
+                        json.dumps(quality),
+                        str(result.get("pipeline_version", "textbook-v1")),
+                        now_iso(),
+                    ),
+                )
+                self._db.execute(
+                    """DELETE FROM document_segments
+                       WHERE workspace_id = ? AND logical_document_id = ?""",
+                    (workspace_id, logical_id),
+                )
+                self._db.execute(
+                    "DELETE FROM chunk_manifest WHERE workspace_id = ? AND logical_document_id = ?",
+                    (workspace_id, logical_id),
+                )
+                segment_ids: dict[int, str] = {}
+                for segment in result.get("segments", []):
+                    segment_id = str(segment.get("document_id", ""))
+                    if not segment_id:
+                        continue
+                    self._db.execute(
+                        """INSERT OR REPLACE INTO document_segments
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            workspace_id,
+                            logical_id,
+                            generation_id,
+                            segment_id,
+                            int(segment.get("page_start", 1)),
+                            int(segment.get("page_end", 1)),
+                        ),
+                    )
+                    segment_ids[int(segment.get("segment_index", 0))] = segment_id
+                for chunk in result.get("chunk_manifest", []):
+                    chunk_id = str(chunk.get("chunk_id", ""))
+                    segment_id = segment_ids.get(int(chunk.get("segment_index", 0)))
+                    if not chunk_id or not segment_id:
+                        continue
+                    self._db.execute(
+                        """INSERT OR REPLACE INTO chunk_manifest
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            workspace_id,
+                            logical_id,
+                            segment_id,
+                            chunk_id,
+                            int(chunk.get("chunk_order", 0)),
+                            str(chunk.get("content_hash", "")),
+                            json.dumps(chunk.get("pages", [])),
+                            json.dumps(chunk.get("headings", [])),
+                            json.dumps(chunk.get("labels", [])),
+                            json.dumps(chunk.get("doc_item_refs", [])),
+                        ),
+                    )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    def save_import_preflight(
+        self, preflight_id: str, workspace_id: str, payload: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO import_preflights VALUES (?, ?, ?, ?)",
+                (preflight_id, workspace_id, json.dumps(payload), now_iso()),
+            )
+
+    def get_import_preflight(self, preflight_id: str, workspace_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT payload_json FROM import_preflights WHERE id = ? AND workspace_id = ?",
+                (preflight_id, workspace_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Import preflight {preflight_id} was not found")
+        return json.loads(row["payload_json"])
+
+    def book_records(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM book_records WHERE workspace_id = ? ORDER BY updated_at DESC",
+                (workspace_id,),
+            ).fetchall()
+            segments = self._db.execute(
+                """SELECT logical_document_id, segment_document_id, page_start, page_end
+                   FROM document_segments WHERE workspace_id = ? ORDER BY page_start""",
+                (workspace_id,),
+            ).fetchall()
+        by_book: dict[str, list[dict[str, Any]]] = {}
+        for segment in segments:
+            by_book.setdefault(segment["logical_document_id"], []).append(dict(segment))
+        return [
+            {
+                **dict(row),
+                "metadata": json.loads(row["metadata_json"]),
+                "quality": json.loads(row["quality_json"]),
+                "segments": by_book.get(row["logical_document_id"], []),
+            }
+            for row in rows
+        ]
+
+    def book_record(self, workspace_id: str, logical_document_id: str) -> dict[str, Any]:
+        for record in self.book_records(workspace_id):
+            if record["logical_document_id"] == logical_document_id:
+                return record
+        raise NotFoundError(f"Document {logical_document_id} was not found")
+
+    def update_book_metadata(
+        self, workspace_id: str, logical_document_id: str, metadata: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            cursor = self._db.execute(
+                """UPDATE book_records SET metadata_json = ?, updated_at = ?
+                   WHERE workspace_id = ? AND logical_document_id = ?""",
+                (json.dumps(metadata), now_iso(), workspace_id, logical_document_id),
+            )
+        if cursor.rowcount != 1:
+            raise NotFoundError(f"Document {logical_document_id} was not found")
+
+    def chunk_manifest(self, workspace_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT * FROM chunk_manifest WHERE workspace_id = ?
+                   ORDER BY logical_document_id, chunk_order""",
+                (workspace_id,),
+            ).fetchall()
+        return [
+            {
+                **dict(row),
+                "pages": json.loads(row["pages_json"]),
+                "headings": json.loads(row["headings_json"]),
+                "labels": json.loads(row["labels_json"]),
+                "refs": json.loads(row["refs_json"]),
+            }
+            for row in rows
+        ]
+
+    def resolve_segment_ids(
+        self, workspace_id: str, filters: dict[str, Any], document_policy: str
+    ) -> list[str] | None:
+        unknown_filters = filters.keys() - DOCUMENT_FILTER_KEYS
+        if unknown_filters:
+            raise ValueError(f"Unsupported document filters: {sorted(unknown_filters)}")
+        if document_policy not in DOCUMENT_POLICIES:
+            raise ValueError(f"Unsupported document policy: {document_policy}")
+        records = self.book_records(workspace_id)
+        if not records:
+            return None
+
+        def values(value: Any) -> set[str]:
+            if value is None:
+                return set()
+            if isinstance(value, (list, tuple, set)):
+                return {str(item).casefold() for item in value}
+            return {str(value).casefold()}
+
+        def matches(record: dict[str, Any]) -> bool:
+            meta = record["metadata"]
+            aliases = {
+                "document_id": record["logical_document_id"],
+                "logical_document_id": record["logical_document_id"],
+                "work_id": meta.get("work_id"),
+                "title": meta.get("title"),
+                "edition": meta.get("edition_label"),
+                "edition_number": meta.get("edition_number"),
+                "publication_year": meta.get("publication_year"),
+                "document_status": meta.get("document_status", "active"),
+                "language": meta.get("language"),
+            }
+            for key, expected in filters.items():
+                if key in {"authors", "author"}:
+                    actual = values(meta.get("authors"))
+                elif key == "isbn":
+                    actual = values(meta.get("isbn"))
+                elif key == "tags":
+                    actual = values(meta.get("tags"))
+                elif key in {"document_ids", "logical_document_ids"}:
+                    actual = values(record["logical_document_id"])
+                elif key in aliases:
+                    actual = values(aliases[key])
+                wanted = values(expected)
+                if wanted and actual.isdisjoint(wanted):
+                    return False
+            return True
+
+        selected = [record for record in records if matches(record)]
+        explicit_version = bool(
+            {
+                "document_id",
+                "logical_document_id",
+                "document_ids",
+                "logical_document_ids",
+                "edition",
+                "edition_number",
+                "publication_year",
+                "document_status",
+            }
+            & filters.keys()
+        )
+        if document_policy == "current-only" and not explicit_version:
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for record in selected:
+                meta = record["metadata"]
+                if meta.get("document_status", "active") == "superseded":
+                    continue
+                grouped.setdefault(meta.get("work_id") or record["logical_document_id"], []).append(
+                    record
+                )
+            selected = []
+            for group in grouped.values():
+                selected.append(
+                    max(
+                        group,
+                        key=lambda item: (
+                            item["metadata"].get("edition_number") or 0,
+                            item["metadata"].get("publication_year") or 0,
+                            item["updated_at"],
+                        ),
+                    )
+                )
+        return [
+            str(segment["segment_document_id"])
+            for record in selected
+            for segment in record["segments"]
+        ]
+
+    def save_evaluation(
+        self, evaluation_id: str, workspace_id: str, report: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO evaluations VALUES (?, ?, ?, ?)",
+                (evaluation_id, workspace_id, json.dumps(report), now_iso()),
+            )
+
+    def evaluation(self, workspace_id: str, evaluation_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT report_json FROM evaluations WHERE workspace_id = ? AND id = ?",
+                (workspace_id, evaluation_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Evaluation {evaluation_id} was not found")
+        return json.loads(row["report_json"])
+
+    def latest_evaluation(self, workspace_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._db.execute(
+                """SELECT report_json FROM evaluations WHERE workspace_id = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (workspace_id,),
+            ).fetchone()
+        return json.loads(row["report_json"]) if row else None
+
+    def touch_cache(
+        self, cache_key: str, path: str, size_bytes: int, metadata: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO conversion_cache VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(cache_key) DO UPDATE SET path=excluded.path,
+                     size_bytes=excluded.size_bytes, last_used_at=excluded.last_used_at,
+                     metadata_json=excluded.metadata_json""",
+                (cache_key, path, size_bytes, now_iso(), json.dumps(metadata)),
+            )
+
+    def cache_entries(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM conversion_cache ORDER BY last_used_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_cache_entries(self, keys: list[str]) -> None:
+        if not keys:
+            return
+        with self._lock:
+            self._db.executemany(
+                "DELETE FROM conversion_cache WHERE cache_key = ?", ((key,) for key in keys)
             )

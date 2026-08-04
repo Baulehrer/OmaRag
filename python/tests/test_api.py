@@ -25,6 +25,33 @@ async def test_meta_health_and_openapi(client: httpx2.AsyncClient) -> None:
     assert "/v1/workspaces/{workspace_id}/documents/ingest" in schema["paths"]
 
 
+async def test_search_and_ingest_policies_reject_unknown_values(
+    client: httpx2.AsyncClient, workspace: dict[str, object]
+) -> None:
+    workspace_id = str(workspace["id"])
+    invalid_policy = await client.post(
+        f"/v1/workspaces/{workspace_id}/search",
+        json={"query": "Beton", "document_policy": "curent-only"},
+    )
+    assert invalid_policy.status_code == 422
+
+    unknown_filter = await client.post(
+        f"/v1/workspaces/{workspace_id}/search",
+        json={"query": "Beton", "filters": {"edtion_number": 8}},
+    )
+    assert unknown_filter.status_code == 422
+
+    invalid_profile = await client.post(
+        f"/v1/workspaces/{workspace_id}/documents/ingest",
+        headers={"Idempotency-Key": "invalid-profile"},
+        json={
+            "sources": [{"type": "file", "path": "/tmp/book.pdf"}],
+            "processing_profile": "techncial",
+        },
+    )
+    assert invalid_profile.status_code == 422
+
+
 async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
     client: httpx2.AsyncClient,
 ) -> None:
@@ -243,6 +270,13 @@ async def test_search_and_run_have_stable_domain_models(
     assert search.status_code == 200
     assert search.json()[0]["chunk_id"] == "chunk-1"
 
+    explanation = await client.post(
+        f"/v1/workspaces/{workspace_id}/search/explain",
+        json={"query": "XC4", "limit": 5},
+    )
+    assert explanation.status_code == 200
+    assert explanation.json()["ranked"][0]["chunk_id"] == "chunk-1"
+
     response = await client.post(
         f"/v1/workspaces/{workspace_id}/runs",
         json={"question": "Was bedeutet XC4?", "evidence_mode": "strict"},
@@ -316,7 +350,7 @@ async def test_workspace_feature_vertical_slices(
 
     config = await client.get(f"/v1/workspaces/{workspace_id}/config")
     assert config.status_code == 200
-    updated_content = config.json()["content"].replace("temperature: 0.2", "temperature: 0.3")
+    updated_content = config.json()["content"].replace("temperature: 0.1", "temperature: 0.3")
     updated = await client.put(
         f"/v1/workspaces/{workspace_id}/config",
         headers={"If-Match": config.headers["etag"]},

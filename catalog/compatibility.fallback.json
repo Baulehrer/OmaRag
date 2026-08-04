@@ -10,13 +10,21 @@
       "support": "compatible"
     },
     "0.70": {
-      "adapter": "haiku-v070",
+      "adapter": "haiku-vanilla",
+      "support": "legacy-compatible"
+    },
+    "0.71": {
+      "adapter": "haiku-vanilla",
+      "support": "compatible"
+    },
+    "0.72": {
+      "adapter": "haiku-vanilla",
       "capabilities": {
         "analysis_images": true,
         "native_capabilities": true,
         "question_images": true
       },
-      "support": "preferred"
+      "support": "latest-gated"
     }
   }
 }

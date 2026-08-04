@@ -4,7 +4,43 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .domain import EvidenceMode, StrictModel
+from .domain import BookMetadata, EvidenceMode, StrictModel
+
+ProcessingProfile = Literal[
+    "default",
+    "technical",
+    "low-memory",
+    "fast",
+    "quality",
+    "image-heavy",
+    "eco",
+    "balanced",
+]
+ValidityPolicy = Literal["prefer-current", "strict"]
+DocumentPolicy = Literal["current-only", "all-editions"]
+TextFilter = str | list[str]
+NumericFilter = int | list[int]
+
+
+class SearchFilters(StrictModel):
+    document_id: TextFilter | None = None
+    logical_document_id: TextFilter | None = None
+    document_ids: list[str] | None = None
+    logical_document_ids: list[str] | None = None
+    work_id: TextFilter | None = None
+    title: TextFilter | None = None
+    edition: TextFilter | None = None
+    edition_number: NumericFilter | None = None
+    publication_year: NumericFilter | None = None
+    document_status: TextFilter | None = None
+    language: TextFilter | None = None
+    author: TextFilter | None = None
+    authors: TextFilter | None = None
+    isbn: TextFilter | None = None
+    tags: TextFilter | None = None
+
+    def active(self) -> dict[str, Any]:
+        return self.model_dump(exclude_none=True)
 
 
 class CreateWorkspaceRequest(StrictModel):
@@ -26,6 +62,9 @@ class CloneWorkspaceRequest(StrictModel):
 class SourceInput(StrictModel):
     type: Literal["file", "url"] = "file"
     path: str
+    fingerprint: str | None = None
+    candidate_id: str | None = None
+    metadata: BookMetadata | None = None
 
 
 class IngestRequest(StrictModel):
@@ -33,15 +72,44 @@ class IngestRequest(StrictModel):
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     parser_id: Literal["auto", "docling"] = "auto"
-    processing_profile: str = "default"
+    processing_profile: ProcessingProfile = "default"
     duplicate_policy: Literal["review", "skip", "replace"] = "review"
-    validity_policy: str = "prefer-current"
+    validity_policy: ValidityPolicy = "prefer-current"
 
 
 class SearchRequest(StrictModel):
     query: str = Field(min_length=1)
     limit: int = Field(default=10, ge=1, le=100)
-    filters: dict[str, Any] = Field(default_factory=dict)
+    filters: SearchFilters = Field(default_factory=SearchFilters)
+    document_policy: DocumentPolicy = "current-only"
+
+
+class PreflightImportRequest(StrictModel):
+    sources: list[SourceInput] = Field(min_length=1)
+
+
+class CommitImportRequest(StrictModel):
+    preflight_id: str
+    sources: list[SourceInput] = Field(min_length=1)
+    processing_profile: ProcessingProfile = "default"
+    duplicate_policy: Literal["review", "skip", "replace"] = "review"
+    validity_policy: ValidityPolicy = "prefer-current"
+
+
+class PatchBookMetadataRequest(StrictModel):
+    metadata: BookMetadata
+
+
+class GenerateEvaluationRequest(StrictModel):
+    limit: int = Field(default=30, ge=5, le=300)
+
+
+class RunEvaluationRequest(StrictModel):
+    evaluation_id: str | None = None
+    variants: list[Literal["fts", "vector", "hybrid"]] = Field(
+        default_factory=lambda: ["fts", "vector", "hybrid"]
+    )
+    top_k: int = Field(default=10, ge=3, le=50)
 
 
 class RunRequest(StrictModel):
@@ -50,8 +118,8 @@ class RunRequest(StrictModel):
     question: str = Field(min_length=1)
     images: list[str] = Field(default_factory=list)
     evidence_mode: EvidenceMode = EvidenceMode.STRICT
-    document_policy: str = "current-only"
-    filters: dict[str, Any] = Field(default_factory=dict)
+    document_policy: DocumentPolicy = "current-only"
+    filters: SearchFilters = Field(default_factory=SearchFilters)
 
 
 class ErrorBody(StrictModel):

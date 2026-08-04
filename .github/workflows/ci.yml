@@ -31,7 +31,8 @@ jobs:
       - name: Python quality gates
         working-directory: python
         run: |
-          uv sync --locked --extra dev --extra mcp
+          uv sync --locked --extra dev --extra mcp --extra haiku
+          .venv/bin/python -m omarag_bridge.compat_probe
           .venv/bin/ruff check omarag_bridge tests
           .venv/bin/ruff format --check omarag_bridge tests
           .venv/bin/pytest -q
@@ -45,6 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build CPU image
-        run: docker build --build-arg VERSION=0.5.0 -f deploy/Dockerfile -t oracle:test .
+        run: docker build --build-arg VERSION=0.7.0 -f deploy/Dockerfile -t oracle:test .
       - name: Verify non-root runtime
         run: test "$(docker run --rm --entrypoint id oracle:test -u)" != "0"

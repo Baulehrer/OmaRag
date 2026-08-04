@@ -4,6 +4,7 @@ import hashlib
 import re
 import shutil
 from datetime import UTC, datetime
+from importlib import metadata
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,6 +20,36 @@ def _slug(value: str) -> str:
     value = value.lower().strip()
     value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
     return value[:48] or "workspace"
+
+
+def _memory_gib() -> float:
+    try:
+        line = next(
+            item
+            for item in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+            if item.startswith("MemTotal:")
+        )
+        return int(line.split()[1]) / 1024**2
+    except (OSError, StopIteration, ValueError, IndexError):
+        return 16.0
+
+
+def _runtime_profile() -> dict[str, int]:
+    memory = _memory_gib()
+    if memory < 18:
+        return {"embedding_batch": 16, "search_limit": 6, "context_chars": 4000}
+    if memory <= 32:
+        return {"embedding_batch": 32, "search_limit": 8, "context_chars": 5000}
+    return {"embedding_batch": 64, "search_limit": 8, "context_chars": 6000}
+
+
+def _haiku_version() -> str | None:
+    for distribution in ("haiku-rag", "haiku-rag-slim"):
+        try:
+            return metadata.version(distribution)
+        except metadata.PackageNotFoundError:
+            continue
+    return None
 
 
 class WorkspaceService:
@@ -53,6 +84,7 @@ class WorkspaceService:
             read_only=request.read_only,
             embedding_model="qwen3-embedding:0.6b",
             vector_dimension=1024,
+            haiku_last_verified=_haiku_version(),
             created_at=now,
             updated_at=now,
             etag=self._etag(workspace_id, request.name, now),
@@ -71,13 +103,16 @@ class WorkspaceService:
             "metadata-overlays",
             "database",
             "evaluations/history",
+            "evaluations/variants",
             "annotations",
             "reports",
             "snapshots",
             "backup-manifests",
+            "sources/originals",
             ".omarag/locks",
         ):
             (path / relative).mkdir(parents=True, exist_ok=True)
+        runtime = _runtime_profile()
         (path / "haiku.rag.yaml").write_text(
             f"""environment: production
 
@@ -86,7 +121,7 @@ embeddings:
     provider: ollama
     name: qwen3-embedding:0.6b
     vector_dim: 1024
-  batch_size: 32
+  batch_size: {runtime["embedding_batch"]}
 
 reranking:
   model:
@@ -100,8 +135,8 @@ qa:
     name: qwen3.5:4b-q4_K_M
     vision: true
     enable_thinking: false
-    temperature: 0.2
-  max_searches: 2
+    temperature: 0.1
+  max_searches: 3
 
 processing:
   converter: docling-local
@@ -118,7 +153,9 @@ processing:
     do_ocr: true
     force_ocr: false
     ocr_engine: auto
-    ocr_lang: []
+    ocr_lang:
+      - de
+      - en
     do_table_structure: true
     table_mode: accurate
     table_cell_matching: true
@@ -131,8 +168,15 @@ providers:
     base_url: {self.ollama_url}
 
 search:
-  limit: 5
-  max_context_chars: 5000
+  limit: {runtime["search_limit"]}
+  max_context_chars: {runtime["context_chars"]}
+
+prompts:
+  domain_preamble: |-
+    Die ausgewaehlten Fach- und Lehrbuecher sind die massgebliche Quelle.
+    Uebernimm Zahlen, Einheiten und Formelzeichen exakt. Erfinde keine
+    Seitenzahlen oder Fundstellen und widersprich einer Ausgabe nicht mit
+    unmarkiertem Modellwissen. Reicht der Kontext nicht aus, sage das klar.
 """,
             encoding="utf-8",
         )
@@ -150,6 +194,8 @@ search:
             "read_only": manifest.read_only,
             "haiku": {
                 "compatible_range": manifest.haiku_compatible_range,
+                "update_policy": manifest.haiku_update_policy,
+                "last_verified": manifest.haiku_last_verified or "",
                 "database_schema_version": manifest.database_schema_version,
             },
             "embedding": {

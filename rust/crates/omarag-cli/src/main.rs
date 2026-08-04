@@ -48,6 +48,8 @@ enum Command {
         query: String,
         #[arg(long, default_value_t = 10)]
         limit: u32,
+        #[arg(long)]
+        explain: bool,
     },
     Ask {
         workspace: String,
@@ -212,9 +214,35 @@ async fn main() -> Result<()> {
             workspace,
             query,
             limit,
+            explain,
         } => {
             let mut request = SearchRequest::new(query);
             request.limit = limit;
+            if explain {
+                let explanation = client.explain_search(workspace, request).await?;
+                if args.json {
+                    print_json(&explanation)?;
+                } else {
+                    println!(
+                        "Retrieval: {:.1} ms · {} ranked hits",
+                        explanation.timing.total_ms,
+                        explanation.ranked.len()
+                    );
+                    for hit in explanation.ranked {
+                        println!(
+                            "{:.3}\t{}\t{}",
+                            hit.score.unwrap_or_default(),
+                            hit.pages
+                                .iter()
+                                .map(u32::to_string)
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            hit.content.replace('\n', " ")
+                        );
+                    }
+                }
+                return Ok(());
+            }
             let hits = client.search(workspace, request).await?;
             if args.json {
                 print_json(&hits)?;

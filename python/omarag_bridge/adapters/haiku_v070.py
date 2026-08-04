@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import inspect
 import io
+import json
+import os
+import re
 import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
@@ -12,7 +16,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ..models.domain import CapabilitySet, Citation, CitationAnchor, SearchHit
+from ..models.domain import (
+    BookMetadata,
+    CapabilitySet,
+    Citation,
+    CitationAnchor,
+    DocumentQuality,
+    EvidenceMode,
+    SearchHit,
+)
 from ..models.errors import AdapterUnavailableError, ConflictError
 from .base import HaikuAdapter
 
@@ -127,29 +139,56 @@ def _looks_like_memory_pressure(exc: BaseException) -> bool:
     )
 
 
-def _pdf_info(path: Path) -> tuple[int, bool]:
-    """Return page count and a cheap text-vs-scan classification."""
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _pdf_info(path: Path) -> tuple[int, list[bool]]:
+    """Return page count and a cheap per-page text-vs-scan classification."""
     import pypdfium2 as pdfium
 
     document = pdfium.PdfDocument(str(path))
     try:
         total = len(document)
-        sample_chars = 0
-        sample_count = min(total, 3)
-        for index in range(sample_count):
+        scanned_pages: list[bool] = []
+        for index in range(total):
             page = document[index]
             try:
                 text_page = page.get_textpage()
                 try:
-                    sample_chars += len(text_page.get_text_range())
+                    text = text_page.get_text_range()
                 finally:
                     text_page.close()
             finally:
                 page.close()
-        scanned = sample_count > 0 and sample_chars / sample_count < 100
-        return total, scanned
+            scanned_pages.append(len(text.strip()) < 80)
+        return total, scanned_pages
     finally:
         document.close()
+
+
+def _cached_pdf_info(path: Path, profile_path: Path) -> tuple[int, list[bool]]:
+    try:
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        scanned_pages = payload["scanned_pages"]
+        if payload.get("version") == 1 and isinstance(scanned_pages, list):
+            os.utime(profile_path, None)
+            return len(scanned_pages), [bool(value) for value in scanned_pages]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    result = _pdf_info(path)
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = profile_path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"version": 1, "scanned_pages": result[1]}, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    temporary.replace(profile_path)
+    return result
 
 
 def _pdf_slice(path: Path, start: int, end: int) -> bytes:
@@ -166,6 +205,51 @@ def _pdf_slice(path: Path, start: int, end: int) -> bytes:
     finally:
         target.close()
         source.close()
+
+
+def _cache_file(database: Path, cache_key: str) -> Path:
+    return database.parent / ".oracle-cache" / "docling" / f"{cache_key}.json"
+
+
+def _load_cached_docling(path: Path) -> Any | None:
+    if not path.exists():
+        return None
+    try:
+        from docling_core.types.doc import DoclingDocument
+
+        document = DoclingDocument.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        os.utime(path, None)
+        return document
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+
+def _store_cached_docling(path: Path, document: Any) -> None:
+    if not hasattr(document, "export_to_dict"):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(document.export_to_dict(), ensure_ascii=False, separators=(",", ":"))
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
+    ) as temporary:
+        temporary.write(payload)
+        temporary_path = Path(temporary.name)
+    temporary_path.replace(path)
+
+
+def _prune_cache(cache_dir: Path, limit_bytes: int = 5 * 1024**3) -> None:
+    files = sorted(
+        (path for path in cache_dir.glob("*.json") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    total = 0
+    for path in files:
+        size = path.stat().st_size
+        total += size
+        if total > limit_bytes:
+            path.unlink(missing_ok=True)
 
 
 def _deduplicate_citations(citations: list[Citation]) -> list[Citation]:
@@ -189,39 +273,129 @@ async def _unguarded():
     yield
 
 
-class HaikuV070Adapter(HaikuAdapter):
-    name = "haiku-v070"
+STRICT_PREAMBLE = """
+Die bereitgestellten Fach- und Lehrbuecher sind die alleinige Wissensgrundlage.
+Belege jede wesentliche fachliche Aussage mit den gelieferten Quellen. Erfinde
+keine Seiten, Werte, Formeln, Normen oder Begruendungen. Wenn der Kontext nicht
+ausreicht, antworte exakt: \"In den bereitgestellten Quellen nicht ausreichend
+belegt.\" Uebernimm Zahlen, Einheiten und Formelzeichen exakt. Bei Konflikten
+nenne beide Aussagen samt Ausgabe. Zitiere nur Originalquellen.
+""".strip()
+
+NORMAL_PREAMBLE = """
+Bevorzuge die bereitgestellten Fach- und Lehrbuecher und belege fachliche
+Aussagen. Kennzeichne Schlussfolgerungen ausdruecklich. Wenn eine Aussage nicht
+aus den Quellen folgt, sage das klar und erfinde keine Fundstelle.
+""".strip()
+
+EXPLORE_PREAMBLE = """
+Nutze die bereitgestellten Quellen als Ausgangspunkt. Trenne belegte Aussagen,
+eigene Schlussfolgerungen und ergaenzendes Allgemeinwissen sichtbar voneinander.
+Erfinde keine Fundstellen.
+""".strip()
+
+
+def document_filter_for_ids(document_ids: list[str] | None) -> str | None:
+    """Build a LanceDB-safe filter from IDs resolved by OmaRag's metadata store."""
+    if document_ids is None:
+        return None
+    if not document_ids:
+        return "id = '__omarag_no_document__'"
+    quoted = ", ".join(f"'{value.replace(chr(39), chr(39) * 2)}'" for value in document_ids)
+    return f"id IN ({quoted})"
+
+
+def _book_payload(metadata: BookMetadata | None) -> dict[str, Any]:
+    if metadata is None:
+        return {}
+    payload = metadata.model_dump(mode="json")
+    return {
+        "book_metadata": payload,
+        "work_id": metadata.work_id,
+        "book_title": metadata.title,
+        "edition_label": metadata.edition_label,
+        "edition_number": metadata.edition_number,
+        "publication_year": metadata.publication_year,
+        "isbn": metadata.isbn,
+        "language": metadata.language,
+        "curriculum": metadata.curriculum,
+        "tags": metadata.tags,
+        "document_status": metadata.document_status.value,
+    }
+
+
+def _chunk_manifest(chunk: Any, *, page_offset: int, segment_index: int) -> dict[str, Any]:
+    metadata = dict(_value(chunk, "metadata", default={}) or {})
+    content = str(_value(chunk, "content", default=""))
+    pages = [page + page_offset for page in _int_list(metadata.get("page_numbers"))]
+    return {
+        "chunk_id": str(_value(chunk, "id", default="") or ""),
+        "segment_index": segment_index,
+        "chunk_order": int(_value(chunk, "order", default=0) or 0),
+        "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        "pages": pages,
+        "headings": _string_list(metadata.get("headings")),
+        "labels": _string_list(metadata.get("labels")),
+        "doc_item_refs": _string_list(metadata.get("doc_item_refs")),
+    }
+
+
+def _content_chunks(chunks: list[Any]) -> list[Any]:
+    excluded = {"page_header", "page_footer"}
+    retained: list[Any] = []
+    for chunk in chunks:
+        labels = {
+            value
+            for item in _string_list((_value(chunk, "metadata", default={}) or {}).get("labels"))
+            if (value := item.casefold().replace("-", "_").replace(" ", "_"))
+        }
+        if labels and labels <= excluded:
+            continue
+        retained.append(chunk)
+    return retained
+
+
+class VanillaHaikuAdapter(HaikuAdapter):
+    """Compatibility boundary around Haiku RAG's documented public API."""
+
+    name = "haiku-vanilla"
 
     def __init__(self) -> None:
-        try:
-            self.version = metadata.version("haiku-rag")
-        except metadata.PackageNotFoundError:
+        self.version = None
+        for distribution in ("haiku-rag", "haiku-rag-slim"):
             try:
-                self.version = metadata.version("haiku.rag")
+                self.version = metadata.version(distribution)
+                break
             except metadata.PackageNotFoundError:
-                self.version = None
+                continue
+        # Installation is compatibility-gated by ``compat_probe``.  Do not
+        # import Haiku merely to populate /meta: its client import pulls the
+        # vector store and model stack into an otherwise idle API process.
+        self._available = self.version is not None
+        version_match = re.match(r"^(\d+)\.(\d+)", self.version or "")
+        version_pair = (
+            (int(version_match.group(1)), int(version_match.group(2)))
+            if version_match is not None
+            else (0, 0)
+        )
+        supports_images = self._available and version_pair >= (0, 72)
         self.capabilities = CapabilitySet(
             # OmaRag normalizes a completed public Haiku answer into deltas;
             # it does not expose Haiku/Pydantic-AI internal streaming events.
             streaming_chat=False,
-            question_images=self.available and self._ask_supports_images(),
-            analysis_images=self.available and self._analyze_supports_images(),
+            question_images=supports_images,
+            analysis_images=supports_images,
             multimodal_search=False,
             multimodal_reranking=False,
-            visual_grounding=self.available and self._ask_supports_images(),
+            visual_grounding=supports_images,
             database_tags=False,
             native_ingester=False,
-            evaluation=False,
+            evaluation=True,
         )
 
     @property
     def available(self) -> bool:
-        try:
-            from haiku.rag.client import HaikuRAG  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        return self._available
 
     @staticmethod
     def _client_type() -> type[Any]:
@@ -230,7 +404,9 @@ class HaikuV070Adapter(HaikuAdapter):
         except ImportError as exc:
             raise AdapterUnavailableError(
                 "Haiku RAG ist in der aktiven Python-Runtime nicht installiert",
-                details={"install_hint": "Installiere eine freigegebene Haiku-RAG-0.70.x-Runtime"},
+                details={
+                    "install_hint": "Installiere die zuletzt kompatibilitaetsgepruefte Version"
+                },
             ) from exc
         return HaikuRAG
 
@@ -249,12 +425,24 @@ class HaikuV070Adapter(HaikuAdapter):
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         return AppConfig.model_validate(raw)
 
-    def _client(self, database: Path, *, create: bool = False) -> Any:
+    def _client(self, database: Path, *, create: bool = False, config: Any | None = None) -> Any:
         return self._client_type()(
             database,
-            config=self._config(database),
+            config=config or self._config(database),
             create=create,
         )
+
+    def _request_config(self, database: Path, evidence_mode: EvidenceMode) -> Any:
+        config = copy.deepcopy(self._config(database))
+        preamble = {
+            EvidenceMode.STRICT: STRICT_PREAMBLE,
+            EvidenceMode.NORMAL: NORMAL_PREAMBLE,
+            EvidenceMode.EXPLORE: EXPLORE_PREAMBLE,
+        }[evidence_mode]
+        existing = str(config.prompts.domain_preamble or "").strip()
+        config.prompts.domain_preamble = "\n\n".join(item for item in (existing, preamble) if item)
+        config.qa.model.temperature = 0.1 if evidence_mode is EvidenceMode.STRICT else 0.2
+        return config
 
     def _ask_supports_images(self) -> bool:
         if not self.available:
@@ -301,6 +489,13 @@ class HaikuV070Adapter(HaikuAdapter):
         processing_profile: str = "default",
         segment_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
         before_segment: Callable[[int, int, int], Awaitable[bool]] | None = None,
+        generation_id: str | None = None,
+        document_fingerprint: str | None = None,
+        resume_segments: list[dict[str, Any]] | None = None,
+        on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        segment_sizer: Callable[[int, bool], int] | None = None,
+        metadata: BookMetadata | None = None,
+        original_source: str | None = None,
     ) -> dict[str, Any]:
         if parser_id not in {"auto", "docling"}:
             raise ConflictError(f"Parser {parser_id} is not supported")
@@ -313,13 +508,28 @@ class HaikuV070Adapter(HaikuAdapter):
                 processing_profile=processing_profile,
                 segment_guard=segment_guard,
                 before_segment=before_segment,
+                generation_id=generation_id,
+                document_fingerprint=document_fingerprint,
+                resume_segments=resume_segments,
+                on_segment=on_segment,
+                segment_sizer=segment_sizer,
+                metadata=metadata,
+                original_source=original_source,
             )
         guard = segment_guard or _unguarded
         async with guard(), self._client(database) as rag:
-            document = await rag.create_document_from_source(source)
+            document = await rag.create_document_from_source(
+                source,
+                title=metadata.title if metadata and metadata.title else None,
+                metadata=_book_payload(metadata) or None,
+            )
         return {
             "source": source,
             "document_id": str(_value(document, "id", "document_id", default="")),
+            "book_metadata": metadata.model_dump(mode="json") if metadata else None,
+            "original_source": original_source or source,
+            "managed_source": source,
+            "pipeline_version": "vanilla-haiku-public-api-v1",
         }
 
     async def _ingest_pdf_segments(
@@ -330,112 +540,282 @@ class HaikuV070Adapter(HaikuAdapter):
         processing_profile: str = "default",
         segment_guard: Callable[[], AbstractAsyncContextManager[None]] | None = None,
         before_segment: Callable[[int, int, int], Awaitable[bool]] | None = None,
+        generation_id: str | None = None,
+        document_fingerprint: str | None = None,
+        resume_segments: list[dict[str, Any]] | None = None,
+        on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        segment_sizer: Callable[[int, bool], int] | None = None,
+        metadata: BookMetadata | None = None,
+        original_source: str | None = None,
     ) -> dict[str, Any]:
-        total_pages, scanned = await asyncio.to_thread(_pdf_info, source)
+        book_metadata = metadata
+        document_fingerprint = document_fingerprint or await asyncio.to_thread(_file_sha256, source)
+        total_pages, scanned_pages = await asyncio.to_thread(
+            _cached_pdf_info,
+            source,
+            _cache_file(database, f"profile-{document_fingerprint}"),
+        )
+        if isinstance(scanned_pages, bool):
+            scanned_pages = [scanned_pages] * total_pages
         if total_pages == 0:
             raise ConflictError(f"PDF {source.name} contains no pages")
-        logical_id = f"book-{hashlib.sha256(str(source).encode()).hexdigest()[:20]}"
-        generation_id = f"gen-{uuid4().hex[:16]}"
+        logical_id = f"book-{document_fingerprint[:20]}"
+        generation_id = generation_id or f"gen-{uuid4().hex[:16]}"
         source_uri = source.as_uri()
         segment_sizes = {
             "eco": (12, 5),
+            "low-memory": (10, 4),
             "default": (25, 10),
             "technical": (25, 10),
             "balanced": (25, 10),
+            "quality": (16, 6),
+            "image-heavy": (8, 3),
             "fast": (40, 15),
         }
         text_size, scan_size = segment_sizes.get(processing_profile, segment_sizes["default"])
-        segment_size = scan_size if scanned else text_size
         guard = segment_guard or _unguarded
+        resume_segments = sorted(resume_segments or [], key=lambda item: item["segment_index"])
+        # Resume positions must be derived from segments that still exist in Haiku.
+        # A persisted checkpoint can outlive its imported document after cleanup.
         start = 0
         segment_index = 0
-        imported_ids: list[str] = []
-        segments: list[dict[str, Any]] = []
+        imported_ids = [str(item["document_id"]) for item in resume_segments]
+        segments = [dict(item) for item in resume_segments]
+        cache_hits = sum(bool(item.get("metadata", {}).get("cache_hit")) for item in segments)
+        converted_segments = 0
+        manifest_chunks: list[dict[str, Any]] = []
+        quality_counts = {"chunks": 0, "tables": 0, "formulas": 0, "pictures": 0, "refs": 0}
+        base_config = self._config(database)
         async with self._client(database) as rag:
-            old_document_ids = [
-                str(document.id)
-                for document in await rag.list_documents()
-                if document.id
-                and (_value(document, "metadata", default={}) or {}).get("logical_document_id")
-                == logical_id
-            ]
+            listed_documents = await rag.list_documents()
+        current_ids = {str(document.id) for document in listed_documents if document.id}
+        imported_ids = [document_id for document_id in imported_ids if document_id in current_ids]
+        segments = [item for item in segments if str(item["document_id"]) in current_ids]
+        for segment in segments:
+            for item in segment.get("metadata", {}).get("chunk_manifest", []):
+                labels = {label.casefold() for label in item.get("labels", [])}
+                quality_counts["chunks"] += 1
+                quality_counts["tables"] += bool(labels & {"table", "table_item"})
+                quality_counts["formulas"] += bool(labels & {"formula", "equation"})
+                quality_counts["pictures"] += bool(labels & {"picture", "figure", "image"})
+                quality_counts["refs"] += bool(item.get("doc_item_refs"))
+                manifest_chunks.append(item)
+        generation_documents = [
+            document
+            for document in listed_documents
+            if document.id
+            and (_value(document, "metadata", default={}) or {}).get("generation_id")
+            == generation_id
+        ]
+        known_ids = set(imported_ids)
+        for document in generation_documents:
+            document_id = str(document.id)
+            if document_id in known_ids:
+                continue
+            metadata_value = _value(document, "metadata", default={}) or {}
+            recovered = {
+                "document_id": document_id,
+                "segment_index": int(metadata_value.get("segment_index", len(segments))),
+                "page_start": int(metadata_value.get("page_start", 1)),
+                "page_end": int(metadata_value.get("page_end", 1)),
+                "fingerprint": document_fingerprint,
+                "generation_id": generation_id,
+                "status": "committed",
+                "metadata": {
+                    "recovered": True,
+                    "cache_hit": True,
+                    "page_kind": metadata_value.get("page_kind"),
+                },
+            }
+            segments.append(recovered)
+            imported_ids.append(document_id)
+            known_ids.add(document_id)
+            if on_segment is not None:
+                await on_segment(recovered)
+        segments.sort(key=lambda item: item["segment_index"])
+        if segments:
+            last_page = int(segments[-1]["page_end"])
+            last_kind = segments[-1].get("metadata", {}).get("page_kind")
+            next_kind = (
+                "scanned" if last_page < total_pages and scanned_pages[last_page] else "text"
+            )
+            start = (
+                total_pages
+                if last_page >= total_pages
+                else last_page
+                if last_kind and last_kind != next_kind
+                else max(0, last_page - 1)
+            )
+            segment_index = int(segments[-1]["segment_index"]) + 1
+        old_document_ids = [
+            str(document.id)
+            for document in listed_documents
+            if document.id
+            and (_value(document, "metadata", default={}) or {}).get("logical_document_id")
+            == logical_id
+            and (_value(document, "metadata", default={}) or {}).get("generation_id")
+            != generation_id
+        ]
+        while start < total_pages:
+            scanned = scanned_pages[start]
+            segment_size = scan_size if scanned else text_size
+            if segment_sizer is not None:
+                segment_size = max(1, segment_sizer(segment_size, scanned))
+            end = min(start + segment_size, total_pages)
+            kind_boundary = False
+            # Keep OCR and native-text pages in separate conversions.
+            for boundary in range(start + 1, end):
+                if scanned_pages[boundary] != scanned:
+                    end = boundary
+                    kind_boundary = True
+                    break
+            if before_segment is not None and not await before_segment(start, end, total_pages):
+                raise asyncio.CancelledError
             try:
-                while start < total_pages:
-                    end = min(start + segment_size, total_pages)
-                    if before_segment is not None and not await before_segment(
-                        start, end, total_pages
-                    ):
-                        raise asyncio.CancelledError
+                async with guard():
+                    pdf_bytes = await asyncio.to_thread(_pdf_slice, source, start, end)
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", suffix=".pdf", delete=False
+                    ) as temporary:
+                        temporary.write(pdf_bytes)
+                        temporary_path = Path(temporary.name)
                     try:
-                        async with guard():
-                            pdf_bytes = await asyncio.to_thread(_pdf_slice, source, start, end)
-                            with tempfile.NamedTemporaryFile(
-                                mode="wb", suffix=".pdf", delete=False
-                            ) as temporary:
-                                temporary.write(pdf_bytes)
-                                temporary_path = Path(temporary.name)
-                            try:
-                                docling_document = await rag.convert(
+                        config = copy.deepcopy(base_config)
+                        options = config.processing.conversion_options
+                        options.do_ocr = scanned
+                        options.force_ocr = False
+                        if processing_profile in {"eco", "low-memory", "fast"}:
+                            # These opt-in profiles trade table reconstruction
+                            # detail for a lower Docling peak. Technical and
+                            # quality profiles retain accurate table handling.
+                            options.table_mode = "fast"
+                            options.table_cell_matching = False
+                            options.images_scale = min(float(options.images_scale), 1.0)
+                        cache_material = (
+                            f"v2:{document_fingerprint}:{start}:{end}:{processing_profile}:"
+                            f"ocr={scanned}:haiku={self.version or 'unknown'}"
+                        )
+                        cache_key = hashlib.sha256(cache_material.encode()).hexdigest()
+                        cache_path = _cache_file(database, cache_key)
+                        docling_document = await asyncio.to_thread(_load_cached_docling, cache_path)
+                        cache_hit = docling_document is not None
+                        async with self._client(database, config=config) as segment_rag:
+                            if docling_document is None:
+                                docling_document = await segment_rag.convert(
                                     temporary_path, source_uri=source_uri
                                 )
-                                chunks = await rag.chunk(docling_document)
-                                metadata = {
-                                    "logical_document_id": logical_id,
-                                    "generation_id": generation_id,
-                                    "segment_index": segment_index,
-                                    "page_start": start + 1,
-                                    "page_end": end,
-                                    "page_offset": start,
-                                    "source_uri": source_uri,
-                                    "parser_id": "docling",
-                                    "processing_profile": processing_profile,
-                                    "chunker": "hybrid",
-                                }
-                                segment_uri = (
-                                    f"{source_uri}#oracle-pages={start + 1}-{end}"
-                                    f"&generation={generation_id}"
+                                await asyncio.to_thread(
+                                    _store_cached_docling, cache_path, docling_document
                                 )
-                                document = await rag.import_document(
-                                    docling_document,
-                                    chunks,
-                                    uri=segment_uri,
-                                    title=source.name,
-                                    metadata=metadata,
+                                converted_segments += 1
+                            else:
+                                cache_hits += 1
+                            chunks = _content_chunks(await segment_rag.chunk(docling_document))
+                            document_metadata = {
+                                "logical_document_id": logical_id,
+                                "generation_id": generation_id,
+                                "segment_index": segment_index,
+                                "page_start": start + 1,
+                                "page_end": end,
+                                "page_offset": start,
+                                "source_uri": source_uri,
+                                "parser_id": "docling",
+                                "processing_profile": processing_profile,
+                                "chunker": "hybrid",
+                                "fingerprint": document_fingerprint,
+                                "page_kind": "scanned" if scanned else "text",
+                                "cache_key": cache_key,
+                                **_book_payload(book_metadata),
+                            }
+                            segment_uri = (
+                                f"{source_uri}#oracle-pages={start + 1}-{end}"
+                                f"&generation={generation_id}"
+                            )
+                            document = await segment_rag.import_document(
+                                docling_document,
+                                chunks,
+                                uri=segment_uri,
+                                title=(document_metadata.get("book_title") or source.name),
+                                metadata=document_metadata,
+                            )
+                            segment_manifest = [
+                                _chunk_manifest(
+                                    chunk,
+                                    page_offset=start,
+                                    segment_index=segment_index,
                                 )
-                            finally:
-                                temporary_path.unlink(missing_ok=True)
-                    except Exception as exc:
-                        if segment_size > 1 and _looks_like_memory_pressure(exc):
-                            segment_size = max(1, segment_size // 2)
-                            continue
-                        raise
-                    document_id = str(_value(document, "id", "document_id", default=""))
-                    imported_ids.append(document_id)
-                    segments.append(
-                        {
-                            "document_id": document_id,
-                            "segment_index": segment_index,
-                            "page_start": start + 1,
-                            "page_end": end,
-                        }
-                    )
-                    segment_index += 1
-                    if end == total_pages:
-                        break
-                    # Keep one boundary page in both segments. Citation
-                    # normalization and adapter-level deduplication hide the
-                    # overlap while preserving long tables and sections.
-                    start = max(start + 1, end - 1)
-            except Exception:
-                for document_id in reversed(imported_ids):
-                    with suppress(Exception):
-                        await rag.delete_document(document_id)
+                                for chunk in chunks
+                            ]
+                            for item in segment_manifest:
+                                labels = {label.casefold() for label in item["labels"]}
+                                quality_counts["chunks"] += 1
+                                quality_counts["tables"] += bool(labels & {"table", "table_item"})
+                                quality_counts["formulas"] += bool(labels & {"formula", "equation"})
+                                quality_counts["pictures"] += bool(
+                                    labels & {"picture", "figure", "image"}
+                                )
+                                quality_counts["refs"] += bool(item["doc_item_refs"])
+                            manifest_chunks.extend(segment_manifest)
+                    finally:
+                        temporary_path.unlink(missing_ok=True)
+            except Exception as exc:
+                if segment_size > 1 and _looks_like_memory_pressure(exc):
+                    text_size = max(1, text_size // 2)
+                    scan_size = max(1, scan_size // 2)
+                    continue
                 raise
-            # Only retire the previous generation after every new segment is
-            # searchable. A failed update therefore leaves the old book intact.
+            document_id = str(_value(document, "id", "document_id", default=""))
+            imported_ids.append(document_id)
+            segment = {
+                "document_id": document_id,
+                "segment_index": segment_index,
+                "page_start": start + 1,
+                "page_end": end,
+                "fingerprint": document_fingerprint,
+                "generation_id": generation_id,
+                "status": "committed",
+                "metadata": {
+                    "cache_hit": cache_hit,
+                    "cache_key": cache_key,
+                    "cache_path": str(cache_path),
+                    "page_kind": "scanned" if scanned else "text",
+                    "chunk_manifest": segment_manifest,
+                },
+            }
+            segments.append(segment)
+            if on_segment is not None:
+                await on_segment(segment)
+            segment_index += 1
+            if end == total_pages:
+                break
+            # Keep one boundary page in both segments. Citation
+            # normalization and adapter-level deduplication hide the
+            # overlap while preserving long tables and sections.
+            start = end if kind_boundary else max(start + 1, end - 1)
+        # Only retire the previous generation after every new segment is
+        # searchable. Interrupted work remains staged and can be resumed.
+        async with self._client(database) as rag:
             for document_id in old_document_ids:
                 with suppress(Exception):
                     await rag.delete_document(document_id)
+        await asyncio.to_thread(_prune_cache, _cache_file(database, "x").parent)
+        provenance_coverage = quality_counts["refs"] / max(quality_counts["chunks"], 1)
+        quality = DocumentQuality(
+            score=max(0.0, min(1.0, 0.75 + 0.25 * provenance_coverage)),
+            pages_total=total_pages,
+            native_text_pages=total_pages - sum(scanned_pages),
+            ocr_pages=sum(scanned_pages),
+            chunks=quality_counts["chunks"],
+            tables=quality_counts["tables"],
+            formulas=quality_counts["formulas"],
+            pictures=quality_counts["pictures"],
+            provenance_coverage=provenance_coverage,
+            issues=(
+                ["Ein Teil der Chunks besitzt keine elementgenaue PDF-Provenienz."]
+                if provenance_coverage < 0.9
+                else []
+            ),
+        )
         return {
             "source": str(source),
             "source_uri": source_uri,
@@ -445,9 +825,27 @@ class HaikuV070Adapter(HaikuAdapter):
             "segment_document_ids": imported_ids,
             "segments": segments,
             "page_count": total_pages,
-            "scanned": scanned,
+            "scanned": any(scanned_pages),
+            "scanned_pages": sum(scanned_pages),
             "parser_id": "docling",
             "processing_profile": processing_profile,
+            "fingerprint": document_fingerprint,
+            "book_metadata": (book_metadata.model_dump(mode="json") if book_metadata else None),
+            "original_source": original_source or str(source),
+            "managed_source": str(source),
+            "pipeline_version": "vanilla-haiku-public-api-v1",
+            "quality": quality.model_dump(mode="json"),
+            "chunk_manifest": manifest_chunks,
+            "cache_status": (
+                "hit" if converted_segments == 0 else "miss" if cache_hits == 0 else "mixed"
+            ),
+            "pipeline_stats": {
+                "cache_hits": cache_hits,
+                "converted_segments": converted_segments,
+                "ocr_pages": sum(scanned_pages),
+                "text_pages": total_pages - sum(scanned_pages),
+                "vl_pages": 0,
+            },
         }
 
     async def delete_document(self, database: Path, document_id: str) -> bool:
@@ -456,10 +854,23 @@ class HaikuV070Adapter(HaikuAdapter):
             result = await rag.delete_document(document_id)
         return bool(result)
 
-    async def search(self, database: Path, query: str, limit: int) -> list[SearchHit]:
+    async def search(
+        self,
+        database: Path,
+        query: str,
+        limit: int,
+        *,
+        document_filter: str | None = None,
+        search_type: str = "hybrid",
+    ) -> list[SearchHit]:
         await self.ensure_database(database)
         async with self._client(database) as rag:
-            results = await rag.search(query, limit=limit)
+            results = await rag.search(
+                query,
+                limit=limit,
+                search_type=search_type,
+                filter=document_filter,
+            )
         hits: list[SearchHit] = []
         for index, result in enumerate(results):
             pages = _int_list(_value(result, "page_numbers", "pages", default=[]))
@@ -482,6 +893,7 @@ class HaikuV070Adapter(HaikuAdapter):
                     document_id=_value(result, "document_id"),
                     document_title=_value(result, "document_title", "title"),
                     metadata=metadata,
+                    search_type=search_type,
                 )
             )
         return hits
@@ -490,6 +902,11 @@ class HaikuV070Adapter(HaikuAdapter):
         chunk_id = str(_value(cite, "chunk_id", "id", default=f"chunk-{index}"))
         document_id = _value(cite, "document_id")
         document_meta = dict(_value(cite, "document_meta", default={}) or {})
+        raw_book = document_meta.get("book_metadata")
+        try:
+            book = BookMetadata.model_validate(raw_book) if raw_book else None
+        except Exception:
+            book = None
         page_offset = int(document_meta.get("page_offset", 0) or 0)
         logical_id = document_meta.get("logical_document_id") or document_id
         pages = [page + page_offset for page in _int_list(_value(cite, "page_numbers", "pages"))]
@@ -552,10 +969,18 @@ class HaikuV070Adapter(HaikuAdapter):
             excerpt=str(_value(cite, "content", "excerpt", default="")),
             retrieval_rank=index + 1,
             rerank_score=_value(cite, "score", "rerank_score"),
+            book=book,
+            verification_status="provider-grounded",
         )
 
     async def ask(
-        self, database: Path, question: str, images: list[str] | None = None
+        self,
+        database: Path,
+        question: str,
+        images: list[str] | None = None,
+        *,
+        document_filter: str | None = None,
+        evidence_mode: EvidenceMode = EvidenceMode.STRICT,
     ) -> tuple[str, list[Citation]]:
         await self.ensure_database(database)
         kwargs: dict[str, Any] = {}
@@ -565,7 +990,10 @@ class HaikuV070Adapter(HaikuAdapter):
                     "Die aktive Haiku-Runtime unterstuetzt keine Bildanhaenge"
                 )
             kwargs["images"] = [Path(image).read_bytes() for image in images]
-        async with self._client(database) as rag:
+        kwargs["filter"] = document_filter
+        async with self._client(
+            database, config=self._request_config(database, evidence_mode)
+        ) as rag:
             answer, raw_citations = await rag.ask(question, **kwargs)
             citations = _deduplicate_citations(
                 [await self._citation(rag, cite, index) for index, cite in enumerate(raw_citations)]
@@ -573,7 +1001,13 @@ class HaikuV070Adapter(HaikuAdapter):
         return str(answer), citations
 
     async def analyze(
-        self, database: Path, question: str, images: list[str] | None = None
+        self,
+        database: Path,
+        question: str,
+        images: list[str] | None = None,
+        *,
+        document_filter: str | None = None,
+        evidence_mode: EvidenceMode = EvidenceMode.STRICT,
     ) -> tuple[str, list[Citation]]:
         await self.ensure_database(database)
         kwargs: dict[str, Any] = {}
@@ -583,7 +1017,10 @@ class HaikuV070Adapter(HaikuAdapter):
                     "The active Haiku runtime does not support analysis images"
                 )
             kwargs["images"] = [Path(image).read_bytes() for image in images]
-        async with self._client(database) as rag:
+        kwargs["filter"] = document_filter
+        async with self._client(
+            database, config=self._request_config(database, evidence_mode)
+        ) as rag:
             result = await rag.analyze(question, **kwargs)
             answer = _value(result, "answer", default="")
             raw_citations = _value(result, "citations", default=[]) or []
@@ -591,3 +1028,27 @@ class HaikuV070Adapter(HaikuAdapter):
                 [await self._citation(rag, cite, index) for index, cite in enumerate(raw_citations)]
             )
         return str(answer), citations
+
+    async def update_document_metadata(
+        self,
+        database: Path,
+        document_ids: list[str],
+        metadata: dict[str, Any],
+    ) -> None:
+        await self.ensure_database(database)
+        async with self._client(database) as rag:
+            for document_id in document_ids:
+                document = await rag.get_document_by_id(document_id)
+                if document is None:
+                    continue
+                current = dict(_value(document, "metadata", default={}) or {})
+                current.update(_book_payload(BookMetadata.model_validate(metadata)))
+                await rag.update_document(
+                    document_id,
+                    metadata=current,
+                    title=metadata.get("title") or _value(document, "title"),
+                )
+
+
+# Kept as an import alias for third-party clients and existing test fixtures.
+HaikuV070Adapter = VanillaHaikuAdapter
