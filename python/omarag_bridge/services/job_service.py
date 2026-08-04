@@ -157,12 +157,18 @@ class JobService:
                                     "fingerprint": fingerprint,
                                 },
                             )
-                        result = dict(duplicate["result"])
-                        result["duplicate"] = True
-                        result["cache_status"] = "duplicate"
-                        imported.append(result)
-                        self.store.checkpoint(job_id, f"source-result-{index}", result)
-                        continue
+                        if policy == "skip":
+                            result = dict(duplicate["result"])
+                            result["duplicate"] = True
+                            result["cache_status"] = "duplicate"
+                            imported.append(result)
+                            self.store.checkpoint(job_id, f"source-result-{index}", result)
+                            continue
+                        # "replace" deliberately continues through the staged
+                        # generation import.  The adapter retires the previous
+                        # generation only after every replacement segment is
+                        # searchable, so a failed rebuild leaves the old book
+                        # intact.
                     progress = index / total
                     self.store.update_job(
                         job_id, progress=progress, phase="ingest", checkpoint=f"source-{index}"

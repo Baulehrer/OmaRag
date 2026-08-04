@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Oracle of Dædalus
-Comment=Offline Retrieval-Augmented Command-Line Environment
-Icon=oracle-of-daedalus
+Name=OmaRag
+Comment=Oracle of Metis & Aletheia — local answers from your books
+Icon=omarag
 Exec=oracle
 Terminal=true
 Categories=Education;

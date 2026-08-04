@@ -1,25 +1,25 @@
 <p align="center">
-  <img src="assets/oracle-of-daedalus.svg" width="128" alt="Oracle of Daedalus mirrored oracle mark">
+  <img src="assets/omarag.svg" width="128" alt="OmaRag twin-oracle mark">
 </p>
 
-<h1 align="center">ORACLE OF DÆDALUS</h1>
-<p align="center"><strong>Offline Retrieval-Augmented Command-Line Environment</strong></p>
+<h1 align="center">OmaRag</h1>
+<p align="center"><strong>Oracle of Metis &amp; Aletheia</strong></p>
 <p align="center">
   Turn a folder of PDFs into a private, cited knowledge library—without leaving the terminal.
 </p>
 
 <p align="center">
-  <a href="https://github.com/Baulehrer/oracle-of-daedalus/actions/workflows/ci.yml"><img src="https://github.com/Baulehrer/oracle-of-daedalus/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Baulehrer/oracle-of-daedalus/releases/latest"><img src="https://img.shields.io/github/v/release/Baulehrer/oracle-of-daedalus?color=f38ba8" alt="Release"></a>
-  <a href="https://github.com/Baulehrer/oracle-of-daedalus/pkgs/container/oracle-of-daedalus"><img src="https://img.shields.io/badge/container-GHCR-89dceb" alt="GHCR"></a>
+  <a href="https://github.com/Baulehrer/OmaRag/actions/workflows/ci.yml"><img src="https://github.com/Baulehrer/OmaRag/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Baulehrer/OmaRag/releases/latest"><img src="https://img.shields.io/github/v/release/Baulehrer/OmaRag?color=f38ba8" alt="Release"></a>
+  <a href="https://github.com/Baulehrer/OmaRag/pkgs/container/omarag"><img src="https://img.shields.io/badge/container-GHCR-89dceb" alt="GHCR"></a>
   <img src="https://img.shields.io/badge/Haiku%20RAG-vanilla%20latest--gated-a6e3a1" alt="Vanilla Haiku RAG latest gated">
 </p>
 
-![Oracle of Dædalus dashboard](docs/screenshots/dashboard.png)
+![OmaRag dashboard](docs/screenshots/dashboard.png)
 
 ## Your books. Your machine. Answers with receipts.
 
-Oracle of Dædalus is a clean, three-pane terminal workbench for local knowledge. The left sidebar
+OmaRag is a clean, three-pane terminal workbench for local knowledge. The left sidebar
 moves between Chat, Library, Models and Settings, the center holds every action and setting, and the
 right inspector keeps sources or read-only technical detail in view. Select PDFs or whole folders, let the library index in
 the background, then ask questions in plain language. Every answer stays connected to its
@@ -56,6 +56,8 @@ evidence: title, page, excerpt, layout position and—where available—the orig
 - **Terminal-native, not keyboard-exclusive.** Tab cycles Sidebar, Workspace and Inspector;
   arrow navigation, direct shortcuts, Shift+Arrow role switching, mouse focus, scrolling and
   clickable actions all work together.
+- **At home on Omarchy.** The optional Omarchy System palette follows the active Hyprland desktop
+  colors automatically and falls back safely on other Linux desktops.
 - **Local-first.** The bridge talks to a normal, unmodified Haiku RAG runtime and a local
   Ollama service. Libraries, models and tokens remain on your machine.
 
@@ -66,7 +68,7 @@ evidence: title, page, excerpt, layout position and—where available—the orig
 | [![PDF and folder browser](docs/screenshots/knowledge-browser.png)](docs/screenshots/knowledge-browser.png) | [![Models and presets](docs/screenshots/model-foundry.png)](docs/screenshots/model-foundry.png) |
 | Select several PDFs or folders with `Space`, review once, then index. | Install Fast, Balanced or Quality, or tune the four model roles yourself. |
 
-| Keyboard and mouse help | Fourteen local themes |
+| Keyboard and mouse help | Fourteen local themes + Omarchy System |
 |---|---|
 | [![Keyboard and mouse help](docs/screenshots/keyboard-and-mouse.png)](docs/screenshots/keyboard-and-mouse.png) | [![Theme browser](docs/screenshots/themes.png)](docs/screenshots/themes.png) |
 
@@ -75,7 +77,7 @@ evidence: title, page, excerpt, layout position and—where available—the orig
 Linux x86_64, Ollama and a working internet connection for the first model download are required.
 
 ```bash
-curl -fsSL https://github.com/Baulehrer/oracle-of-daedalus/releases/latest/download/install.sh \
+curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh \
   | sh
 oracle
 ```
@@ -88,7 +90,7 @@ version without the timer with `--no-auto-update`.
 Prefer to inspect first?
 
 ```bash
-curl -fLO https://github.com/Baulehrer/oracle-of-daedalus/releases/latest/download/install.sh
+curl -fLO https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh
 less install.sh
 sh install.sh
 ```
@@ -99,8 +101,8 @@ The AppImage is the small console client. It connects to the daemon installed ab
 Docker-hosted daemon; it intentionally does not bundle Python, Haiku, models or your libraries.
 
 ```bash
-chmod +x Oracle-of-Daedalus-0.8.0-x86_64.AppImage
-./Oracle-of-Daedalus-0.8.0-x86_64.AppImage
+chmod +x OmaRag-0.9.0-x86_64.AppImage
+./OmaRag-0.9.0-x86_64.AppImage
 ```
 
 It contains GitHub zsync update metadata, so `AppImageUpdate` can apply binary-delta updates when
@@ -144,8 +146,8 @@ more than the smallest idle footprint.
 | `Ctrl+M` | Open the integrated model catalog |
 | `Ctrl+P` / `:` | Open the command palette |
 | `/` | Search the active view |
-| `Ctrl+T` | Cycle Aqua Slate, One Dark, Catppuccin Mocha and Solarized Lite |
-| `Ctrl+C` | Exit Oracle cleanly |
+| `Ctrl+T` | Cycle all palettes, including automatic Omarchy system colors |
+| `Ctrl+C` | Exit OmaRag cleanly |
 | `?` | Show contextual help |
 | `Ctrl+Z` | Undo the latest supported library action |
 | Mouse | Focus, choose, scroll and activate visible controls |
@@ -156,10 +158,10 @@ Questions, indexing and model inference run locally. Network access is only need
 the model foundry to download something, when the updater checks GitHub, or when you explicitly
 configure a remote provider. The default library profile does none of those during normal use.
 
-Oracle keeps operational metadata in SQLite and lets **Vanilla Haiku RAG** remain the sole owner
+OmaRag keeps operational metadata in SQLite and lets **Vanilla Haiku RAG** remain the sole owner
 of the vector database. It does not patch or fork Haiku's retrieval behavior.
 
-## Release 0.8 boundaries
+## Release 0.9 boundaries
 
 - Linux x86_64 is the supported packaged platform.
 - The backend is local-first. Authenticated citation previews now work across the API; opening the
@@ -169,11 +171,11 @@ of the vector database. It does not patch or fork Haiku's retrieval behavior.
 - Model compatibility is a conservative estimate, not a promise that another desktop workload
   cannot consume the remaining RAM or VRAM.
 
-Found a sharp edge? [Open an issue](https://github.com/Baulehrer/oracle-of-daedalus/issues) with
+Found a sharp edge? [Open an issue](https://github.com/Baulehrer/OmaRag/issues) with
 the visible error and the `Indexing` entry—never attach your private PDFs or auth token.
 
 The TUI layout and quiet aqua-slate direction are inspired by
-[SOAP](https://github.com/GhifariArsa/soap); Oracle's interaction model and implementation are its
+[SOAP](https://github.com/GhifariArsa/soap); OmaRag's interaction model and implementation are its
 own.
 
 ## License

@@ -12,10 +12,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN /opt/omarag-venv/bin/python -m omarag_bridge.compat_probe
 
 FROM python:3.12-slim AS runtime
-ARG VERSION=0.8.0
-LABEL org.opencontainers.image.title="Oracle of Daedalus" \
-      org.opencontainers.image.description="Offline Retrieval-Augmented Command-Line Environment" \
-      org.opencontainers.image.source="https://github.com/Baulehrer/oracle-of-daedalus" \
+ARG VERSION=0.9.0
+LABEL org.opencontainers.image.title="OmaRag" \
+      org.opencontainers.image.description="Oracle of Metis & Aletheia — local evidence workbench" \
+      org.opencontainers.image.source="https://github.com/Baulehrer/OmaRag" \
       org.opencontainers.image.version="$VERSION" \
       org.opencontainers.image.licenses="MIT"
 RUN apt-get update \

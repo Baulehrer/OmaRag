@@ -43,11 +43,13 @@ class FakeHaikuAdapter:
     def __init__(self) -> None:
         self.ask_calls = 0
         self.analyze_calls = 0
+        self.ingest_calls = 0
 
     async def ensure_database(self, database: Path) -> None:
         database.mkdir(parents=True, exist_ok=True)
 
     async def ingest(self, database: Path, source: str, **options: Any) -> dict[str, Any]:
+        self.ingest_calls += 1
         await self.ensure_database(database)
         metadata = options.get("metadata")
         return {

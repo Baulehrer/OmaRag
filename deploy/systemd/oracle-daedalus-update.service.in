@@ -1,5 +1,5 @@
 [Unit]
-Description=Update Oracle of Daedalus
+Description=Update OmaRag
 After=network-online.target
 
 [Service]

@@ -13,14 +13,14 @@ use futures_util::StreamExt;
 use image::{ImageReader, Pixel, Rgba};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use omarag_app::{
-    Action, AppState, DocumentInsight, HardwareProfile, ImportPreflight, ModelCatalogResponse,
-    ModelCategory, ModelSource, Notification, NotificationLevel, Overlay, PendingBookReview,
-    UiPreferences, UndoAction, update,
+    Action, AppState, DocumentInsight, HardwareProfile, ImportPreflight, InputMode,
+    ModelCatalogResponse, ModelCategory, ModelSource, Notification, NotificationLevel, Overlay,
+    PendingBookReview, UiPreferences, UndoAction, update,
 };
 use omarag_client::{HttpOmaRagClient, OmaRagClient};
 use omarag_domain::{
     BackupSummary, CommitImportRequest, ConfigDocument, DocumentSummary, DomainEvent,
-    EventSubscription, JobId, JobSnapshot, JobStatus, PreflightImportRequest, QualityReport,
+    EventSubscription, JobId, JobSnapshot, PreflightImportRequest, QualityReport,
     RetrievalExplanation, RunId, RunRequest, SourceDefinition, WorkspaceId, WorkspaceManifest,
     WorkspaceSummary,
 };
@@ -29,7 +29,7 @@ use omarag_tui::{
     input::{
         JobCommand, UiCommand, expand_import_paths, fuzzy_score, handle_event, refresh_file_browser,
     },
-    render_with_previews,
+    related_image_refs, render_with_previews,
 };
 use ratatui_image::picker::Picker;
 use serde::Deserialize;
@@ -51,10 +51,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(
-    version,
-    about = "Oracle of Daedalus · Offline Retrieval-Augmented Command-Line Environment"
-)]
+#[command(version, about = "OmaRag · Oracle of Metis & Aletheia")]
 struct Args {
     #[arg(long, env = "OMARAG_URL", default_value = "http://127.0.0.1:8765")]
     url: Url,
@@ -107,6 +104,7 @@ struct PreviewScope {
 #[derive(Debug, Clone)]
 struct CitationPreviewTarget {
     citation_index: usize,
+    page_index: usize,
     path: String,
     page: u32,
     remote_preview: bool,
@@ -246,7 +244,7 @@ struct PullProgress {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Oracle of Daedalus is an explicitly themed full-screen application. Some desktop
+    // OmaRag is an explicitly themed full-screen application. Some desktop
     // sessions export NO_COLOR globally; override that preference for this
     // process so theme selection and keyboard focus remain visible.
     force_color_output(true);
@@ -255,6 +253,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    Theme::refresh_omarchy();
     let model_api = ModelApi::new(args.url.clone(), args.token.clone())?;
     let client = Arc::new(HttpOmaRagClient::new(args.url, args.token)?);
     let mut state = AppState::default();
@@ -268,7 +267,7 @@ async fn main() -> Result<()> {
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     execute!(
         stdout(),
-        SetTitle("Oracle of Daedalus"),
+        SetTitle("OmaRag · Oracle of Metis & Aletheia"),
         EnableBracketedPaste,
         EnableMouseCapture
     )
@@ -301,7 +300,9 @@ async fn main() -> Result<()> {
     )
     .ok();
     let mut watched_directory = None::<std::path::PathBuf>;
-    let mut redraw = tokio::time::interval(Duration::from_millis(250));
+    // A calm global cadence keeps Metis and Aletheia alive even while the
+    // application is idle, without turning the terminal into a busy renderer.
+    let mut redraw = tokio::time::interval(Duration::from_millis(600));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut jobs_refresh = tokio::time::interval(Duration::from_secs(5));
     let mut monitor_refresh = tokio::time::interval(Duration::from_secs(2));
@@ -341,7 +342,7 @@ async fn main() -> Result<()> {
                 render_with_previews(frame, &state, &theme, &metrics, &mut chat_previews)
             })?;
             tokio::select! {
-                _ = redraw.tick(), if animations_active(&state) => {
+                _ = redraw.tick() => {
                     metrics.animation_tick = metrics.animation_tick.wrapping_add(1);
                 }
                 _ = jobs_refresh.tick() => {
@@ -353,6 +354,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 _ = monitor_refresh.tick() => {
+                    Theme::refresh_omarchy();
                     system.refresh_cpu_usage();
                     system.refresh_memory();
                     let loaded_models = std::mem::take(&mut metrics.loaded_models);
@@ -459,7 +461,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ = tokio::signal::ctrl_c() => {
-                    update(&mut state, Action::QuitRequested);
+                    if state.overlay == Some(Overlay::ConfirmQuit) {
+                        update(&mut state, Action::QuitRequested);
+                    } else {
+                        state.overlay = Some(Overlay::ConfirmQuit);
+                        state.input_mode = InputMode::Nav;
+                    }
                 }
             }
             if state.quit_requested {
@@ -480,21 +487,6 @@ async fn main() -> Result<()> {
     paste_result.context("Could not disable bracketed paste")?;
     restore_result.context("Could not restore terminal")?;
     result
-}
-
-fn animations_active(state: &AppState) -> bool {
-    state.chat.request_pending
-        || state.chat.active_run.is_some()
-        || state.search.loading
-        || state.library.import_pending
-        || state.model_manager.busy
-        || state.operation.active
-        || state.jobs.values().any(|job| {
-            matches!(
-                job.status,
-                JobStatus::Queued | JobStatus::Running | JobStatus::PauseRequested
-            )
-        })
 }
 
 fn sync_directory_watcher(
@@ -1534,36 +1526,39 @@ fn citation_source_path(state: &AppState, citation: &omarag_domain::Citation) ->
 }
 
 fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
-    let citation_index = state.citation_cursor;
-    let Some(citation) = state.chat.citations.get(citation_index) else {
-        return Vec::new();
-    };
-    let page_index = state
-        .citation_page_cursor
-        .min(citation.pages.len().saturating_sub(1));
-    let Some(page) = citation.pages.get(page_index).copied() else {
-        return Vec::new();
-    };
-    let Some(path) = citation_source_path(state, citation) else {
-        return Vec::new();
-    };
-    let source_title = citation.document_title.as_deref().unwrap_or("Source");
-    let title = if citation.picture_refs.is_empty() {
-        format!("{source_title} · p.{page}")
-    } else {
-        format!("Figure · {source_title} · p.{page}")
-    };
-    Some(CitationPreviewTarget {
-        citation_index,
-        path,
-        page,
-        remote_preview: page_index == 0,
-        title,
-        primary_anchors: citation.primary_anchors.clone(),
-        context_anchors: citation.context_anchors.clone(),
-    })
-    .into_iter()
-    .collect()
+    related_image_refs(state)
+        .into_iter()
+        .filter_map(|(citation_index, page_index, page)| {
+            let citation = state.chat.citations.get(citation_index)?;
+            let path = citation_source_path(state, citation)?;
+            let source_title = citation.document_title.as_deref().unwrap_or("Source");
+            let title = if citation.picture_refs.is_empty() {
+                format!("{source_title} · p.{page}")
+            } else {
+                format!("Figure · {source_title} · p.{page}")
+            };
+            Some(CitationPreviewTarget {
+                citation_index,
+                page_index,
+                path,
+                page,
+                remote_preview: page_index == 0,
+                title,
+                primary_anchors: citation
+                    .primary_anchors
+                    .iter()
+                    .filter(|anchor| anchor.page == page)
+                    .cloned()
+                    .collect(),
+                context_anchors: citation
+                    .context_anchors
+                    .iter()
+                    .filter(|anchor| anchor.page == page)
+                    .cloned()
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn schedule_chat_previews(
@@ -1599,6 +1594,7 @@ fn schedule_chat_previews(
     for target in targets {
         let CitationPreviewTarget {
             citation_index,
+            page_index,
             path,
             page,
             remote_preview,
@@ -1650,6 +1646,8 @@ fn schedule_chat_previews(
                         .map_err(|error| error.to_string())?
                 };
                 Ok(ChatImagePreview::new(
+                    citation_index,
+                    page_index,
                     path,
                     page,
                     title,

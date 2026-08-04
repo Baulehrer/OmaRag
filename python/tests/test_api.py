@@ -257,6 +257,7 @@ async def test_workspace_lifecycle_etag_clone_and_physical_delete(
     config = (workspace_path / "haiku.rag.yaml").read_text(encoding="utf-8")
     assert "qwen3-embedding:0.6b" in config
     assert "chunk_size: 384" in config
+    assert "chunking_use_markdown_tables: true" in config
     assert "split_pages: 25" in config
     assert "mmarco-mMiniLMv2-L12-H384-v1" in config
     assert "qwen3.5:4b-q4_K_M" in config
@@ -522,3 +523,35 @@ async def test_workspace_feature_vertical_slices(
     assert restored.json()["id"] == backup.json()["id"]
     assert not marker.exists()
     assert len((await client.get(f"/v1/workspaces/{workspace_id}/backups")).json()) == 2
+
+
+async def test_duplicate_replace_rebuilds_the_existing_document(
+    client: httpx2.AsyncClient,
+    app: FastAPI,
+    workspace: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    workspace_id = str(workspace["id"])
+    source = tmp_path / "mixed-table.pdf"
+    source.write_bytes(b"same textbook content")
+
+    async def ingest(key: str, policy: str) -> dict[str, object]:
+        started = await client.post(
+            f"/v1/workspaces/{workspace_id}/documents/ingest",
+            headers={"Idempotency-Key": key},
+            json={
+                "sources": [{"type": "file", "path": str(source)}],
+                "duplicate_policy": policy,
+            },
+        )
+        assert started.status_code == 202
+        for _ in range(50):
+            job = (await client.get(f"/v1/jobs/{started.json()['id']}")).json()
+            if job["status"] in {"completed", "failed"}:
+                return job
+            await asyncio.sleep(0.01)
+        pytest.fail("ingest did not complete")
+
+    assert (await ingest("initial-table-import", "review"))["status"] == "completed"
+    assert (await ingest("replacement-table-import", "replace"))["status"] == "completed"
+    assert app.state.services.adapter.ingest_calls == 2

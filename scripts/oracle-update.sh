@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${ORACLE_REPOSITORY:-Baulehrer/oracle-of-daedalus}
+REPOSITORY=${OMARAG_REPOSITORY:-${ORACLE_REPOSITORY:-Baulehrer/OmaRag}}
 API_URL="https://api.github.com/repos/$REPOSITORY/releases/latest"
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PREFIX=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+PREFIX=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
 VERSION_FILE="$PREFIX/share/oracle-of-daedalus/VERSION"
 CURRENT_VERSION=${ORACLE_VERSION:-$(cat "$VERSION_FILE" 2>/dev/null || printf '0.0.0')}
 ASSUME_YES=0
@@ -23,7 +23,7 @@ if [ -z "$LATEST_VERSION" ]; then
     exit 1
 fi
 if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
-    printf 'Oracle of Dædalus %s is already current.\n' "$CURRENT_VERSION"
+    printf 'OmaRag %s is already current.\n' "$CURRENT_VERSION"
     exit 0
 fi
 

@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut browser = dashboard.clone();
     browser.overlay = Some(Overlay::FileBrowser);
-    browser.file_browser.current_dir = "/home/daedalus/Knowledge".into();
+    browser.file_browser.current_dir = "/home/metis/Knowledge".into();
     browser.file_browser.entries = vec![
         entry("..", true),
         entry("Concrete", true),
@@ -62,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entry("Materials and Durability.pdf", false),
     ];
     browser.file_browser.selected = vec![
-        "/home/daedalus/Knowledge/Concrete Design Handbook.pdf".into(),
-        "/home/daedalus/Knowledge/Eurocode 2.pdf".into(),
+        "/home/metis/Knowledge/Concrete Design Handbook.pdf".into(),
+        "/home/metis/Knowledge/Eurocode 2.pdf".into(),
     ];
     browser.file_browser.cursor = 4;
     snapshot(&browser, &demo_metrics(), "knowledge-browser", &output)?;
@@ -74,8 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut themes = demo_state();
     themes.navigate_view(View::Themes);
-    themes.theme_index = 8;
-    themes.theme_cursor = 8;
+    themes.theme_index = Theme::COUNT - 1;
+    themes.theme_cursor = Theme::COUNT - 1;
     snapshot(&themes, &demo_metrics(), "themes", &output)?;
     Ok(())
 }
@@ -87,7 +87,7 @@ fn demo_state() -> AppState {
         workspaces: vec![WorkspaceSummary {
             id: "ws-concrete".into(),
             name: "Concrete Atlas".into(),
-            path: "/home/daedalus/.local/share/oracle/libraries/concrete".into(),
+            path: "/home/metis/.local/share/omarag/libraries/concrete".into(),
             read_only: false,
             updated_at: "2026-07-26T20:00:00Z".into(),
             etag: "demo".into(),
@@ -103,20 +103,62 @@ fn demo_state() -> AppState {
         .chat
         .question
         .set("What controls concrete durability?");
-    state.chat.answer = "Reinforced concrete durability depends on exposure class, cover, crack control and execution quality. The indexed handbook recommends checking these as one system rather than isolated values.".into();
-    state.chat.citations = vec![Citation {
-        evidence_id: Some("E1".into()),
-        chunk_id: "durability-42".into(),
-        chunk_ids: vec!["durability-42".into()],
-        document_id: Some("concrete-design-handbook".into()),
-        logical_document_id: Some("concrete-design-handbook".into()),
-        source_uri: Some("/home/daedalus/Knowledge/Concrete Design Handbook.pdf".into()),
-        document_title: Some("Concrete Design Handbook".into()),
-        pages: vec![184],
+    state.chat.answer = "**Reinforced concrete durability** depends on **exposure class**, **cover**, crack control and execution quality [E1]. The indexed handbook recommends checking these as one system rather than isolated values [E2].".into();
+    state.chat.citations = vec![
+        demo_citation(
+            "E1",
+            "concrete-design-handbook",
+            "Concrete Design Handbook",
+            "/home/metis/Knowledge/Concrete Design Handbook.pdf",
+            &[184, 185],
+            true,
+        ),
+        demo_citation(
+            "E2",
+            "eurocode-2",
+            "Eurocode 2",
+            "/home/metis/Knowledge/Eurocode 2.pdf",
+            &[72, 73],
+            false,
+        ),
+    ];
+    state.chat.receipt = Some(RunReceipt {
+        session_id: "conversation-demo".into(),
+        turn: 2,
+        cache_status: AnswerCacheStatus::Hit,
+        total_ms: 18.0,
+        source_count: 2,
+        reused_source_count: 1,
+        new_source_count: 1,
+        source_check: SourceCheck::Verified,
+    });
+    state
+}
+
+fn demo_citation(
+    evidence_id: &str,
+    document_id: &str,
+    title: &str,
+    source: &str,
+    pages: &[u32],
+    has_picture: bool,
+) -> Citation {
+    Citation {
+        evidence_id: Some(evidence_id.into()),
+        chunk_id: format!("{document_id}-chunk"),
+        chunk_ids: vec![format!("{document_id}-chunk")],
+        document_id: Some(document_id.into()),
+        logical_document_id: Some(document_id.into()),
+        source_uri: Some(source.into()),
+        document_title: Some(title.into()),
+        pages: pages.to_vec(),
         headings: vec!["Durability design".into()],
-        element_types: vec!["text".into()],
+        element_types: vec![if has_picture { "picture" } else { "text" }.into()],
         doc_item_refs: Vec::new(),
-        picture_refs: Vec::new(),
+        picture_refs: has_picture
+            .then(|| "#/pictures/0".into())
+            .into_iter()
+            .collect(),
         primary_anchors: Vec::new(),
         context_anchors: Vec::new(),
         excerpt: "Durability design combines exposure class, cover and crack control.".into(),
@@ -124,25 +166,14 @@ fn demo_state() -> AppState {
         rerank_score: Some(0.94),
         book: None,
         verification_status: "verified".into(),
-    }];
-    state.chat.receipt = Some(RunReceipt {
-        session_id: "conversation-demo".into(),
-        turn: 2,
-        cache_status: AnswerCacheStatus::Hit,
-        total_ms: 18.0,
-        source_count: 1,
-        reused_source_count: 1,
-        new_source_count: 0,
-        source_check: SourceCheck::Verified,
-    });
-    state
+    }
 }
 
 fn document(title: &str, pages: u32) -> DocumentSummary {
     DocumentSummary {
         id: title.to_lowercase().replace(' ', "-"),
         title: title.into(),
-        source: format!("/home/daedalus/Knowledge/{title}"),
+        source: format!("/home/metis/Knowledge/{title}"),
         segment_document_ids: vec![],
         page_count: Some(pages),
         parser_id: "docling".into(),
@@ -195,7 +226,7 @@ fn package(rank: u8, name: &str, summary: &str) -> ModelPackage {
 
 fn entry(name: &str, is_dir: bool) -> FileBrowserEntry {
     FileBrowserEntry {
-        path: format!("/home/daedalus/Knowledge/{name}"),
+        path: format!("/home/metis/Knowledge/{name}"),
         name: name.into(),
         is_dir,
     }

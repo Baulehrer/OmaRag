@@ -1,11 +1,11 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-0.8.0}
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+VERSION=${VERSION:-0.9.0}
 ARCH=${ARCH:-x86_64}
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/dist"}
-STAGING="$OUTPUT_DIR/oracle-of-daedalus-$VERSION-linux-$ARCH"
+STAGING="$OUTPUT_DIR/omarag-$VERSION-linux-$ARCH"
 
 mkdir -p "$OUTPUT_DIR"
 rm -rf "$STAGING"
@@ -23,16 +23,16 @@ install -m644 "$ROOT_DIR/deploy/systemd/oracle-daedalus-update.timer" \
     "$STAGING/oracle-daedalus-update.timer"
 
 tar -C "$STAGING" -czf \
-    "$OUTPUT_DIR/oracle-of-daedalus-$VERSION-linux-$ARCH.tar.gz" .
+    "$OUTPUT_DIR/omarag-$VERSION-linux-$ARCH.tar.gz" .
 uv build --project "$ROOT_DIR/python" --wheel --out-dir "$OUTPUT_DIR"
 VERSION=$VERSION ARCH=$ARCH "$ROOT_DIR/scripts/build-appimage.sh" \
     "$ROOT_DIR/target/release/omarag" "$OUTPUT_DIR"
 install -m755 "$ROOT_DIR/scripts/install.sh" "$OUTPUT_DIR/install.sh"
 
 (cd "$OUTPUT_DIR" && sha256sum \
-    "oracle-of-daedalus-$VERSION-linux-$ARCH.tar.gz" \
+    "omarag-$VERSION-linux-$ARCH.tar.gz" \
     "omarag_bridge-$VERSION-py3-none-any.whl" \
-    "Oracle-of-Daedalus-$VERSION-$ARCH.AppImage" \
-    "Oracle-of-Daedalus-$VERSION-$ARCH.AppImage.zsync" \
+    "OmaRag-$VERSION-$ARCH.AppImage" \
+    "OmaRag-$VERSION-$ARCH.AppImage.zsync" \
     install.sh > SHA256SUMS)
 printf 'Release files are ready in %s\n' "$OUTPUT_DIR"

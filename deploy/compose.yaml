@@ -3,7 +3,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: ghcr.io/baulehrer/oracle-of-daedalus:0.8.0
+    image: ghcr.io/baulehrer/omarag:0.9.0
     command:
       - --host
       - 0.0.0.0

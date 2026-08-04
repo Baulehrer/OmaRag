@@ -10,7 +10,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Scriptable Oracle of Daedalus client")]
+#[command(version, about = "Scriptable OmaRag client")]
 struct Args {
     #[arg(long, env = "OMARAG_URL", default_value = "http://127.0.0.1:8765")]
     url: Url,
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
                 print_json(&meta)?;
             } else {
                 println!(
-                    "Oracle of Daedalus {} · API {}",
+                    "OmaRag {} · Oracle of Metis & Aletheia · API {}",
                     meta.omarag_version, meta.api_version
                 );
                 println!("Backend: {}", meta.backend_id);

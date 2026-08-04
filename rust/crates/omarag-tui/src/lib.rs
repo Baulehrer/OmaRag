@@ -2,9 +2,9 @@ pub mod input;
 
 use input::{filtered_palette_commands, fuzzy_score};
 use omarag_app::{
-    AppState, EditorState, FocusPane, InputMode, InteractionLevel, LibraryFilter, LibrarySort,
-    ModelCatalogEntry, ModelFit, ModelPackage, ModelSource, Overlay, PrimarySection, THEME_COUNT,
-    View, WorkspaceProfile,
+    AppState, ChatTextSelection, ConnectionState, EditorState, FocusPane, InputMode,
+    InteractionLevel, LibraryFilter, LibrarySort, ModelCatalogEntry, ModelFit, ModelPackage,
+    ModelSource, Overlay, PrimarySection, THEME_COUNT, View, WorkspaceProfile,
 };
 #[cfg(test)]
 use omarag_app::{ModelCategory, ModelQuantization};
@@ -25,6 +25,13 @@ use ratatui_image::{
     thread::{ResizeRequest, ResizeResponse, ThreadProtocol},
 };
 use ratatui_textarea::{CursorMove, TextArea};
+use regex::Regex;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{OnceLock, RwLock},
+};
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -48,7 +55,7 @@ pub struct Theme {
 impl Theme {
     pub const COUNT: usize = THEME_COUNT;
 
-    pub const fn at(index: usize) -> Self {
+    pub fn at(index: usize) -> Self {
         match index % Self::COUNT {
             0 => Self {
                 name: "Aqua Slate",
@@ -119,7 +126,7 @@ impl Theme {
                 selection: rgb(0xDDE7E5),
             },
             4 => dark_theme(
-                "Dædalus Forge",
+                "Metis Forge",
                 0x100F0D,
                 0x171512,
                 0x201C17,
@@ -217,7 +224,7 @@ impl Theme {
                 0x246B78,
                 0xD9E8E5,
             ),
-            _ => light_theme(
+            13 => light_theme(
                 "Bauhaus Signal",
                 0xF6F3EA,
                 0xEAE5D9,
@@ -228,7 +235,34 @@ impl Theme {
                 0x0057B8,
                 0xDCE7F5,
             ),
+            _ => omarchy_theme_cache()
+                .read()
+                .ok()
+                .and_then(|theme| *theme)
+                .unwrap_or_else(omarchy_fallback),
         }
+    }
+
+    /// Refresh the palette used by the automatic Omarchy theme.
+    ///
+    /// Omarchy exposes its active theme through
+    /// `~/.config/omarchy/current/theme/colors.toml`. Reading the file directly
+    /// avoids spawning a process on every redraw and also works when `omarchy`
+    /// is not on PATH (for example inside a portable AppImage).
+    pub fn refresh_omarchy() -> bool {
+        let Some(theme) = load_omarchy_theme() else {
+            return Self::omarchy_available();
+        };
+        if let Ok(mut cached) = omarchy_theme_cache().write() {
+            *cached = Some(theme);
+        }
+        true
+    }
+
+    pub fn omarchy_available() -> bool {
+        omarchy_theme_cache()
+            .read()
+            .is_ok_and(|theme| theme.is_some())
     }
 }
 
@@ -244,6 +278,100 @@ const fn rgb(hex: u32) -> Color {
         ((hex >> 8) & 0xff) as u8,
         (hex & 0xff) as u8,
     )
+}
+
+fn omarchy_theme_cache() -> &'static RwLock<Option<Theme>> {
+    static THEME: OnceLock<RwLock<Option<Theme>>> = OnceLock::new();
+    THEME.get_or_init(|| RwLock::new(None))
+}
+
+fn omarchy_fallback() -> Theme {
+    dark_theme(
+        "Omarchy System",
+        0x101218,
+        0x171A22,
+        0x1D222C,
+        0xE7EAF0,
+        0x939BAA,
+        0x3D4655,
+        0xD08770,
+        0x352A2A,
+    )
+}
+
+fn omarchy_theme_path() -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("omarchy").join("current").join("theme"))
+}
+
+fn load_omarchy_theme() -> Option<Theme> {
+    let theme_dir = omarchy_theme_path()?;
+    let palette = fs::read_to_string(theme_dir.join("colors.toml")).ok()?;
+    parse_omarchy_palette(&palette, theme_dir.join("light.mode").is_file())
+}
+
+fn parse_omarchy_palette(palette: &str, light: bool) -> Option<Theme> {
+    let color = |key: &str| {
+        palette.lines().find_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (candidate, value) = line.split_once('=')?;
+            (candidate.trim() == key)
+                .then(|| parse_hex_color(value.split(" #").next().unwrap_or(value).trim()))
+                .flatten()
+        })
+    };
+    let background = color("background")?;
+    let text = color("foreground")?;
+    let focus = color("accent").or_else(|| color("color4"))?;
+    let surface = mix_color(background, text, if light { 6 } else { 5 });
+    let panel = mix_color(background, text, if light { 3 } else { 9 });
+    let border = mix_color(background, text, 25);
+    let muted = mix_color(text, background, 38);
+    let selection = mix_color(background, focus, if light { 18 } else { 28 });
+    Some(Theme {
+        name: "Omarchy System",
+        background,
+        surface,
+        panel,
+        text,
+        muted,
+        border,
+        focus,
+        cyan: color("color6").unwrap_or(focus),
+        green: color("color2").unwrap_or(focus),
+        yellow: color("color3").unwrap_or(focus),
+        red: color("color1").unwrap_or(focus),
+        purple: color("color5").unwrap_or(focus),
+        orange: color("color9").or_else(|| color("color3")).unwrap_or(focus),
+        selection,
+    })
+}
+
+fn parse_hex_color(value: &str) -> Option<Color> {
+    let value = value.trim_matches(|character| character == '"' || character == '\'');
+    let value = value
+        .strip_prefix('#')
+        .or_else(|| value.strip_prefix("0x"))?;
+    if value.len() != 6 {
+        return None;
+    }
+    let hex = u32::from_str_radix(value, 16).ok()?;
+    Some(rgb(hex))
+}
+
+fn mix_color(left: Color, right: Color, right_percent: u16) -> Color {
+    let (Color::Rgb(lr, lg, lb), Color::Rgb(rr, rg, rb)) = (left, right) else {
+        return left;
+    };
+    let mix = |left: u8, right: u8| {
+        ((u16::from(left) * (100 - right_percent) + u16::from(right) * right_percent) / 100) as u8
+    };
+    Color::Rgb(mix(lr, rr), mix(lg, rg), mix(lb, rb))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,6 +471,8 @@ pub struct RuntimeMetrics {
 }
 
 pub struct ChatImagePreview {
+    pub citation_index: usize,
+    pub page_index: usize,
     pub pdf_path: String,
     pub page: u32,
     pub title: String,
@@ -351,7 +481,14 @@ pub struct ChatImagePreview {
 }
 
 impl ChatImagePreview {
-    pub fn new(pdf_path: String, page: u32, title: String, protocol: StatefulProtocol) -> Self {
+    pub fn new(
+        citation_index: usize,
+        page_index: usize,
+        pdf_path: String,
+        page: u32,
+        title: String,
+        protocol: StatefulProtocol,
+    ) -> Self {
         let (request_tx, request_rx) = std::sync::mpsc::channel::<ResizeRequest>();
         let (response_tx, response_rx) = std::sync::mpsc::channel::<ResizeResponse>();
         std::thread::spawn(move || {
@@ -362,6 +499,8 @@ impl ChatImagePreview {
             }
         });
         Self {
+            citation_index,
+            page_index,
             pdf_path,
             page,
             title,
@@ -433,7 +572,9 @@ fn render_header(
         || state.model_manager.busy
         || state.jobs.values().any(|job| !is_terminal(&job.status));
     let pulse_phase = (metrics.animation_tick / 3) % 4;
-    let pulse_color = if ollama_active {
+    let pulse_color = if matches!(&state.connection, ConnectionState::Disconnected { .. }) {
+        theme.red
+    } else if ollama_active {
         match pulse_phase {
             0 => theme.orange,
             1 => theme.purple,
@@ -449,45 +590,47 @@ fn render_header(
         .style(Style::default().bg(theme.panel).fg(theme.text));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let [identity, location, status] = Layout::horizontal([
-        Constraint::Percentage(42),
-        Constraint::Percentage(33),
-        Constraint::Percentage(25),
-    ])
-    .areas(inner);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            " ◇ ORACLE OF DÆDALUS",
-            Style::default()
-                .fg(pulse_color)
-                .add_modifier(Modifier::BOLD),
-        )])),
-        identity,
-    );
+    let [identity, companions] =
+        Layout::horizontal([Constraint::Length(41), Constraint::Fill(1)]).areas(inner);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
+            Span::styled(" ◈", Style::default().fg(theme.purple)),
+            Span::styled("≋", Style::default().fg(theme.orange)),
+            Span::styled("◈", Style::default().fg(theme.cyan)),
             Span::styled(
-                state.view.section().label().to_ascii_uppercase(),
-                Style::default().fg(theme.muted),
-            ),
-            Span::styled("  /  ", Style::default().fg(theme.border)),
-            Span::styled(
-                state.view.label(),
+                "  OmaRag",
                 Style::default()
-                    .fg(theme.focus)
+                    .fg(pulse_color)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(" · ", Style::default().fg(theme.muted)),
+            Span::styled("ORACLE", Style::default().fg(theme.orange)),
+            Span::styled(" OF ", Style::default().fg(theme.muted)),
+            Span::styled("METIS", Style::default().fg(theme.purple)),
+            Span::styled(" & ", Style::default().fg(theme.muted)),
+            Span::styled("ALETHEIA", Style::default().fg(theme.cyan)),
         ])),
-        location,
+        identity,
     );
+    let (metis, aletheia) = companion_poses(metrics.animation_tick);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("● ", Style::default().fg(pulse_color)),
-            Span::styled(state.connection.label(), Style::default().fg(theme.muted)),
+            Span::styled("Metis ", Style::default().fg(theme.purple)),
+            Span::styled(metis, Style::default().fg(theme.purple)),
+            Span::raw("   "),
+            Span::styled("Aletheia ", Style::default().fg(theme.cyan)),
+            Span::styled(aletheia, Style::default().fg(theme.cyan)),
         ]))
         .alignment(Alignment::Right),
-        status,
+        companions,
     );
+}
+
+fn companion_poses(tick: u64) -> (&'static str, &'static str) {
+    const METIS: [&str; 4] = ["╱◆╲", "─◆╲", "╱◆─", "╱◇╲"];
+    const ALETHEIA: [&str; 4] = ["╱◇╲", "╱◇─", "─◇╲", "╱◆╲"];
+    let frame = ((tick / 2) % 4) as usize;
+    (METIS[frame], ALETHEIA[frame])
 }
 
 pub(crate) fn screen_areas(area: Rect) -> [Rect; 3] {
@@ -564,7 +707,7 @@ fn render_minimum_size(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                "◇ ORACLE OF DÆDALUS",
+                "◈≋◈ OmaRag",
                 Style::default()
                     .fg(theme.focus)
                     .add_modifier(Modifier::BOLD),
@@ -695,7 +838,7 @@ fn render_sidebar(
         .style(Style::default().bg(theme.surface).fg(theme.text));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let instrument_height = 8.min(inner.height);
+    let instrument_height = 13.min(inner.height);
     let [navigation, instruments] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(instrument_height)]).areas(inner);
 
@@ -729,12 +872,12 @@ fn render_sidebar(
     let role_lines = if metrics.model_roles.is_empty() {
         configured_models(state)
             .into_iter()
-            .map(|(role, model)| {
+            .flat_map(|(role, model)| {
                 let loaded = metrics
                     .loaded_models
                     .iter()
                     .any(|item| model_matches(&item.name, &model));
-                model_role_line(
+                model_role_lines(
                     &role,
                     (model != "not configured").then_some(model.as_str()),
                     if loaded { "loaded" } else { "idle" },
@@ -747,8 +890,8 @@ fn render_sidebar(
         metrics
             .model_roles
             .iter()
-            .map(|role| {
-                model_role_line(
+            .flat_map(|role| {
+                model_role_lines(
                     &role.role,
                     role.model.as_deref(),
                     &role.residency,
@@ -760,12 +903,12 @@ fn render_sidebar(
     };
     let vram = if metrics.vram_total > 0 {
         format!(
-            "VRAM {} / {}",
+            "VRAM   {} / {}",
             compact_memory(metrics.vram_used),
             compact_memory(metrics.vram_total)
         )
     } else {
-        "VRAM system shared".into()
+        "VRAM   system shared".into()
     };
     let mut instrument_lines = vec![
         Line::styled(
@@ -774,20 +917,18 @@ fn render_sidebar(
                 .fg(theme.muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        Line::from(vec![
-            Span::styled(
-                format!(" CPU {:>3.0}%", metrics.cpu_usage),
-                Style::default().fg(theme.green),
+        Line::styled(
+            format!(" CPU    {:>3.0}%", metrics.cpu_usage),
+            Style::default().fg(theme.green),
+        ),
+        Line::styled(
+            format!(
+                " RAM    {} / {}",
+                compact_memory(metrics.memory_used),
+                compact_memory(metrics.memory_total)
             ),
-            Span::styled(
-                format!(
-                    "  RAM {:.0}/{:.0}G",
-                    metrics.memory_used as f64 / 1_073_741_824.0,
-                    metrics.memory_total as f64 / 1_073_741_824.0
-                ),
-                Style::default().fg(theme.yellow),
-            ),
-        ]),
+            Style::default().fg(theme.yellow),
+        ),
         Line::styled(format!(" {vram}"), Style::default().fg(theme.purple)),
     ];
     instrument_lines.extend(role_lines);
@@ -865,40 +1006,58 @@ fn render_chat_workspace(
     let input_height = if area.height >= 9 { 3 } else { 1 };
     let [body, input] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(input_height)]).areas(area);
-    let text = if let Some(error) = &state.chat.error {
-        Text::from(vec![
-            Line::styled("Answer failed", Style::default().fg(theme.red)),
-            Line::from(error.clone()),
-        ])
+    let (text, already_wrapped) = if let Some(error) = &state.chat.error {
+        (
+            Text::from(vec![
+                Line::styled("Answer failed", Style::default().fg(theme.red)),
+                Line::from(error.clone()),
+            ]),
+            false,
+        )
     } else if state.chat.answer.is_empty() {
-        Text::from(vec![
-            Line::from(""),
-            Line::styled(
-                if state.chat.request_pending || state.chat.active_run.is_some() {
-                    format!(
-                        "{} Searching your library…",
-                        spinner(metrics.animation_tick)
-                    )
-                } else {
-                    "Ask a question across your private library.".into()
-                },
-                Style::default()
-                    .fg(theme.focus)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Line::from(""),
-            Line::styled(
-                "Answers stay local and carry their evidence into the inspector.",
-                Style::default().fg(theme.muted),
-            ),
-        ])
+        (
+            Text::from(vec![
+                Line::from(""),
+                Line::styled(
+                    if state.chat.request_pending || state.chat.active_run.is_some() {
+                        format!(
+                            "{} Searching your library…",
+                            spinner(metrics.animation_tick)
+                        )
+                    } else {
+                        "Ask a question across your private library.".into()
+                    },
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::styled(
+                    "Answers stay local and carry their evidence into the inspector.",
+                    Style::default().fg(theme.muted),
+                ),
+            ]),
+            false,
+        )
     } else {
-        highlighted_answer(&state.chat.answer, state.citation_cursor, theme)
+        (
+            selectable_answer(
+                &state.chat.answer,
+                state.citation_cursor,
+                theme,
+                body.width,
+                state.chat.selection,
+            ),
+            true,
+        )
     };
+    let paragraph = Paragraph::new(text).scroll((state.chat_scroll, 0));
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((state.chat_scroll, 0)),
+        if already_wrapped {
+            paragraph
+        } else {
+            paragraph.wrap(Wrap { trim: false })
+        },
         body,
     );
     render_inline_editor(
@@ -1900,8 +2059,9 @@ fn render_activity_workspace(
 }
 
 fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
-    let [intro, editor, hints] = Layout::vertical([
+    let [intro, chat_options, editor, hints] = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(4),
         Constraint::Fill(1),
         Constraint::Length(2),
     ])
@@ -1936,6 +2096,37 @@ fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState
             ),
         ]),
         intro,
+    );
+    let explain_terms = !state.bold_term_explanations_disabled;
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    if explain_terms { " [✓] " } else { " [ ] " },
+                    Style::default().fg(if explain_terms {
+                        theme.green
+                    } else {
+                        theme.muted
+                    }),
+                ),
+                Span::styled(
+                    "Explain bold terms on click",
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  ·  B toggle", Style::default().fg(theme.purple)),
+            ]),
+            Line::styled(
+                "     Click a bold term to ask for a short, source-based definition.",
+                Style::default().fg(theme.muted),
+            ),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.border))
+                .title(" Chat "),
+        ),
+        chat_options,
     );
     if state.interaction_level == InteractionLevel::Workshop {
         render_inline_editor(
@@ -1975,9 +2166,9 @@ fn render_settings_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState
     }
     frame.render_widget(
         Paragraph::new(if state.interaction_level == InteractionLevel::Workshop {
-            "Enter edit · Ctrl+Enter save · Ctrl+T next theme"
+            "B explain terms · Enter edit · Ctrl+Enter save"
         } else {
-            "M / Enter advanced · Open Themes for visual settings"
+            "B explain terms · M / Enter advanced · Themes for colors"
         })
         .style(Style::default().fg(theme.muted)),
         hints,
@@ -1994,13 +2185,13 @@ fn render_themes_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, 
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                format!("{} PURPOSE-BUILT PALETTES", Theme::COUNT),
+                format!("{} BUILT-IN · 1 SYSTEM PALETTE", Theme::COUNT - 1),
                 Style::default()
                     .fg(theme.focus)
                     .add_modifier(Modifier::BOLD),
             ),
             Line::styled(
-                "Preview instantly. The original palette returns when you cancel.",
+                "Preview instantly. Omarchy System follows your desktop automatically.",
                 Style::default().fg(theme.muted),
             ),
             Line::styled(
@@ -2346,46 +2537,156 @@ fn render_source_inspector(
     metrics: &RuntimeMetrics,
     previews: &mut [ChatImagePreview],
 ) {
-    let preview_height = if state.chat.citations.is_empty() || area.height < 16 {
-        0
+    let [images_area, sources_area] = source_inspector_areas(area);
+    let image_refs = related_image_refs(state);
+    let images_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            " Related images · 4 ",
+            Style::default()
+                .fg(theme.purple)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let images_inner = images_block.inner(images_area);
+    frame.render_widget(images_block, images_area);
+    if image_refs.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Ask a question to find matching pages and figures.")
+                .style(Style::default().fg(theme.muted))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            images_inner,
+        );
     } else {
-        area.height.min(10)
-    };
-    let [preview_area, list_area] =
-        Layout::vertical([Constraint::Length(preview_height), Constraint::Fill(1)]).areas(area);
-    if preview_height > 0 {
-        let page = state
-            .chat
-            .citations
-            .get(state.citation_cursor)
-            .and_then(|citation| citation.pages.get(state.citation_page_cursor))
-            .copied()
-            .unwrap_or_default();
-        let block = Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(theme.border))
-            .title(format!(" Page {page} "));
-        let inner = block.inner(preview_area);
-        frame.render_widget(block, preview_area);
-        if let Some(preview) = previews.iter_mut().find(|preview| preview.page == page) {
-            preview.receive_resizes();
-            frame.render_stateful_widget(StatefulImage::default(), inner, &mut preview.protocol);
-        } else {
-            frame.render_widget(
-                Paragraph::new("Rendering page preview…")
-                    .style(Style::default().fg(theme.muted))
-                    .alignment(Alignment::Center),
-                inner,
-            );
+        let [top, bottom] =
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(images_inner);
+        let [top_left, top_right] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+        let [bottom_left, bottom_right] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(bottom);
+        let tiles = [top_left, top_right, bottom_left, bottom_right];
+        for (slot, tile) in tiles.into_iter().enumerate() {
+            let Some((citation_index, page_index, page)) = image_refs.get(slot).copied() else {
+                frame.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(theme.border)),
+                    tile,
+                );
+                continue;
+            };
+            let selected =
+                citation_index == state.citation_cursor && page_index == state.citation_page_cursor;
+            let tile_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if selected {
+                    theme.focus
+                } else {
+                    theme.border
+                }))
+                .title(Line::styled(
+                    format!(" {} · p.{page} ", slot + 1),
+                    Style::default().fg(if selected { theme.focus } else { theme.muted }),
+                ));
+            let tile_inner = tile_block.inner(tile);
+            frame.render_widget(tile_block, tile);
+            if let Some(preview) = previews.iter_mut().find(|preview| {
+                preview.citation_index == citation_index && preview.page_index == page_index
+            }) {
+                preview.receive_resizes();
+                frame.render_stateful_widget(
+                    StatefulImage::default(),
+                    tile_inner,
+                    &mut preview.protocol,
+                );
+            } else {
+                let source = state.chat.citations[citation_index]
+                    .document_title
+                    .as_deref()
+                    .unwrap_or("Source");
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::styled(
+                            truncate(source, tile_inner.width.saturating_sub(1) as usize),
+                            Style::default().fg(theme.text),
+                        ),
+                        Line::styled("Rendering preview…", Style::default().fg(theme.muted)),
+                    ])
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                    tile_inner,
+                );
+            }
         }
     }
-    let lines = inspector_lines(state, theme, metrics, list_area.width);
+
+    let sources_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            " Sources ",
+            Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+        ));
+    let sources_inner = sources_block.inner(sources_area);
+    frame.render_widget(sources_block, sources_area);
+    let lines = inspector_lines(state, theme, metrics, sources_inner.width);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((state.inspector_scroll, 0)),
-        list_area,
+        sources_inner,
     );
+}
+
+pub(crate) fn source_inspector_areas(area: Rect) -> [Rect; 2] {
+    let image_height = (area.height * 45 / 100).clamp(10, 22).min(area.height);
+    Layout::vertical([Constraint::Length(image_height), Constraint::Fill(1)]).areas(area)
+}
+
+pub fn related_image_refs(state: &AppState) -> Vec<(usize, usize, u32)> {
+    let mut output = Vec::with_capacity(4);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut consider = |citation_index: usize, page_index: usize| {
+        let Some(citation) = state.chat.citations.get(citation_index) else {
+            return;
+        };
+        let Some(page) = citation.pages.get(page_index).copied() else {
+            return;
+        };
+        let source = citation
+            .logical_document_id
+            .as_deref()
+            .or(citation.document_id.as_deref())
+            .or(citation.document_title.as_deref())
+            .unwrap_or("source");
+        if output.len() < 4 && seen.insert((source.to_owned(), page)) {
+            output.push((citation_index, page_index, page));
+        }
+    };
+    for citation_index in 0..state.chat.citations.len() {
+        if !state.chat.citations[citation_index].picture_refs.is_empty() {
+            consider(citation_index, 0);
+        }
+    }
+    for citation_index in 0..state.chat.citations.len() {
+        consider(citation_index, 0);
+    }
+    for citation_index in 0..state.chat.citations.len() {
+        for page_index in 1..state.chat.citations[citation_index].pages.len() {
+            consider(citation_index, page_index);
+        }
+    }
+    output
+}
+
+pub(crate) fn source_citation_row_offset(state: &AppState) -> u16 {
+    let receipt_rows = receipt_lines(state, &Theme::default()).len() as u16;
+    receipt_rows
+        .saturating_add(u16::from(receipt_rows > 0))
+        .saturating_add(3)
 }
 
 fn inspector_lines(
@@ -2473,7 +2774,7 @@ fn inspector_lines(
                 ));
             }
             lines.push(Line::styled(
-                "↑↓ source · ←→ page · Enter open · Space image",
+                "↑↓ source · ←→ page · Enter / click open",
                 Style::default().fg(theme.muted),
             ));
             lines
@@ -2709,7 +3010,7 @@ fn inspector_lines(
         ],
         View::Themes => {
             let palette = Theme::at(state.theme_cursor);
-            vec![
+            let mut lines = vec![
                 Line::styled(
                     palette.name,
                     Style::default()
@@ -2745,7 +3046,29 @@ fn inspector_lines(
                     "Enter keeps this palette. Esc restores the previous one.",
                     Style::default().fg(theme.muted),
                 ),
-            ]
+            ];
+            if state.theme_cursor == Theme::COUNT - 1 {
+                lines.extend([
+                    Line::from(""),
+                    Line::styled(
+                        if Theme::omarchy_available() {
+                            "AUTO · SYSTEM COLORS ACTIVE"
+                        } else {
+                            "AUTO · SAFE FALLBACK ACTIVE"
+                        },
+                        Style::default().fg(if Theme::omarchy_available() {
+                            theme.green
+                        } else {
+                            theme.yellow
+                        }),
+                    ),
+                    Line::styled(
+                        "Follows Omarchy color changes automatically.",
+                        Style::default().fg(theme.muted),
+                    ),
+                ]);
+            }
+            lines
         }
     }
 }
@@ -2856,9 +3179,14 @@ pub(crate) fn delete_model_confirm_area(screen: Rect) -> Rect {
     centered(52, 9, screen)
 }
 
+pub(crate) fn confirm_quit_area(screen: Rect) -> Rect {
+    centered(54, 9, screen)
+}
+
 fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'static> {
     let mut options = MarkdownOptions::empty();
     options.insert(MarkdownOptions::ENABLE_TABLES);
+    options.insert(MarkdownOptions::ENABLE_MATH);
     options.insert(MarkdownOptions::ENABLE_STRIKETHROUGH);
     options.insert(MarkdownOptions::ENABLE_TASKLISTS);
     options.insert(MarkdownOptions::ENABLE_FOOTNOTES);
@@ -2871,8 +3199,9 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
     let mut link_targets = Vec::<String>::new();
     let mut in_table_row = false;
     let mut table_cell = 0usize;
+    let answer = prepare_answer_markdown(answer);
 
-    for event in Parser::new_ext(answer, options) {
+    for event in Parser::new_ext(&answer, options) {
         match event {
             MarkdownEvent::Start(tag) => match tag {
                 Tag::Paragraph => finish_markdown_line(&mut lines, &mut spans, false),
@@ -2956,7 +3285,17 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
                     link_targets.push(dest_url.into_string());
                 }
                 Tag::Table(_) => finish_markdown_line(&mut lines, &mut spans, false),
-                Tag::TableHead | Tag::TableRow => {
+                Tag::TableHead => {
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                    in_table_row = true;
+                    table_cell = 0;
+                    styles.push(
+                        current_markdown_style(&styles)
+                            .fg(theme.focus)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                }
+                Tag::TableRow => {
                     finish_markdown_line(&mut lines, &mut spans, false);
                     in_table_row = true;
                     table_cell = 0;
@@ -3003,7 +3342,12 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
                         ));
                     }
                 }
-                TagEnd::TableHead | TagEnd::TableRow => {
+                TagEnd::TableHead => {
+                    styles.pop();
+                    in_table_row = false;
+                    finish_markdown_line(&mut lines, &mut spans, false);
+                }
+                TagEnd::TableRow => {
                     in_table_row = false;
                     finish_markdown_line(&mut lines, &mut spans, false);
                 }
@@ -3051,13 +3395,13 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
                 Style::default().fg(theme.purple),
             )),
             MarkdownEvent::InlineMath(math) => spans.push(Span::styled(
-                sanitize_terminal_text(&math),
+                math_to_unicode(&math),
                 Style::default().fg(theme.yellow),
             )),
             MarkdownEvent::DisplayMath(math) => {
                 finish_markdown_line(&mut lines, &mut spans, false);
                 lines.push(Line::styled(
-                    sanitize_terminal_text(&math),
+                    math_to_unicode(&math),
                     Style::default().fg(theme.yellow),
                 ));
             }
@@ -3072,6 +3416,425 @@ fn highlighted_answer(answer: &str, selected: usize, theme: &Theme) -> Text<'sta
         lines.pop();
     }
     Text::from(lines)
+}
+
+fn prepare_answer_markdown(answer: &str) -> String {
+    static FIGURE_REFERENCE: OnceLock<Regex> = OnceLock::new();
+    static FIGURE_CAPTION: OnceLock<Regex> = OnceLock::new();
+    let reference = FIGURE_REFERENCE.get_or_init(|| {
+        Regex::new(
+            r"(?i)(?:\(\s*(?:siehe\s+)?(?:abb\.?|abbildung)\s*\d+[a-z]?(?:\s*[-–]\s*\d+[a-z]?)?\s*\)|\b(?:siehe\s+)?(?:abb\.?|abbildung)\s*\d+[a-z]?\b)",
+        )
+        .expect("valid figure-reference regex")
+    });
+    let caption = FIGURE_CAPTION.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(?:abb\.?|abbildung)\s*\d+[a-z]?\s*[:.]?")
+            .expect("valid figure-caption regex")
+    });
+
+    answer
+        .replace("\\(", "$")
+        .replace("\\)", "$")
+        .replace("\\[", "$$\n")
+        .replace("\\]", "\n$$")
+        .lines()
+        .filter_map(|line| {
+            if caption.is_match(line) {
+                return None;
+            }
+            let clean = reference.replace_all(line, "");
+            Some(clean.trim_end().to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn math_to_unicode(math: &str) -> String {
+    let mut rendered = sanitize_terminal_text(math).trim().to_owned();
+    for (latex, unicode) in [
+        ("\\varepsilon", "ε"),
+        ("\\vartheta", "ϑ"),
+        ("\\varphi", "φ"),
+        ("\\varrho", "ϱ"),
+        ("\\upsilon", "υ"),
+        ("\\epsilon", "ε"),
+        ("\\lambda", "λ"),
+        ("\\omicron", "ο"),
+        ("\\theta", "θ"),
+        ("\\kappa", "κ"),
+        ("\\sigma", "σ"),
+        ("\\omega", "ω"),
+        ("\\alpha", "α"),
+        ("\\gamma", "γ"),
+        ("\\delta", "δ"),
+        ("\\beta", "β"),
+        ("\\zeta", "ζ"),
+        ("\\eta", "η"),
+        ("\\iota", "ι"),
+        ("\\mu", "μ"),
+        ("\\nu", "ν"),
+        ("\\xi", "ξ"),
+        ("\\pi", "π"),
+        ("\\rho", "ρ"),
+        ("\\tau", "τ"),
+        ("\\phi", "ϕ"),
+        ("\\chi", "χ"),
+        ("\\psi", "ψ"),
+        ("\\cdot", "·"),
+        ("\\times", "×"),
+        ("\\approx", "≈"),
+        ("\\neq", "≠"),
+        ("\\leq", "≤"),
+        ("\\le", "≤"),
+        ("\\geq", "≥"),
+        ("\\ge", "≥"),
+        ("\\pm", "±"),
+        ("\\rightarrow", "→"),
+        ("\\leftarrow", "←"),
+        ("\\infty", "∞"),
+        ("\\degree", "°"),
+    ] {
+        rendered = rendered.replace(latex, unicode);
+    }
+    rendered = rendered
+        .replace("\\mathrm{", "")
+        .replace("\\text{", "")
+        .replace("\\,", " ")
+        .replace("\\;", " ");
+    rendered = replace_math_script(&rendered, '_', subscript_character);
+    rendered = replace_math_script(&rendered, '^', superscript_character);
+    rendered.replace(['{', '}'], "")
+}
+
+fn replace_math_script(value: &str, marker: char, convert: fn(char) -> Option<char>) -> String {
+    let characters = value.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0usize;
+    while index < characters.len() {
+        if characters[index] != marker {
+            output.push(characters[index]);
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 1;
+        let grouped = characters.get(cursor) == Some(&'{');
+        if grouped {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < characters.len()
+            && if grouped {
+                characters[cursor] != '}'
+            } else {
+                cursor == start
+            }
+        {
+            cursor += 1;
+        }
+        let converted = characters[start..cursor]
+            .iter()
+            .copied()
+            .map(convert)
+            .collect::<Option<String>>();
+        if let Some(converted) = converted {
+            output.push_str(&converted);
+            index = cursor + usize::from(grouped && characters.get(cursor) == Some(&'}'));
+        } else {
+            output.push(marker);
+            index += 1;
+        }
+    }
+    output
+}
+
+fn subscript_character(character: char) -> Option<char> {
+    Some(match character {
+        '0' => '₀',
+        '1' => '₁',
+        '2' => '₂',
+        '3' => '₃',
+        '4' => '₄',
+        '5' => '₅',
+        '6' => '₆',
+        '7' => '₇',
+        '8' => '₈',
+        '9' => '₉',
+        '+' => '₊',
+        '-' => '₋',
+        '=' => '₌',
+        '(' => '₍',
+        ')' => '₎',
+        'a' => 'ₐ',
+        'e' => 'ₑ',
+        'h' => 'ₕ',
+        'i' => 'ᵢ',
+        'j' => 'ⱼ',
+        'k' => 'ₖ',
+        'l' => 'ₗ',
+        'm' => 'ₘ',
+        'n' => 'ₙ',
+        'o' => 'ₒ',
+        'p' => 'ₚ',
+        'r' => 'ᵣ',
+        's' => 'ₛ',
+        't' => 'ₜ',
+        'u' => 'ᵤ',
+        'v' => 'ᵥ',
+        'x' => 'ₓ',
+        _ => return None,
+    })
+}
+
+fn superscript_character(character: char) -> Option<char> {
+    Some(match character {
+        '0' => '⁰',
+        '1' => '¹',
+        '2' => '²',
+        '3' => '³',
+        '4' => '⁴',
+        '5' => '⁵',
+        '6' => '⁶',
+        '7' => '⁷',
+        '8' => '⁸',
+        '9' => '⁹',
+        '+' => '⁺',
+        '-' => '⁻',
+        '=' => '⁼',
+        '(' => '⁽',
+        ')' => '⁾',
+        'i' => 'ⁱ',
+        'n' => 'ⁿ',
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct AnswerGlyph {
+    character: char,
+    style: Style,
+    offset: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AnswerVisualLayout {
+    rows: Vec<Vec<AnswerGlyph>>,
+    plain: Vec<char>,
+    bold: Vec<bool>,
+}
+
+fn answer_visual_layout(
+    answer: &str,
+    selected_citation: usize,
+    theme: &Theme,
+    width: u16,
+) -> AnswerVisualLayout {
+    let text = highlighted_answer(answer, selected_citation, theme);
+    let mut logical_lines = Vec::<Vec<AnswerGlyph>>::with_capacity(text.lines.len());
+    let mut plain = Vec::<char>::new();
+    let mut bold = Vec::<bool>::new();
+    for (line_index, line) in text.lines.iter().enumerate() {
+        let mut glyphs = Vec::new();
+        for span in &line.spans {
+            for character in span.content.chars() {
+                let offset = plain.len();
+                plain.push(character);
+                bold.push(span.style.add_modifier.contains(Modifier::BOLD));
+                glyphs.push(AnswerGlyph {
+                    character,
+                    style: span.style,
+                    offset,
+                });
+            }
+        }
+        logical_lines.push(glyphs);
+        if line_index + 1 < text.lines.len() {
+            plain.push('\n');
+            bold.push(false);
+        }
+    }
+
+    let mut rows = Vec::new();
+    let width = usize::from(width.max(1));
+    for glyphs in logical_lines {
+        if glyphs.is_empty() {
+            rows.push(Vec::new());
+            continue;
+        }
+        let mut start = 0;
+        while start < glyphs.len() {
+            let mut used = 0usize;
+            let mut end = start;
+            while end < glyphs.len() {
+                let character_width = glyphs[end].character.width().unwrap_or(0).max(1);
+                if end > start && used.saturating_add(character_width) > width {
+                    break;
+                }
+                used = used.saturating_add(character_width);
+                end += 1;
+                if used >= width {
+                    break;
+                }
+            }
+            if end == glyphs.len() {
+                rows.push(glyphs[start..end].to_vec());
+                break;
+            }
+            let word_break = (start + 1..end)
+                .rev()
+                .find(|index| glyphs[*index].character.is_whitespace());
+            if let Some(word_break) = word_break {
+                rows.push(glyphs[start..word_break].to_vec());
+                start = word_break + 1;
+                while start < glyphs.len() && glyphs[start].character == ' ' {
+                    start += 1;
+                }
+            } else {
+                rows.push(glyphs[start..end].to_vec());
+                start = end;
+            }
+        }
+    }
+    AnswerVisualLayout { rows, plain, bold }
+}
+
+fn selectable_answer(
+    answer: &str,
+    selected_citation: usize,
+    theme: &Theme,
+    width: u16,
+    selection: Option<ChatTextSelection>,
+) -> Text<'static> {
+    let layout = answer_visual_layout(answer, selected_citation, theme, width);
+    let selected = selection.map(ChatTextSelection::bounds);
+    let lines = layout
+        .rows
+        .into_iter()
+        .map(|row| {
+            let mut spans = Vec::<Span<'static>>::new();
+            let mut text = String::new();
+            let mut active_style = None;
+            for glyph in row {
+                let mut style = glyph.style;
+                if selected.is_some_and(|(start, end)| glyph.offset >= start && glyph.offset <= end)
+                {
+                    style = style.bg(theme.selection);
+                }
+                if active_style.is_some_and(|current| current != style) && !text.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut text),
+                        active_style.unwrap(),
+                    ));
+                }
+                active_style = Some(style);
+                text.push(glyph.character);
+            }
+            if !text.is_empty() {
+                spans.push(Span::styled(text, active_style.unwrap_or_default()));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+pub(crate) fn chat_answer_offset(
+    answer: &str,
+    selected_citation: usize,
+    width: u16,
+    scroll: u16,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let layout = answer_visual_layout(answer, selected_citation, &Theme::default(), width);
+    let glyphs = layout.rows.get(usize::from(scroll.saturating_add(row)))?;
+    let mut x = 0u16;
+    for glyph in glyphs {
+        let glyph_width = u16::try_from(glyph.character.width().unwrap_or(0).max(1)).ok()?;
+        if column >= x && column < x.saturating_add(glyph_width) {
+            return Some(glyph.offset);
+        }
+        x = x.saturating_add(glyph_width);
+    }
+    None
+}
+
+pub(crate) fn chat_selection_text(
+    answer: &str,
+    selected_citation: usize,
+    width: u16,
+    selection: ChatTextSelection,
+) -> Option<String> {
+    let layout = answer_visual_layout(answer, selected_citation, &Theme::default(), width);
+    let (start, end) = selection.bounds();
+    if start >= layout.plain.len() {
+        return None;
+    }
+    let selected = layout.plain[start..=end.min(layout.plain.len().saturating_sub(1))]
+        .iter()
+        .collect::<String>();
+    let selected = selected.trim().to_owned();
+    (!selected.is_empty()).then_some(selected)
+}
+
+pub(crate) fn chat_bold_term_at(
+    answer: &str,
+    selected_citation: usize,
+    width: u16,
+    scroll: u16,
+    column: u16,
+    row: u16,
+) -> Option<String> {
+    let offset = chat_answer_offset(answer, selected_citation, width, scroll, column, row)?;
+    let layout = answer_visual_layout(answer, selected_citation, &Theme::default(), width);
+    if !layout.bold.get(offset).copied().unwrap_or(false) {
+        return None;
+    }
+    for term in markdown_strong_terms(answer) {
+        let needle = term.chars().collect::<Vec<_>>();
+        if needle.is_empty() || needle.len() > layout.plain.len() {
+            continue;
+        }
+        for start in 0..=layout.plain.len() - needle.len() {
+            if layout.plain[start..start + needle.len()] == needle
+                && offset >= start
+                && offset < start + needle.len()
+            {
+                return Some(term);
+            }
+        }
+    }
+    None
+}
+
+fn markdown_strong_terms(answer: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut depth = 0usize;
+    let mut term = String::new();
+    for event in Parser::new_ext(answer, MarkdownOptions::all()) {
+        match event {
+            MarkdownEvent::Start(Tag::Strong) => {
+                if depth == 0 {
+                    term.clear();
+                }
+                depth += 1;
+            }
+            MarkdownEvent::End(TagEnd::Strong) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let clean = sanitize_terminal_text(term.trim());
+                    if !clean.is_empty() {
+                        terms.push(clean);
+                    }
+                }
+            }
+            MarkdownEvent::Text(text) | MarkdownEvent::Code(text) if depth > 0 => {
+                term.push_str(&text);
+            }
+            MarkdownEvent::SoftBreak | MarkdownEvent::HardBreak if depth > 0 => term.push(' '),
+            _ => {}
+        }
+    }
+    terms
 }
 
 fn current_markdown_style(styles: &[Style]) -> Style {
@@ -3331,6 +4094,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
         "NAV"
     };
     let hints: &[(&str, &str)] = match state.overlay {
+        Some(Overlay::ConfirmQuit) => &[("Enter / Y", "Quit"), ("Esc / N", "Stay")],
         Some(Overlay::FileBrowser) => &[
             ("↑↓", "Select"),
             ("Space", "Mark"),
@@ -3373,9 +4137,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
             FocusPane::Workspace => match state.view {
                 View::Conversation => &[
                     ("Enter", "Ask"),
-                    ("[ ]", "Citations"),
+                    ("Drag", "Copy"),
+                    ("[ ]", "Sources"),
                     ("H", "History"),
-                    ("X", "Export"),
                 ],
                 View::Books => &[
                     ("↑↓", "Select"),
@@ -3399,9 +4163,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
                     ("Ctrl+T", "Next"),
                 ],
                 View::Settings => &[
+                    ("B", "Explain terms"),
                     ("M", "Simple/advanced"),
                     ("Enter", "Edit"),
-                    ("Ctrl+Enter", "Save"),
                 ],
                 _ => &[("↑↓", "Move"), ("Enter", "Open"), ("Tab", "Next pane")],
             },
@@ -3457,6 +4221,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
 
 fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
     match state.overlay {
+        Some(Overlay::ConfirmQuit) => render_confirm_quit(frame, theme),
         Some(Overlay::Palette) => render_palette(frame, state, theme),
         Some(Overlay::Workspaces) => render_libraries(frame, state, theme),
         Some(Overlay::Help) => render_help(frame, theme),
@@ -3476,6 +4241,45 @@ fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         Some(Overlay::CustomModel) => render_custom_model(frame, state, theme),
         None => {}
     }
+}
+
+fn render_confirm_quit(frame: &mut Frame<'_>, theme: &Theme) {
+    let area = confirm_quit_area(frame.area());
+    frame.render_widget(Clear, area);
+    let block = panel("Really quit?", true, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(
+                "Close OmaRag?",
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                "Answers and local data are already saved.",
+                Style::default().fg(theme.muted),
+            ),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    " Enter / Y  Quit ",
+                    Style::default()
+                        .fg(theme.background)
+                        .bg(theme.red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("    "),
+                Span::styled(
+                    " Esc / N  Keep working ",
+                    Style::default()
+                        .fg(theme.background)
+                        .bg(theme.green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+        ]),
+        inner,
+    );
 }
 
 fn render_custom_model(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
@@ -5019,13 +5823,13 @@ fn compact_model_name(model: &str) -> String {
         .to_owned()
 }
 
-fn model_role_line(
+fn model_role_lines(
     role: &str,
     model: Option<&str>,
     residency: &str,
     width: u16,
     theme: &Theme,
-) -> Line<'static> {
+) -> [Line<'static>; 2] {
     let (marker, color) = match residency {
         "active" => ("▶", theme.orange),
         "loaded" => ("●", theme.green),
@@ -5041,18 +5845,20 @@ fn model_role_line(
         other => other,
     };
     let model = model.map_or("unset".into(), compact_model_name);
-    Line::from(vec![
-        Span::styled(format!(" {marker} "), Style::default().fg(color)),
-        Span::styled(format!("{role:<6}"), Style::default().fg(theme.muted)),
-        Span::styled(
-            truncate(&model, width.saturating_sub(13) as usize),
+    [
+        Line::from(vec![
+            Span::styled(format!(" {marker} "), Style::default().fg(color)),
+            Span::styled(role.to_owned(), Style::default().fg(theme.muted)),
+        ]),
+        Line::styled(
+            format!("   {}", truncate(&model, width.saturating_sub(5) as usize)),
             Style::default().fg(if model == "unset" {
                 theme.muted
             } else {
                 theme.text
             }),
         ),
-    ])
+    ]
 }
 
 fn job_color(job: &JobSnapshot, theme: &Theme) -> Color {
@@ -5233,6 +6039,28 @@ mod tests {
             .collect()
     }
 
+    fn rendered_rows_metrics(
+        width: u16,
+        height: u16,
+        state: &AppState,
+        theme: Theme,
+        metrics: &RuntimeMetrics,
+    ) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_with_metrics(frame, state, &theme, metrics))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
     #[test]
     fn wide_shell_contains_sidebar_workspace_and_inspector() {
         let content = rendered(160, 42, &AppState::default(), Theme::default());
@@ -5248,6 +6076,38 @@ mod tests {
             assert!(content.contains(title), "missing {title}");
         }
         assert!(!content.contains("Index new PDFs"));
+    }
+
+    #[test]
+    fn sidebar_gives_cpu_ram_and_vram_their_own_rows() {
+        let metrics = RuntimeMetrics {
+            cpu_usage: 3.0,
+            memory_used: 6 * 1_073_741_824,
+            memory_total: 13 * 1_073_741_824,
+            vram_used: 1_800_000_000,
+            vram_total: 2_000_000_000,
+            model_roles: vec![ModelRoleStatus {
+                role: "chat".into(),
+                model: Some("qwen3.5:4b-long-model-name".into()),
+                residency: "idle".into(),
+                shared_with: Vec::new(),
+            }],
+            ..RuntimeMetrics::default()
+        };
+        let rows = rendered_rows_metrics(160, 42, &AppState::default(), Theme::default(), &metrics);
+        let cpu = rows.iter().position(|row| row.contains("CPU"));
+        let ram = rows.iter().position(|row| row.contains("RAM"));
+        let vram = rows.iter().position(|row| row.contains("VRAM"));
+        assert!(cpu.is_some() && ram.is_some() && vram.is_some());
+        assert_ne!(cpu, ram);
+        assert_ne!(ram, vram);
+        assert_ne!(cpu, vram);
+        let chat = rows.iter().position(|row| row.contains("Chat")).unwrap();
+        let model = rows
+            .iter()
+            .position(|row| row.contains("qwen3.5:4b"))
+            .unwrap();
+        assert_eq!(model, chat + 1);
     }
 
     #[test]
@@ -5291,7 +6151,7 @@ mod tests {
     }
 
     #[test]
-    fn oracle_header_is_compact_and_reflects_activity() {
+    fn omarag_header_has_identity_companions_and_no_connection_badge() {
         let state = AppState::default();
         let idle = rendered_metrics(
             160,
@@ -5312,10 +6172,64 @@ mod tests {
                 ..RuntimeMetrics::default()
             },
         );
-        assert!(idle.contains("ORACLE"));
+        assert!(idle.contains("OmaRag"));
+        assert!(idle.contains("ORACLE OF METIS & ALETHEIA"));
+        assert!(idle.contains("Metis"));
+        assert!(idle.contains("Aletheia"));
         assert!(idle.contains("Conversation"));
-        assert!(!idle.contains("LOCAL KNOWLEDGE"));
+        assert!(!idle.contains("CONNECTED"));
+        assert!(!idle.contains("CONNECTING"));
         assert_ne!(idle, active);
+    }
+
+    #[test]
+    fn metis_and_aletheia_have_distinct_animation_frames() {
+        assert_ne!(companion_poses(0), companion_poses(2));
+        assert_ne!(companion_poses(2), companion_poses(4));
+        assert!(companion_poses(0).0.contains('◆'));
+        assert!(companion_poses(0).1.contains('◇'));
+    }
+
+    #[test]
+    fn omarchy_palette_maps_system_and_ansi_colors() {
+        let theme = parse_omarchy_palette(
+            r##"
+                accent = "#ff8800"
+                background = "#101112"
+                foreground = "#e0e1e2"
+                color1 = "#cc3344"
+                color2 = "#55aa66"
+                color3 = "#ddbb44"
+                color5 = "#aa77dd"
+                color6 = "#44bbcc"
+                color9 = "#ff7744"
+            "##,
+            false,
+        )
+        .expect("valid Omarchy palette");
+
+        assert_eq!(theme.name, "Omarchy System");
+        assert_eq!(theme.background, rgb(0x101112));
+        assert_eq!(theme.text, rgb(0xe0e1e2));
+        assert_eq!(theme.focus, rgb(0xff8800));
+        assert_eq!(theme.red, rgb(0xcc3344));
+        assert_eq!(theme.orange, rgb(0xff7744));
+        assert_ne!(theme.surface, theme.background);
+    }
+
+    #[test]
+    fn omarag_identity_and_both_companions_survive_minimum_width() {
+        let compact = rendered_metrics(
+            80,
+            24,
+            &AppState::default(),
+            Theme::default(),
+            &RuntimeMetrics::default(),
+        );
+
+        assert!(compact.contains("OmaRag"));
+        assert!(compact.contains("Metis"));
+        assert!(compact.contains("Aletheia"));
     }
 
     #[test]
@@ -5579,5 +6493,72 @@ mod tests {
             .find(|span| span.content == "bold")
             .expect("bold span");
         assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn scientific_markdown_uses_terminal_safe_math_and_hides_figure_cross_references() {
+        let text = highlighted_answer(
+            "Mit \\(d_1\\), \\(d_2\\), \\(\\rho\\) und \\(N/mm^2\\) (Abb. 78). [E1]\n\nAbb. 78: Ausbreitmaßklassen",
+            0,
+            &Theme::default(),
+        );
+        let rendered = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("d₁"));
+        assert!(rendered.contains("d₂"));
+        assert!(rendered.contains('ρ'));
+        assert!(rendered.contains("N/mm²"));
+        assert!(rendered.contains("[E1]"));
+        assert!(!rendered.contains("Abb."));
+        assert!(!rendered.contains("d_1"));
+    }
+
+    #[test]
+    fn markdown_table_headers_are_visually_distinct() {
+        let theme = Theme::default();
+        let text = highlighted_answer(
+            "| Klasse | Ausbreitmaß |\n|---|---|\n| F1 | ≤ 340 mm |",
+            0,
+            &theme,
+        );
+        let header = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.contains("Klasse"))
+            .expect("table header");
+
+        assert!(header.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(header.style.fg, Some(theme.focus));
+    }
+
+    #[test]
+    fn rendered_answer_can_be_selected_and_only_markdown_bold_terms_are_clickable() {
+        let answer = "plain **Beton** and Beton";
+        assert_eq!(chat_answer_offset(answer, 0, 80, 0, 7, 0), Some(7));
+        assert_eq!(
+            chat_selection_text(
+                answer,
+                0,
+                80,
+                ChatTextSelection {
+                    anchor: 6,
+                    focus: 10,
+                    moved: true,
+                },
+            )
+            .as_deref(),
+            Some("Beton")
+        );
+        assert_eq!(
+            chat_bold_term_at(answer, 0, 80, 0, 7, 0).as_deref(),
+            Some("Beton")
+        );
+        assert_eq!(chat_bold_term_at(answer, 0, 80, 0, 18, 0), None);
     }
 }

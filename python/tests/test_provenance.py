@@ -221,6 +221,73 @@ async def test_pdf_ingest_reduces_segment_size_on_memory_pressure(tmp_path, monk
     assert [item[2]["metadata"]["page_offset"] for item in rag.imports] == [0, 5, 10]
 
 
+async def test_pdf_ingest_keeps_configured_ocr_on_native_text_pages(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "mixed-content.pdf"
+    source.write_bytes(b"%PDF-fake")
+    monkeypatch.setattr(haiku_v070, "_pdf_info", lambda _path: (1, False))
+    monkeypatch.setattr(haiku_v070, "_pdf_slice", lambda *_args: b"mixed")
+
+    class Rag:
+        async def convert(self, _path, source_uri=None):
+            return {"source_uri": source_uri}
+
+        async def list_documents(self):
+            return []
+
+        async def chunk(self, document):
+            return [document]
+
+        async def import_document(self, _document, _chunks, **_kwargs):
+            return SimpleNamespace(id="segment-mixed")
+
+        async def delete_document(self, _document_id):
+            return True
+
+    rag = Rag()
+    configured: list[SimpleNamespace] = []
+
+    class ClientContext:
+        async def __aenter__(self):
+            return rag
+
+        async def __aexit__(self, *_args):
+            return False
+
+    def client_context(*_args, **kwargs):
+        if config := kwargs.get("config"):
+            configured.append(config.processing.conversion_options)
+        return ClientContext()
+
+    adapter = HaikuV070Adapter()
+    monkeypatch.setattr(
+        adapter,
+        "_config",
+        lambda _database: SimpleNamespace(
+            processing=SimpleNamespace(
+                conversion_options=SimpleNamespace(
+                    do_ocr=True,
+                    force_ocr=False,
+                    ocr_engine="auto",
+                    ocr_lang=["de", "en"],
+                    do_table_structure=True,
+                    table_mode="accurate",
+                    table_cell_matching=True,
+                    images_scale=1.0,
+                )
+            )
+        ),
+    )
+    monkeypatch.setattr(adapter, "_client", client_context)
+
+    result = await adapter._ingest_pdf_segments(tmp_path / "db", source)
+
+    assert result["page_count"] == 1
+    assert configured
+    assert configured[0].do_ocr is True
+    assert configured[0].force_ocr is False
+    assert result["segments"][0]["metadata"]["cache_key"]
+
+
 async def test_pdf_ingest_restarts_at_first_page_when_resume_segments_are_stale(
     tmp_path, monkeypatch
 ) -> None:

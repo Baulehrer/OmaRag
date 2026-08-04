@@ -2,61 +2,77 @@
 <rect width="100%" height="100%" fill="#0d1117"/><g font-family="DejaVu Sans Mono, monospace" font-size="16">
 <rect x="0" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="10" y="0" width="10" height="20" fill="#161d25"/>
-<text x="10" y="16" fill="#8fd19e">◇</text>
+<text x="10" y="16" fill="#b8a1e3">◈</text>
 <rect x="20" y="0" width="10" height="20" fill="#161d25"/>
+<text x="20" y="16" fill="#e9a66b">≋</text>
 <rect x="30" y="0" width="10" height="20" fill="#161d25"/>
-<text x="30" y="16" fill="#8fd19e">O</text>
+<text x="30" y="16" fill="#67d4e8">◈</text>
 <rect x="40" y="0" width="10" height="20" fill="#161d25"/>
-<text x="40" y="16" fill="#8fd19e">R</text>
 <rect x="50" y="0" width="10" height="20" fill="#161d25"/>
-<text x="50" y="16" fill="#8fd19e">A</text>
 <rect x="60" y="0" width="10" height="20" fill="#161d25"/>
-<text x="60" y="16" fill="#8fd19e">C</text>
+<text x="60" y="16" fill="#8fd19e">O</text>
 <rect x="70" y="0" width="10" height="20" fill="#161d25"/>
-<text x="70" y="16" fill="#8fd19e">L</text>
+<text x="70" y="16" fill="#8fd19e">m</text>
 <rect x="80" y="0" width="10" height="20" fill="#161d25"/>
-<text x="80" y="16" fill="#8fd19e">E</text>
+<text x="80" y="16" fill="#8fd19e">a</text>
 <rect x="90" y="0" width="10" height="20" fill="#161d25"/>
+<text x="90" y="16" fill="#8fd19e">R</text>
 <rect x="100" y="0" width="10" height="20" fill="#161d25"/>
-<text x="100" y="16" fill="#8fd19e">O</text>
+<text x="100" y="16" fill="#8fd19e">a</text>
 <rect x="110" y="0" width="10" height="20" fill="#161d25"/>
-<text x="110" y="16" fill="#8fd19e">F</text>
+<text x="110" y="16" fill="#8fd19e">g</text>
 <rect x="120" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="130" y="0" width="10" height="20" fill="#161d25"/>
-<text x="130" y="16" fill="#8fd19e">D</text>
+<text x="130" y="16" fill="#81909b">·</text>
 <rect x="140" y="0" width="10" height="20" fill="#161d25"/>
-<text x="140" y="16" fill="#8fd19e">Æ</text>
 <rect x="150" y="0" width="10" height="20" fill="#161d25"/>
-<text x="150" y="16" fill="#8fd19e">D</text>
+<text x="150" y="16" fill="#e9a66b">O</text>
 <rect x="160" y="0" width="10" height="20" fill="#161d25"/>
-<text x="160" y="16" fill="#8fd19e">A</text>
+<text x="160" y="16" fill="#e9a66b">R</text>
 <rect x="170" y="0" width="10" height="20" fill="#161d25"/>
-<text x="170" y="16" fill="#8fd19e">L</text>
+<text x="170" y="16" fill="#e9a66b">A</text>
 <rect x="180" y="0" width="10" height="20" fill="#161d25"/>
-<text x="180" y="16" fill="#8fd19e">U</text>
+<text x="180" y="16" fill="#e9a66b">C</text>
 <rect x="190" y="0" width="10" height="20" fill="#161d25"/>
-<text x="190" y="16" fill="#8fd19e">S</text>
+<text x="190" y="16" fill="#e9a66b">L</text>
 <rect x="200" y="0" width="10" height="20" fill="#161d25"/>
+<text x="200" y="16" fill="#e9a66b">E</text>
 <rect x="210" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="220" y="0" width="10" height="20" fill="#161d25"/>
+<text x="220" y="16" fill="#81909b">O</text>
 <rect x="230" y="0" width="10" height="20" fill="#161d25"/>
+<text x="230" y="16" fill="#81909b">F</text>
 <rect x="240" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="250" y="0" width="10" height="20" fill="#161d25"/>
+<text x="250" y="16" fill="#b8a1e3">M</text>
 <rect x="260" y="0" width="10" height="20" fill="#161d25"/>
+<text x="260" y="16" fill="#b8a1e3">E</text>
 <rect x="270" y="0" width="10" height="20" fill="#161d25"/>
+<text x="270" y="16" fill="#b8a1e3">T</text>
 <rect x="280" y="0" width="10" height="20" fill="#161d25"/>
+<text x="280" y="16" fill="#b8a1e3">I</text>
 <rect x="290" y="0" width="10" height="20" fill="#161d25"/>
+<text x="290" y="16" fill="#b8a1e3">S</text>
 <rect x="300" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="310" y="0" width="10" height="20" fill="#161d25"/>
+<text x="310" y="16" fill="#81909b">&amp;</text>
 <rect x="320" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="330" y="0" width="10" height="20" fill="#161d25"/>
+<text x="330" y="16" fill="#67d4e8">A</text>
 <rect x="340" y="0" width="10" height="20" fill="#161d25"/>
+<text x="340" y="16" fill="#67d4e8">L</text>
 <rect x="350" y="0" width="10" height="20" fill="#161d25"/>
+<text x="350" y="16" fill="#67d4e8">E</text>
 <rect x="360" y="0" width="10" height="20" fill="#161d25"/>
+<text x="360" y="16" fill="#67d4e8">T</text>
 <rect x="370" y="0" width="10" height="20" fill="#161d25"/>
+<text x="370" y="16" fill="#67d4e8">H</text>
 <rect x="380" y="0" width="10" height="20" fill="#161d25"/>
+<text x="380" y="16" fill="#67d4e8">E</text>
 <rect x="390" y="0" width="10" height="20" fill="#161d25"/>
+<text x="390" y="16" fill="#67d4e8">I</text>
 <rect x="400" y="0" width="10" height="20" fill="#161d25"/>
+<text x="400" y="16" fill="#67d4e8">A</text>
 <rect x="410" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="420" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="430" y="0" width="10" height="20" fill="#161d25"/>
@@ -83,37 +99,23 @@
 <rect x="640" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="650" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="660" y="0" width="10" height="20" fill="#161d25"/>
-<text x="660" y="16" fill="#81909b">M</text>
 <rect x="670" y="0" width="10" height="20" fill="#161d25"/>
-<text x="670" y="16" fill="#81909b">O</text>
 <rect x="680" y="0" width="10" height="20" fill="#161d25"/>
-<text x="680" y="16" fill="#81909b">D</text>
 <rect x="690" y="0" width="10" height="20" fill="#161d25"/>
-<text x="690" y="16" fill="#81909b">E</text>
 <rect x="700" y="0" width="10" height="20" fill="#161d25"/>
-<text x="700" y="16" fill="#81909b">L</text>
 <rect x="710" y="0" width="10" height="20" fill="#161d25"/>
-<text x="710" y="16" fill="#81909b">S</text>
 <rect x="720" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="730" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="740" y="0" width="10" height="20" fill="#161d25"/>
-<text x="740" y="16" fill="#34434d">/</text>
 <rect x="750" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="760" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="770" y="0" width="10" height="20" fill="#161d25"/>
-<text x="770" y="16" fill="#5fd7d7">P</text>
 <rect x="780" y="0" width="10" height="20" fill="#161d25"/>
-<text x="780" y="16" fill="#5fd7d7">r</text>
 <rect x="790" y="0" width="10" height="20" fill="#161d25"/>
-<text x="790" y="16" fill="#5fd7d7">e</text>
 <rect x="800" y="0" width="10" height="20" fill="#161d25"/>
-<text x="800" y="16" fill="#5fd7d7">s</text>
 <rect x="810" y="0" width="10" height="20" fill="#161d25"/>
-<text x="810" y="16" fill="#5fd7d7">e</text>
 <rect x="820" y="0" width="10" height="20" fill="#161d25"/>
-<text x="820" y="16" fill="#5fd7d7">t</text>
 <rect x="830" y="0" width="10" height="20" fill="#161d25"/>
-<text x="830" y="16" fill="#5fd7d7">s</text>
 <rect x="840" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="850" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="860" y="0" width="10" height="20" fill="#161d25"/>
@@ -163,39 +165,48 @@
 <rect x="1300" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1310" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1320" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1320" y="16" fill="#b8a1e3">M</text>
 <rect x="1330" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1330" y="16" fill="#b8a1e3">e</text>
 <rect x="1340" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1340" y="16" fill="#b8a1e3">t</text>
 <rect x="1350" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1350" y="16" fill="#b8a1e3">i</text>
 <rect x="1360" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1360" y="16" fill="#b8a1e3">s</text>
 <rect x="1370" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1380" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1380" y="16" fill="#b8a1e3">╱</text>
 <rect x="1390" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1390" y="16" fill="#b8a1e3">◆</text>
 <rect x="1400" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1400" y="16" fill="#b8a1e3">╲</text>
 <rect x="1410" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1420" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1430" y="0" width="10" height="20" fill="#161d25"/>
 <rect x="1440" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1440" y="16" fill="#67d4e8">A</text>
 <rect x="1450" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1450" y="16" fill="#8fd19e">●</text>
+<text x="1450" y="16" fill="#67d4e8">l</text>
 <rect x="1460" y="0" width="10" height="20" fill="#161d25"/>
+<text x="1460" y="16" fill="#67d4e8">e</text>
 <rect x="1470" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1470" y="16" fill="#81909b">C</text>
+<text x="1470" y="16" fill="#67d4e8">t</text>
 <rect x="1480" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1480" y="16" fill="#81909b">O</text>
+<text x="1480" y="16" fill="#67d4e8">h</text>
 <rect x="1490" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1490" y="16" fill="#81909b">N</text>
+<text x="1490" y="16" fill="#67d4e8">e</text>
 <rect x="1500" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1500" y="16" fill="#81909b">N</text>
+<text x="1500" y="16" fill="#67d4e8">i</text>
 <rect x="1510" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1510" y="16" fill="#81909b">E</text>
+<text x="1510" y="16" fill="#67d4e8">a</text>
 <rect x="1520" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1520" y="16" fill="#81909b">C</text>
 <rect x="1530" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1530" y="16" fill="#81909b">T</text>
+<text x="1530" y="16" fill="#67d4e8">╱</text>
 <rect x="1540" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1540" y="16" fill="#81909b">E</text>
+<text x="1540" y="16" fill="#67d4e8">◇</text>
 <rect x="1550" y="0" width="10" height="20" fill="#161d25"/>
-<text x="1550" y="16" fill="#81909b">D</text>
+<text x="1550" y="16" fill="#67d4e8">╲</text>
 <rect x="0" y="20" width="10" height="20" fill="#161d25"/>
 <text x="0" y="36" fill="#8fd19e">─</text>
 <rect x="10" y="20" width="10" height="20" fill="#161d25"/>
@@ -3257,27 +3268,49 @@
 <rect x="0" y="540" width="10" height="20" fill="#111820"/>
 <text x="0" y="556" fill="#34434d">│</text>
 <rect x="10" y="540" width="10" height="20" fill="#111820"/>
+<text x="10" y="556" fill="#34434d">─</text>
 <rect x="20" y="540" width="10" height="20" fill="#111820"/>
+<text x="20" y="556" fill="#34434d">─</text>
 <rect x="30" y="540" width="10" height="20" fill="#111820"/>
+<text x="30" y="556" fill="#34434d">─</text>
 <rect x="40" y="540" width="10" height="20" fill="#111820"/>
+<text x="40" y="556" fill="#34434d">─</text>
 <rect x="50" y="540" width="10" height="20" fill="#111820"/>
+<text x="50" y="556" fill="#34434d">─</text>
 <rect x="60" y="540" width="10" height="20" fill="#111820"/>
+<text x="60" y="556" fill="#34434d">─</text>
 <rect x="70" y="540" width="10" height="20" fill="#111820"/>
+<text x="70" y="556" fill="#34434d">─</text>
 <rect x="80" y="540" width="10" height="20" fill="#111820"/>
+<text x="80" y="556" fill="#34434d">─</text>
 <rect x="90" y="540" width="10" height="20" fill="#111820"/>
+<text x="90" y="556" fill="#34434d">─</text>
 <rect x="100" y="540" width="10" height="20" fill="#111820"/>
+<text x="100" y="556" fill="#34434d">─</text>
 <rect x="110" y="540" width="10" height="20" fill="#111820"/>
+<text x="110" y="556" fill="#34434d">─</text>
 <rect x="120" y="540" width="10" height="20" fill="#111820"/>
+<text x="120" y="556" fill="#34434d">─</text>
 <rect x="130" y="540" width="10" height="20" fill="#111820"/>
+<text x="130" y="556" fill="#34434d">─</text>
 <rect x="140" y="540" width="10" height="20" fill="#111820"/>
+<text x="140" y="556" fill="#34434d">─</text>
 <rect x="150" y="540" width="10" height="20" fill="#111820"/>
+<text x="150" y="556" fill="#34434d">─</text>
 <rect x="160" y="540" width="10" height="20" fill="#111820"/>
+<text x="160" y="556" fill="#34434d">─</text>
 <rect x="170" y="540" width="10" height="20" fill="#111820"/>
+<text x="170" y="556" fill="#34434d">─</text>
 <rect x="180" y="540" width="10" height="20" fill="#111820"/>
+<text x="180" y="556" fill="#34434d">─</text>
 <rect x="190" y="540" width="10" height="20" fill="#111820"/>
+<text x="190" y="556" fill="#34434d">─</text>
 <rect x="200" y="540" width="10" height="20" fill="#111820"/>
+<text x="200" y="556" fill="#34434d">─</text>
 <rect x="210" y="540" width="10" height="20" fill="#111820"/>
+<text x="210" y="556" fill="#34434d">─</text>
 <rect x="220" y="540" width="10" height="20" fill="#111820"/>
+<text x="220" y="556" fill="#34434d">─</text>
 <rect x="230" y="540" width="10" height="20" fill="#111820"/>
 <text x="230" y="556" fill="#34434d">│</text>
 <text x="250" y="556" fill="#5fd7d7">│</text>
@@ -3326,16 +3359,27 @@
 <text x="0" y="576" fill="#34434d">│</text>
 <rect x="10" y="560" width="10" height="20" fill="#111820"/>
 <rect x="20" y="560" width="10" height="20" fill="#111820"/>
+<text x="20" y="576" fill="#81909b">I</text>
 <rect x="30" y="560" width="10" height="20" fill="#111820"/>
+<text x="30" y="576" fill="#81909b">N</text>
 <rect x="40" y="560" width="10" height="20" fill="#111820"/>
+<text x="40" y="576" fill="#81909b">S</text>
 <rect x="50" y="560" width="10" height="20" fill="#111820"/>
+<text x="50" y="576" fill="#81909b">T</text>
 <rect x="60" y="560" width="10" height="20" fill="#111820"/>
+<text x="60" y="576" fill="#81909b">R</text>
 <rect x="70" y="560" width="10" height="20" fill="#111820"/>
+<text x="70" y="576" fill="#81909b">U</text>
 <rect x="80" y="560" width="10" height="20" fill="#111820"/>
+<text x="80" y="576" fill="#81909b">M</text>
 <rect x="90" y="560" width="10" height="20" fill="#111820"/>
+<text x="90" y="576" fill="#81909b">E</text>
 <rect x="100" y="560" width="10" height="20" fill="#111820"/>
+<text x="100" y="576" fill="#81909b">N</text>
 <rect x="110" y="560" width="10" height="20" fill="#111820"/>
+<text x="110" y="576" fill="#81909b">T</text>
 <rect x="120" y="560" width="10" height="20" fill="#111820"/>
+<text x="120" y="576" fill="#81909b">S</text>
 <rect x="130" y="560" width="10" height="20" fill="#111820"/>
 <rect x="140" y="560" width="10" height="20" fill="#111820"/>
 <rect x="150" y="560" width="10" height="20" fill="#111820"/>
@@ -3394,8 +3438,11 @@
 <text x="0" y="596" fill="#34434d">│</text>
 <rect x="10" y="580" width="10" height="20" fill="#111820"/>
 <rect x="20" y="580" width="10" height="20" fill="#111820"/>
+<text x="20" y="596" fill="#8fd19e">C</text>
 <rect x="30" y="580" width="10" height="20" fill="#111820"/>
+<text x="30" y="596" fill="#8fd19e">P</text>
 <rect x="40" y="580" width="10" height="20" fill="#111820"/>
+<text x="40" y="596" fill="#8fd19e">U</text>
 <rect x="50" y="580" width="10" height="20" fill="#111820"/>
 <rect x="60" y="580" width="10" height="20" fill="#111820"/>
 <rect x="70" y="580" width="10" height="20" fill="#111820"/>
@@ -3403,7 +3450,9 @@
 <rect x="90" y="580" width="10" height="20" fill="#111820"/>
 <rect x="100" y="580" width="10" height="20" fill="#111820"/>
 <rect x="110" y="580" width="10" height="20" fill="#111820"/>
+<text x="110" y="596" fill="#8fd19e">8</text>
 <rect x="120" y="580" width="10" height="20" fill="#111820"/>
+<text x="120" y="596" fill="#8fd19e">%</text>
 <rect x="130" y="580" width="10" height="20" fill="#111820"/>
 <rect x="140" y="580" width="10" height="20" fill="#111820"/>
 <rect x="150" y="580" width="10" height="20" fill="#111820"/>
@@ -3462,24 +3511,37 @@
 <text x="0" y="616" fill="#34434d">│</text>
 <rect x="10" y="600" width="10" height="20" fill="#111820"/>
 <rect x="20" y="600" width="10" height="20" fill="#111820"/>
+<text x="20" y="616" fill="#e7c66a">R</text>
 <rect x="30" y="600" width="10" height="20" fill="#111820"/>
+<text x="30" y="616" fill="#e7c66a">A</text>
 <rect x="40" y="600" width="10" height="20" fill="#111820"/>
+<text x="40" y="616" fill="#e7c66a">M</text>
 <rect x="50" y="600" width="10" height="20" fill="#111820"/>
 <rect x="60" y="600" width="10" height="20" fill="#111820"/>
 <rect x="70" y="600" width="10" height="20" fill="#111820"/>
 <rect x="80" y="600" width="10" height="20" fill="#111820"/>
 <rect x="90" y="600" width="10" height="20" fill="#111820"/>
+<text x="90" y="616" fill="#e7c66a">5</text>
 <rect x="100" y="600" width="10" height="20" fill="#111820"/>
+<text x="100" y="616" fill="#e7c66a">.</text>
 <rect x="110" y="600" width="10" height="20" fill="#111820"/>
+<text x="110" y="616" fill="#e7c66a">9</text>
 <rect x="120" y="600" width="10" height="20" fill="#111820"/>
+<text x="120" y="616" fill="#e7c66a">G</text>
 <rect x="130" y="600" width="10" height="20" fill="#111820"/>
 <rect x="140" y="600" width="10" height="20" fill="#111820"/>
+<text x="140" y="616" fill="#e7c66a">/</text>
 <rect x="150" y="600" width="10" height="20" fill="#111820"/>
 <rect x="160" y="600" width="10" height="20" fill="#111820"/>
+<text x="160" y="616" fill="#e7c66a">1</text>
 <rect x="170" y="600" width="10" height="20" fill="#111820"/>
+<text x="170" y="616" fill="#e7c66a">3</text>
 <rect x="180" y="600" width="10" height="20" fill="#111820"/>
+<text x="180" y="616" fill="#e7c66a">.</text>
 <rect x="190" y="600" width="10" height="20" fill="#111820"/>
+<text x="190" y="616" fill="#e7c66a">4</text>
 <rect x="200" y="600" width="10" height="20" fill="#111820"/>
+<text x="200" y="616" fill="#e7c66a">G</text>
 <rect x="210" y="600" width="10" height="20" fill="#111820"/>
 <rect x="220" y="600" width="10" height="20" fill="#111820"/>
 <rect x="230" y="600" width="10" height="20" fill="#111820"/>
@@ -3616,23 +3678,36 @@
 <text x="0" y="636" fill="#34434d">│</text>
 <rect x="10" y="620" width="10" height="20" fill="#111820"/>
 <rect x="20" y="620" width="10" height="20" fill="#111820"/>
+<text x="20" y="636" fill="#b8a1e3">V</text>
 <rect x="30" y="620" width="10" height="20" fill="#111820"/>
+<text x="30" y="636" fill="#b8a1e3">R</text>
 <rect x="40" y="620" width="10" height="20" fill="#111820"/>
+<text x="40" y="636" fill="#b8a1e3">A</text>
 <rect x="50" y="620" width="10" height="20" fill="#111820"/>
+<text x="50" y="636" fill="#b8a1e3">M</text>
 <rect x="60" y="620" width="10" height="20" fill="#111820"/>
 <rect x="70" y="620" width="10" height="20" fill="#111820"/>
 <rect x="80" y="620" width="10" height="20" fill="#111820"/>
 <rect x="90" y="620" width="10" height="20" fill="#111820"/>
+<text x="90" y="636" fill="#b8a1e3">4</text>
 <rect x="100" y="620" width="10" height="20" fill="#111820"/>
+<text x="100" y="636" fill="#b8a1e3">5</text>
 <rect x="110" y="620" width="10" height="20" fill="#111820"/>
+<text x="110" y="636" fill="#b8a1e3">8</text>
 <rect x="120" y="620" width="10" height="20" fill="#111820"/>
+<text x="120" y="636" fill="#b8a1e3">M</text>
 <rect x="130" y="620" width="10" height="20" fill="#111820"/>
 <rect x="140" y="620" width="10" height="20" fill="#111820"/>
+<text x="140" y="636" fill="#b8a1e3">/</text>
 <rect x="150" y="620" width="10" height="20" fill="#111820"/>
 <rect x="160" y="620" width="10" height="20" fill="#111820"/>
+<text x="160" y="636" fill="#b8a1e3">1</text>
 <rect x="170" y="620" width="10" height="20" fill="#111820"/>
+<text x="170" y="636" fill="#b8a1e3">.</text>
 <rect x="180" y="620" width="10" height="20" fill="#111820"/>
+<text x="180" y="636" fill="#b8a1e3">9</text>
 <rect x="190" y="620" width="10" height="20" fill="#111820"/>
+<text x="190" y="636" fill="#b8a1e3">G</text>
 <rect x="200" y="620" width="10" height="20" fill="#111820"/>
 <rect x="210" y="620" width="10" height="20" fill="#111820"/>
 <rect x="220" y="620" width="10" height="20" fill="#111820"/>
@@ -3703,49 +3778,32 @@
 <rect x="0" y="640" width="10" height="20" fill="#111820"/>
 <text x="0" y="656" fill="#34434d">│</text>
 <rect x="10" y="640" width="10" height="20" fill="#111820"/>
-<text x="10" y="656" fill="#34434d">─</text>
 <rect x="20" y="640" width="10" height="20" fill="#111820"/>
-<text x="20" y="656" fill="#34434d">─</text>
+<text x="20" y="656" fill="#8fd19e">●</text>
 <rect x="30" y="640" width="10" height="20" fill="#111820"/>
-<text x="30" y="656" fill="#34434d">─</text>
 <rect x="40" y="640" width="10" height="20" fill="#111820"/>
-<text x="40" y="656" fill="#34434d">─</text>
+<text x="40" y="656" fill="#81909b">C</text>
 <rect x="50" y="640" width="10" height="20" fill="#111820"/>
-<text x="50" y="656" fill="#34434d">─</text>
+<text x="50" y="656" fill="#81909b">h</text>
 <rect x="60" y="640" width="10" height="20" fill="#111820"/>
-<text x="60" y="656" fill="#34434d">─</text>
+<text x="60" y="656" fill="#81909b">a</text>
 <rect x="70" y="640" width="10" height="20" fill="#111820"/>
-<text x="70" y="656" fill="#34434d">─</text>
+<text x="70" y="656" fill="#81909b">t</text>
 <rect x="80" y="640" width="10" height="20" fill="#111820"/>
-<text x="80" y="656" fill="#34434d">─</text>
 <rect x="90" y="640" width="10" height="20" fill="#111820"/>
-<text x="90" y="656" fill="#34434d">─</text>
 <rect x="100" y="640" width="10" height="20" fill="#111820"/>
-<text x="100" y="656" fill="#34434d">─</text>
 <rect x="110" y="640" width="10" height="20" fill="#111820"/>
-<text x="110" y="656" fill="#34434d">─</text>
 <rect x="120" y="640" width="10" height="20" fill="#111820"/>
-<text x="120" y="656" fill="#34434d">─</text>
 <rect x="130" y="640" width="10" height="20" fill="#111820"/>
-<text x="130" y="656" fill="#34434d">─</text>
 <rect x="140" y="640" width="10" height="20" fill="#111820"/>
-<text x="140" y="656" fill="#34434d">─</text>
 <rect x="150" y="640" width="10" height="20" fill="#111820"/>
-<text x="150" y="656" fill="#34434d">─</text>
 <rect x="160" y="640" width="10" height="20" fill="#111820"/>
-<text x="160" y="656" fill="#34434d">─</text>
 <rect x="170" y="640" width="10" height="20" fill="#111820"/>
-<text x="170" y="656" fill="#34434d">─</text>
 <rect x="180" y="640" width="10" height="20" fill="#111820"/>
-<text x="180" y="656" fill="#34434d">─</text>
 <rect x="190" y="640" width="10" height="20" fill="#111820"/>
-<text x="190" y="656" fill="#34434d">─</text>
 <rect x="200" y="640" width="10" height="20" fill="#111820"/>
-<text x="200" y="656" fill="#34434d">─</text>
 <rect x="210" y="640" width="10" height="20" fill="#111820"/>
-<text x="210" y="656" fill="#34434d">─</text>
 <rect x="220" y="640" width="10" height="20" fill="#111820"/>
-<text x="220" y="656" fill="#34434d">─</text>
 <rect x="230" y="640" width="10" height="20" fill="#111820"/>
 <text x="230" y="656" fill="#34434d">│</text>
 <text x="250" y="656" fill="#5fd7d7">│</text>
@@ -3810,35 +3868,41 @@
 <text x="0" y="676" fill="#34434d">│</text>
 <rect x="10" y="660" width="10" height="20" fill="#111820"/>
 <rect x="20" y="660" width="10" height="20" fill="#111820"/>
-<text x="20" y="676" fill="#81909b">I</text>
 <rect x="30" y="660" width="10" height="20" fill="#111820"/>
-<text x="30" y="676" fill="#81909b">N</text>
 <rect x="40" y="660" width="10" height="20" fill="#111820"/>
-<text x="40" y="676" fill="#81909b">S</text>
+<text x="40" y="676" fill="#dce7ea">q</text>
 <rect x="50" y="660" width="10" height="20" fill="#111820"/>
-<text x="50" y="676" fill="#81909b">T</text>
+<text x="50" y="676" fill="#dce7ea">w</text>
 <rect x="60" y="660" width="10" height="20" fill="#111820"/>
-<text x="60" y="676" fill="#81909b">R</text>
+<text x="60" y="676" fill="#dce7ea">e</text>
 <rect x="70" y="660" width="10" height="20" fill="#111820"/>
-<text x="70" y="676" fill="#81909b">U</text>
+<text x="70" y="676" fill="#dce7ea">n</text>
 <rect x="80" y="660" width="10" height="20" fill="#111820"/>
-<text x="80" y="676" fill="#81909b">M</text>
+<text x="80" y="676" fill="#dce7ea">3</text>
 <rect x="90" y="660" width="10" height="20" fill="#111820"/>
-<text x="90" y="676" fill="#81909b">E</text>
+<text x="90" y="676" fill="#dce7ea">.</text>
 <rect x="100" y="660" width="10" height="20" fill="#111820"/>
-<text x="100" y="676" fill="#81909b">N</text>
+<text x="100" y="676" fill="#dce7ea">5</text>
 <rect x="110" y="660" width="10" height="20" fill="#111820"/>
-<text x="110" y="676" fill="#81909b">T</text>
+<text x="110" y="676" fill="#dce7ea">:</text>
 <rect x="120" y="660" width="10" height="20" fill="#111820"/>
-<text x="120" y="676" fill="#81909b">S</text>
+<text x="120" y="676" fill="#dce7ea">2</text>
 <rect x="130" y="660" width="10" height="20" fill="#111820"/>
+<text x="130" y="676" fill="#dce7ea">b</text>
 <rect x="140" y="660" width="10" height="20" fill="#111820"/>
+<text x="140" y="676" fill="#dce7ea">-</text>
 <rect x="150" y="660" width="10" height="20" fill="#111820"/>
+<text x="150" y="676" fill="#dce7ea">q</text>
 <rect x="160" y="660" width="10" height="20" fill="#111820"/>
+<text x="160" y="676" fill="#dce7ea">4</text>
 <rect x="170" y="660" width="10" height="20" fill="#111820"/>
+<text x="170" y="676" fill="#dce7ea">_</text>
 <rect x="180" y="660" width="10" height="20" fill="#111820"/>
+<text x="180" y="676" fill="#dce7ea">K</text>
 <rect x="190" y="660" width="10" height="20" fill="#111820"/>
+<text x="190" y="676" fill="#dce7ea">_</text>
 <rect x="200" y="660" width="10" height="20" fill="#111820"/>
+<text x="200" y="676" fill="#dce7ea">M</text>
 <rect x="210" y="660" width="10" height="20" fill="#111820"/>
 <rect x="220" y="660" width="10" height="20" fill="#111820"/>
 <rect x="230" y="660" width="10" height="20" fill="#111820"/>
@@ -3903,37 +3967,27 @@
 <text x="0" y="696" fill="#34434d">│</text>
 <rect x="10" y="680" width="10" height="20" fill="#111820"/>
 <rect x="20" y="680" width="10" height="20" fill="#111820"/>
-<text x="20" y="696" fill="#8fd19e">C</text>
+<text x="20" y="696" fill="#8fd19e">●</text>
 <rect x="30" y="680" width="10" height="20" fill="#111820"/>
-<text x="30" y="696" fill="#8fd19e">P</text>
 <rect x="40" y="680" width="10" height="20" fill="#111820"/>
-<text x="40" y="696" fill="#8fd19e">U</text>
+<text x="40" y="696" fill="#81909b">V</text>
 <rect x="50" y="680" width="10" height="20" fill="#111820"/>
+<text x="50" y="696" fill="#81909b">L</text>
 <rect x="60" y="680" width="10" height="20" fill="#111820"/>
 <rect x="70" y="680" width="10" height="20" fill="#111820"/>
 <rect x="80" y="680" width="10" height="20" fill="#111820"/>
-<text x="80" y="696" fill="#8fd19e">8</text>
 <rect x="90" y="680" width="10" height="20" fill="#111820"/>
-<text x="90" y="696" fill="#8fd19e">%</text>
 <rect x="100" y="680" width="10" height="20" fill="#111820"/>
 <rect x="110" y="680" width="10" height="20" fill="#111820"/>
 <rect x="120" y="680" width="10" height="20" fill="#111820"/>
-<text x="120" y="696" fill="#e7c66a">R</text>
 <rect x="130" y="680" width="10" height="20" fill="#111820"/>
-<text x="130" y="696" fill="#e7c66a">A</text>
 <rect x="140" y="680" width="10" height="20" fill="#111820"/>
-<text x="140" y="696" fill="#e7c66a">M</text>
 <rect x="150" y="680" width="10" height="20" fill="#111820"/>
 <rect x="160" y="680" width="10" height="20" fill="#111820"/>
-<text x="160" y="696" fill="#e7c66a">6</text>
 <rect x="170" y="680" width="10" height="20" fill="#111820"/>
-<text x="170" y="696" fill="#e7c66a">/</text>
 <rect x="180" y="680" width="10" height="20" fill="#111820"/>
-<text x="180" y="696" fill="#e7c66a">1</text>
 <rect x="190" y="680" width="10" height="20" fill="#111820"/>
-<text x="190" y="696" fill="#e7c66a">3</text>
 <rect x="200" y="680" width="10" height="20" fill="#111820"/>
-<text x="200" y="696" fill="#e7c66a">G</text>
 <rect x="210" y="680" width="10" height="20" fill="#111820"/>
 <rect x="220" y="680" width="10" height="20" fill="#111820"/>
 <rect x="230" y="680" width="10" height="20" fill="#111820"/>
@@ -4006,37 +4060,41 @@
 <text x="0" y="716" fill="#34434d">│</text>
 <rect x="10" y="700" width="10" height="20" fill="#111820"/>
 <rect x="20" y="700" width="10" height="20" fill="#111820"/>
-<text x="20" y="716" fill="#b8a1e3">V</text>
 <rect x="30" y="700" width="10" height="20" fill="#111820"/>
-<text x="30" y="716" fill="#b8a1e3">R</text>
 <rect x="40" y="700" width="10" height="20" fill="#111820"/>
-<text x="40" y="716" fill="#b8a1e3">A</text>
+<text x="40" y="716" fill="#dce7ea">q</text>
 <rect x="50" y="700" width="10" height="20" fill="#111820"/>
-<text x="50" y="716" fill="#b8a1e3">M</text>
+<text x="50" y="716" fill="#dce7ea">w</text>
 <rect x="60" y="700" width="10" height="20" fill="#111820"/>
+<text x="60" y="716" fill="#dce7ea">e</text>
 <rect x="70" y="700" width="10" height="20" fill="#111820"/>
-<text x="70" y="716" fill="#b8a1e3">4</text>
+<text x="70" y="716" fill="#dce7ea">n</text>
 <rect x="80" y="700" width="10" height="20" fill="#111820"/>
-<text x="80" y="716" fill="#b8a1e3">5</text>
+<text x="80" y="716" fill="#dce7ea">3</text>
 <rect x="90" y="700" width="10" height="20" fill="#111820"/>
-<text x="90" y="716" fill="#b8a1e3">8</text>
+<text x="90" y="716" fill="#dce7ea">.</text>
 <rect x="100" y="700" width="10" height="20" fill="#111820"/>
-<text x="100" y="716" fill="#b8a1e3">M</text>
+<text x="100" y="716" fill="#dce7ea">5</text>
 <rect x="110" y="700" width="10" height="20" fill="#111820"/>
+<text x="110" y="716" fill="#dce7ea">:</text>
 <rect x="120" y="700" width="10" height="20" fill="#111820"/>
-<text x="120" y="716" fill="#b8a1e3">/</text>
+<text x="120" y="716" fill="#dce7ea">2</text>
 <rect x="130" y="700" width="10" height="20" fill="#111820"/>
+<text x="130" y="716" fill="#dce7ea">b</text>
 <rect x="140" y="700" width="10" height="20" fill="#111820"/>
-<text x="140" y="716" fill="#b8a1e3">1</text>
+<text x="140" y="716" fill="#dce7ea">-</text>
 <rect x="150" y="700" width="10" height="20" fill="#111820"/>
-<text x="150" y="716" fill="#b8a1e3">.</text>
+<text x="150" y="716" fill="#dce7ea">q</text>
 <rect x="160" y="700" width="10" height="20" fill="#111820"/>
-<text x="160" y="716" fill="#b8a1e3">9</text>
+<text x="160" y="716" fill="#dce7ea">4</text>
 <rect x="170" y="700" width="10" height="20" fill="#111820"/>
-<text x="170" y="716" fill="#b8a1e3">G</text>
+<text x="170" y="716" fill="#dce7ea">_</text>
 <rect x="180" y="700" width="10" height="20" fill="#111820"/>
+<text x="180" y="716" fill="#dce7ea">K</text>
 <rect x="190" y="700" width="10" height="20" fill="#111820"/>
+<text x="190" y="716" fill="#dce7ea">_</text>
 <rect x="200" y="700" width="10" height="20" fill="#111820"/>
+<text x="200" y="716" fill="#dce7ea">M</text>
 <rect x="210" y="700" width="10" height="20" fill="#111820"/>
 <rect x="220" y="700" width="10" height="20" fill="#111820"/>
 <rect x="230" y="700" width="10" height="20" fill="#111820"/>
@@ -4114,40 +4172,30 @@
 <text x="0" y="736" fill="#34434d">│</text>
 <rect x="10" y="720" width="10" height="20" fill="#111820"/>
 <rect x="20" y="720" width="10" height="20" fill="#111820"/>
-<text x="20" y="736" fill="#8fd19e">●</text>
+<text x="20" y="736" fill="#67d4e8">◇</text>
 <rect x="30" y="720" width="10" height="20" fill="#111820"/>
 <rect x="40" y="720" width="10" height="20" fill="#111820"/>
-<text x="40" y="736" fill="#81909b">C</text>
+<text x="40" y="736" fill="#81909b">E</text>
 <rect x="50" y="720" width="10" height="20" fill="#111820"/>
-<text x="50" y="736" fill="#81909b">h</text>
+<text x="50" y="736" fill="#81909b">m</text>
 <rect x="60" y="720" width="10" height="20" fill="#111820"/>
-<text x="60" y="736" fill="#81909b">a</text>
+<text x="60" y="736" fill="#81909b">b</text>
 <rect x="70" y="720" width="10" height="20" fill="#111820"/>
-<text x="70" y="736" fill="#81909b">t</text>
+<text x="70" y="736" fill="#81909b">e</text>
 <rect x="80" y="720" width="10" height="20" fill="#111820"/>
+<text x="80" y="736" fill="#81909b">d</text>
 <rect x="90" y="720" width="10" height="20" fill="#111820"/>
 <rect x="100" y="720" width="10" height="20" fill="#111820"/>
-<text x="100" y="736" fill="#dce7ea">q</text>
 <rect x="110" y="720" width="10" height="20" fill="#111820"/>
-<text x="110" y="736" fill="#dce7ea">w</text>
 <rect x="120" y="720" width="10" height="20" fill="#111820"/>
-<text x="120" y="736" fill="#dce7ea">e</text>
 <rect x="130" y="720" width="10" height="20" fill="#111820"/>
-<text x="130" y="736" fill="#dce7ea">n</text>
 <rect x="140" y="720" width="10" height="20" fill="#111820"/>
-<text x="140" y="736" fill="#dce7ea">3</text>
 <rect x="150" y="720" width="10" height="20" fill="#111820"/>
-<text x="150" y="736" fill="#dce7ea">.</text>
 <rect x="160" y="720" width="10" height="20" fill="#111820"/>
-<text x="160" y="736" fill="#dce7ea">5</text>
 <rect x="170" y="720" width="10" height="20" fill="#111820"/>
-<text x="170" y="736" fill="#dce7ea">:</text>
 <rect x="180" y="720" width="10" height="20" fill="#111820"/>
-<text x="180" y="736" fill="#dce7ea">2</text>
 <rect x="190" y="720" width="10" height="20" fill="#111820"/>
-<text x="190" y="736" fill="#dce7ea">b</text>
 <rect x="200" y="720" width="10" height="20" fill="#111820"/>
-<text x="200" y="736" fill="#dce7ea">…</text>
 <rect x="210" y="720" width="10" height="20" fill="#111820"/>
 <rect x="220" y="720" width="10" height="20" fill="#111820"/>
 <rect x="230" y="720" width="10" height="20" fill="#111820"/>
@@ -4215,40 +4263,45 @@
 <text x="0" y="756" fill="#34434d">│</text>
 <rect x="10" y="740" width="10" height="20" fill="#111820"/>
 <rect x="20" y="740" width="10" height="20" fill="#111820"/>
-<text x="20" y="756" fill="#8fd19e">●</text>
 <rect x="30" y="740" width="10" height="20" fill="#111820"/>
 <rect x="40" y="740" width="10" height="20" fill="#111820"/>
-<text x="40" y="756" fill="#81909b">V</text>
+<text x="40" y="756" fill="#dce7ea">q</text>
 <rect x="50" y="740" width="10" height="20" fill="#111820"/>
-<text x="50" y="756" fill="#81909b">L</text>
+<text x="50" y="756" fill="#dce7ea">w</text>
 <rect x="60" y="740" width="10" height="20" fill="#111820"/>
+<text x="60" y="756" fill="#dce7ea">e</text>
 <rect x="70" y="740" width="10" height="20" fill="#111820"/>
+<text x="70" y="756" fill="#dce7ea">n</text>
 <rect x="80" y="740" width="10" height="20" fill="#111820"/>
+<text x="80" y="756" fill="#dce7ea">3</text>
 <rect x="90" y="740" width="10" height="20" fill="#111820"/>
+<text x="90" y="756" fill="#dce7ea">-</text>
 <rect x="100" y="740" width="10" height="20" fill="#111820"/>
-<text x="100" y="756" fill="#dce7ea">q</text>
+<text x="100" y="756" fill="#dce7ea">e</text>
 <rect x="110" y="740" width="10" height="20" fill="#111820"/>
-<text x="110" y="756" fill="#dce7ea">w</text>
+<text x="110" y="756" fill="#dce7ea">m</text>
 <rect x="120" y="740" width="10" height="20" fill="#111820"/>
-<text x="120" y="756" fill="#dce7ea">e</text>
+<text x="120" y="756" fill="#dce7ea">b</text>
 <rect x="130" y="740" width="10" height="20" fill="#111820"/>
-<text x="130" y="756" fill="#dce7ea">n</text>
+<text x="130" y="756" fill="#dce7ea">e</text>
 <rect x="140" y="740" width="10" height="20" fill="#111820"/>
-<text x="140" y="756" fill="#dce7ea">3</text>
+<text x="140" y="756" fill="#dce7ea">d</text>
 <rect x="150" y="740" width="10" height="20" fill="#111820"/>
-<text x="150" y="756" fill="#dce7ea">.</text>
+<text x="150" y="756" fill="#dce7ea">d</text>
 <rect x="160" y="740" width="10" height="20" fill="#111820"/>
-<text x="160" y="756" fill="#dce7ea">5</text>
+<text x="160" y="756" fill="#dce7ea">i</text>
 <rect x="170" y="740" width="10" height="20" fill="#111820"/>
-<text x="170" y="756" fill="#dce7ea">:</text>
+<text x="170" y="756" fill="#dce7ea">n</text>
 <rect x="180" y="740" width="10" height="20" fill="#111820"/>
-<text x="180" y="756" fill="#dce7ea">2</text>
+<text x="180" y="756" fill="#dce7ea">g</text>
 <rect x="190" y="740" width="10" height="20" fill="#111820"/>
-<text x="190" y="756" fill="#dce7ea">b</text>
+<text x="190" y="756" fill="#dce7ea">:</text>
 <rect x="200" y="740" width="10" height="20" fill="#111820"/>
-<text x="200" y="756" fill="#dce7ea">…</text>
+<text x="200" y="756" fill="#dce7ea">0</text>
 <rect x="210" y="740" width="10" height="20" fill="#111820"/>
+<text x="210" y="756" fill="#dce7ea">.</text>
 <rect x="220" y="740" width="10" height="20" fill="#111820"/>
+<text x="220" y="756" fill="#dce7ea">…</text>
 <rect x="230" y="740" width="10" height="20" fill="#111820"/>
 <text x="230" y="756" fill="#34434d">│</text>
 <text x="250" y="756" fill="#5fd7d7">│</text>
@@ -4390,38 +4443,28 @@
 <text x="20" y="776" fill="#67d4e8">◇</text>
 <rect x="30" y="760" width="10" height="20" fill="#111820"/>
 <rect x="40" y="760" width="10" height="20" fill="#111820"/>
-<text x="40" y="776" fill="#81909b">E</text>
+<text x="40" y="776" fill="#81909b">R</text>
 <rect x="50" y="760" width="10" height="20" fill="#111820"/>
-<text x="50" y="776" fill="#81909b">m</text>
+<text x="50" y="776" fill="#81909b">e</text>
 <rect x="60" y="760" width="10" height="20" fill="#111820"/>
-<text x="60" y="776" fill="#81909b">b</text>
+<text x="60" y="776" fill="#81909b">r</text>
 <rect x="70" y="760" width="10" height="20" fill="#111820"/>
-<text x="70" y="776" fill="#81909b">e</text>
+<text x="70" y="776" fill="#81909b">a</text>
 <rect x="80" y="760" width="10" height="20" fill="#111820"/>
-<text x="80" y="776" fill="#81909b">d</text>
+<text x="80" y="776" fill="#81909b">n</text>
 <rect x="90" y="760" width="10" height="20" fill="#111820"/>
+<text x="90" y="776" fill="#81909b">k</text>
 <rect x="100" y="760" width="10" height="20" fill="#111820"/>
-<text x="100" y="776" fill="#dce7ea">q</text>
 <rect x="110" y="760" width="10" height="20" fill="#111820"/>
-<text x="110" y="776" fill="#dce7ea">w</text>
 <rect x="120" y="760" width="10" height="20" fill="#111820"/>
-<text x="120" y="776" fill="#dce7ea">e</text>
 <rect x="130" y="760" width="10" height="20" fill="#111820"/>
-<text x="130" y="776" fill="#dce7ea">n</text>
 <rect x="140" y="760" width="10" height="20" fill="#111820"/>
-<text x="140" y="776" fill="#dce7ea">3</text>
 <rect x="150" y="760" width="10" height="20" fill="#111820"/>
-<text x="150" y="776" fill="#dce7ea">-</text>
 <rect x="160" y="760" width="10" height="20" fill="#111820"/>
-<text x="160" y="776" fill="#dce7ea">e</text>
 <rect x="170" y="760" width="10" height="20" fill="#111820"/>
-<text x="170" y="776" fill="#dce7ea">m</text>
 <rect x="180" y="760" width="10" height="20" fill="#111820"/>
-<text x="180" y="776" fill="#dce7ea">b</text>
 <rect x="190" y="760" width="10" height="20" fill="#111820"/>
-<text x="190" y="776" fill="#dce7ea">e</text>
 <rect x="200" y="760" width="10" height="20" fill="#111820"/>
-<text x="200" y="776" fill="#dce7ea">…</text>
 <rect x="210" y="760" width="10" height="20" fill="#111820"/>
 <rect x="220" y="760" width="10" height="20" fill="#111820"/>
 <rect x="230" y="760" width="10" height="20" fill="#111820"/>
@@ -4528,44 +4571,45 @@
 <text x="0" y="796" fill="#34434d">│</text>
 <rect x="10" y="780" width="10" height="20" fill="#111820"/>
 <rect x="20" y="780" width="10" height="20" fill="#111820"/>
-<text x="20" y="796" fill="#67d4e8">◇</text>
 <rect x="30" y="780" width="10" height="20" fill="#111820"/>
 <rect x="40" y="780" width="10" height="20" fill="#111820"/>
-<text x="40" y="796" fill="#81909b">R</text>
+<text x="40" y="796" fill="#dce7ea">m</text>
 <rect x="50" y="780" width="10" height="20" fill="#111820"/>
-<text x="50" y="796" fill="#81909b">e</text>
+<text x="50" y="796" fill="#dce7ea">m</text>
 <rect x="60" y="780" width="10" height="20" fill="#111820"/>
-<text x="60" y="796" fill="#81909b">r</text>
+<text x="60" y="796" fill="#dce7ea">a</text>
 <rect x="70" y="780" width="10" height="20" fill="#111820"/>
-<text x="70" y="796" fill="#81909b">a</text>
+<text x="70" y="796" fill="#dce7ea">r</text>
 <rect x="80" y="780" width="10" height="20" fill="#111820"/>
-<text x="80" y="796" fill="#81909b">n</text>
+<text x="80" y="796" fill="#dce7ea">c</text>
 <rect x="90" y="780" width="10" height="20" fill="#111820"/>
-<text x="90" y="796" fill="#81909b">k</text>
+<text x="90" y="796" fill="#dce7ea">o</text>
 <rect x="100" y="780" width="10" height="20" fill="#111820"/>
-<text x="100" y="796" fill="#dce7ea">m</text>
+<text x="100" y="796" fill="#dce7ea">-</text>
 <rect x="110" y="780" width="10" height="20" fill="#111820"/>
 <text x="110" y="796" fill="#dce7ea">m</text>
 <rect x="120" y="780" width="10" height="20" fill="#111820"/>
-<text x="120" y="796" fill="#dce7ea">a</text>
+<text x="120" y="796" fill="#dce7ea">M</text>
 <rect x="130" y="780" width="10" height="20" fill="#111820"/>
-<text x="130" y="796" fill="#dce7ea">r</text>
+<text x="130" y="796" fill="#dce7ea">i</text>
 <rect x="140" y="780" width="10" height="20" fill="#111820"/>
-<text x="140" y="796" fill="#dce7ea">c</text>
+<text x="140" y="796" fill="#dce7ea">n</text>
 <rect x="150" y="780" width="10" height="20" fill="#111820"/>
-<text x="150" y="796" fill="#dce7ea">o</text>
+<text x="150" y="796" fill="#dce7ea">i</text>
 <rect x="160" y="780" width="10" height="20" fill="#111820"/>
-<text x="160" y="796" fill="#dce7ea">-</text>
+<text x="160" y="796" fill="#dce7ea">L</text>
 <rect x="170" y="780" width="10" height="20" fill="#111820"/>
-<text x="170" y="796" fill="#dce7ea">m</text>
+<text x="170" y="796" fill="#dce7ea">M</text>
 <rect x="180" y="780" width="10" height="20" fill="#111820"/>
-<text x="180" y="796" fill="#dce7ea">M</text>
+<text x="180" y="796" fill="#dce7ea">v</text>
 <rect x="190" y="780" width="10" height="20" fill="#111820"/>
-<text x="190" y="796" fill="#dce7ea">i</text>
+<text x="190" y="796" fill="#dce7ea">2</text>
 <rect x="200" y="780" width="10" height="20" fill="#111820"/>
-<text x="200" y="796" fill="#dce7ea">…</text>
+<text x="200" y="796" fill="#dce7ea">-</text>
 <rect x="210" y="780" width="10" height="20" fill="#111820"/>
+<text x="210" y="796" fill="#dce7ea">L</text>
 <rect x="220" y="780" width="10" height="20" fill="#111820"/>
+<text x="220" y="796" fill="#dce7ea">…</text>
 <rect x="230" y="780" width="10" height="20" fill="#111820"/>
 <text x="230" y="796" fill="#34434d">│</text>
 <text x="250" y="796" fill="#5fd7d7">│</text>

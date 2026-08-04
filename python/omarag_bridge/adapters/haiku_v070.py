@@ -279,19 +279,28 @@ Belege jede wesentliche fachliche Aussage mit den gelieferten Quellen. Erfinde
 keine Seiten, Werte, Formeln, Normen oder Begruendungen. Wenn der Kontext nicht
 ausreicht, antworte exakt: \"In den bereitgestellten Quellen nicht ausreichend
 belegt.\" Uebernimm Zahlen, Einheiten und Formelzeichen exakt. Bei Konflikten
-nenne beide Aussagen samt Ausgabe. Zitiere nur Originalquellen.
+nenne beide Aussagen samt Ausgabe. Zitiere nur Originalquellen. Schreibe
+mathematische Variablen und Formeln als LaTeX zwischen Dollarzeichen, zum
+Beispiel $d_1$ oder $\\rho$. Gib relevante Tabellen vollstaendig als
+Markdown-Tabelle wieder; vermische sie nicht mit benachbarten Tabellen. Fehlen
+fuer eine verlangte Tabelle Zeilen oder Spalten im Kontext, behaupte keine
+Vollstaendigkeit. Verweise im Fliesstext nicht auf Abbildungsnummern; die
+Anwendung zeigt zugehoerige Bilder bei den Quellen.
 """.strip()
 
 NORMAL_PREAMBLE = """
 Bevorzuge die bereitgestellten Fach- und Lehrbuecher und belege fachliche
 Aussagen. Kennzeichne Schlussfolgerungen ausdruecklich. Wenn eine Aussage nicht
-aus den Quellen folgt, sage das klar und erfinde keine Fundstelle.
+aus den Quellen folgt, sage das klar und erfinde keine Fundstelle. Gib relevante
+Tabellen als Markdown und mathematische Ausdruecke als LaTeX zwischen
+Dollarzeichen aus. Verweise nicht auf Abbildungsnummern im Fliesstext.
 """.strip()
 
 EXPLORE_PREAMBLE = """
 Nutze die bereitgestellten Quellen als Ausgangspunkt. Trenne belegte Aussagen,
 eigene Schlussfolgerungen und ergaenzendes Allgemeinwissen sichtbar voneinander.
-Erfinde keine Fundstellen.
+Erfinde keine Fundstellen. Formatiere Tabellen als Markdown und Mathematik als
+LaTeX zwischen Dollarzeichen.
 """.strip()
 
 
@@ -682,8 +691,12 @@ class VanillaHaikuAdapter(HaikuAdapter):
                     try:
                         config = copy.deepcopy(base_config)
                         options = config.processing.conversion_options
-                        options.do_ocr = scanned
-                        options.force_ocr = False
+                        # A page can contain plenty of native text and still keep
+                        # its most important table or formula as a bitmap.  The
+                        # page classifier only decides segmentation; it must not
+                        # silently disable the OCR policy selected by the user.
+                        options.do_ocr = bool(options.do_ocr) or scanned
+                        options.force_ocr = bool(options.force_ocr)
                         if processing_profile in {"eco", "low-memory", "fast"}:
                             # These opt-in profiles trade table reconstruction
                             # detail for a lower Docling peak. Technical and
@@ -691,9 +704,24 @@ class VanillaHaikuAdapter(HaikuAdapter):
                             options.table_mode = "fast"
                             options.table_cell_matching = False
                             options.images_scale = min(float(options.images_scale), 1.0)
+                        conversion_signature = {
+                            "do_ocr": bool(options.do_ocr),
+                            "force_ocr": bool(options.force_ocr),
+                            "ocr_engine": str(getattr(options, "ocr_engine", "")),
+                            "ocr_lang": list(getattr(options, "ocr_lang", []) or []),
+                            "do_table_structure": bool(
+                                getattr(options, "do_table_structure", False)
+                            ),
+                            "table_mode": str(getattr(options, "table_mode", "")),
+                            "table_cell_matching": bool(
+                                getattr(options, "table_cell_matching", False)
+                            ),
+                            "images_scale": float(getattr(options, "images_scale", 1.0)),
+                        }
                         cache_material = (
-                            f"v2:{document_fingerprint}:{start}:{end}:{processing_profile}:"
-                            f"ocr={scanned}:haiku={self.version or 'unknown'}"
+                            f"v3:{document_fingerprint}:{start}:{end}:{processing_profile}:"
+                            f"{json.dumps(conversion_signature, sort_keys=True)}:"
+                            f"haiku={self.version or 'unknown'}"
                         )
                         cache_key = hashlib.sha256(cache_material.encode()).hexdigest()
                         cache_path = _cache_file(database, cache_key)

@@ -33,7 +33,7 @@ class BackendMeta(StrictModel):
     api_version: str = "1.0"
     min_client_version: str = "1.0"
     max_client_version: str = "1.x"
-    omarag_version: str = "0.8.0"
+    omarag_version: str = "0.9.0"
     haiku_version: str | None = None
     adapter: str | None = None
     backend_id: str

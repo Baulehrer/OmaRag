@@ -226,13 +226,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         services.store.close()
 
     app = FastAPI(
-        title="Oracle of Daedalus API",
+        title="OmaRag API",
         version=__version__,
         openapi_version="3.1.0",
         lifespan=lifespan,
         description=(
-            "Offline Retrieval-Augmented Command-Line Environment; "
-            "stable operations and quality layer for vanilla Haiku RAG"
+            "Oracle of Metis & Aletheia; stable operations and quality layer for vanilla Haiku RAG"
         ),
     )
     app.state.services = services

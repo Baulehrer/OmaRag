@@ -11,9 +11,7 @@ from .config import Settings
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(
-        prog="omaragd", description="Oracle of Daedalus backend daemon"
-    )
+    result = argparse.ArgumentParser(prog="omaragd", description="OmaRag backend daemon")
     result.add_argument("--data-dir", type=Path)
     result.add_argument("--host", default="127.0.0.1")
     result.add_argument("--port", type=int, default=8765)

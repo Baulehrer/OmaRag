@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${ORACLE_REPOSITORY:-Baulehrer/oracle-of-daedalus}
-VERSION=0.8.0
+REPOSITORY=${OMARAG_REPOSITORY:-${ORACLE_REPOSITORY:-Baulehrer/OmaRag}}
+VERSION=0.9.0
 PREFIX=${ORACLE_PREFIX:-"$HOME/.local"}
 INSTALL_SERVICE=1
 INSTALL_UPDATER=1
@@ -29,12 +29,12 @@ done
 
 case "$(uname -m)" in
     x86_64|amd64) ARCH=x86_64 ;;
-    *) printf 'Release 0.8 supports x86_64 Linux only.\n' >&2; exit 1 ;;
+    *) printf 'OmaRag 0.9 supports x86_64 Linux only.\n' >&2; exit 1 ;;
 esac
 
 TAG="v$VERSION"
 BASE_URL=${ORACLE_BASE_URL:-"https://github.com/$REPOSITORY/releases/download/$TAG"}
-ARCHIVE="oracle-of-daedalus-$VERSION-linux-$ARCH.tar.gz"
+ARCHIVE="omarag-$VERSION-linux-$ARCH.tar.gz"
 WHEEL="omarag_bridge-$VERSION-py3-none-any.whl"
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oracle-install.XXXXXX")
 CANDIDATE_VENV=
@@ -46,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-printf 'Oracle of Dædalus %s -> %s\n' "$VERSION" "$PREFIX"
+printf 'OmaRag %s · Oracle of Metis & Aletheia -> %s\n' "$VERSION" "$PREFIX"
 if [ "$DRY_RUN" -eq 1 ]; then
     printf 'Would download %s and %s, verify SHA-256, install the daemon, client and updater.\n' \
         "$ARCHIVE" "$WHEEL"
@@ -132,8 +132,11 @@ write_wrapper() {
     {
         printf '%s\n' '#!/bin/sh'
         printf "ENV_FILE='%s'\n" "$(printf %s "$ENV_FILE" | sed "s/'/'\\\\''/g")"
+        # These expressions belong to the generated launcher.
+        # shellcheck disable=SC2016
         printf '%s\n' 'if [ -r "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi'
         printf 'export ORACLE_VERSION=%s\n' "$version"
+        # shellcheck disable=SC2016
         printf '%s\n' \
             'export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}' \
             'export MALLOC_TRIM_THRESHOLD_=${MALLOC_TRIM_THRESHOLD_:-131072}' \

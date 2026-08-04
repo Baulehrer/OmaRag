@@ -1,7 +1,9 @@
 use crate::{
-    FoundryControl, app_areas, catalog_filter_areas, centered, confirm_import_area,
+    FoundryControl, app_areas, catalog_filter_areas, centered, chat_answer_offset,
+    chat_bold_term_at, chat_selection_text, confirm_import_area, confirm_quit_area,
     delete_model_confirm_area, file_browser_areas, foundry_catalog_areas, foundry_controls,
-    foundry_setup_areas, model_center_areas, screen_areas, sidebar_navigation_rows,
+    foundry_setup_areas, model_center_areas, related_image_refs, screen_areas,
+    sidebar_navigation_rows, source_citation_row_offset, source_inspector_areas,
 };
 use crossterm::{
     event::{
@@ -15,10 +17,10 @@ use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
 };
 use omarag_app::{
-    Action, AppState, ChatSession, CustomLibraryProfile, EditorState, FocusPane, FocusPanel,
-    HardwareProfile, ImportPreflight, InputMode, InteractionLevel, LibraryFilter, ModelCategory,
-    ModelMemoryPolicy, ModelQuantization, ModelSource, Notification, NotificationLevel, Overlay,
-    Route, THEME_COUNT, UndoAction, View, WorkspaceProfile, update,
+    Action, AppState, ChatSession, ChatTextSelection, CustomLibraryProfile, EditorState, FocusPane,
+    FocusPanel, HardwareProfile, ImportPreflight, InputMode, InteractionLevel, LibraryFilter,
+    ModelCategory, ModelMemoryPolicy, ModelQuantization, ModelSource, Notification,
+    NotificationLevel, Overlay, Route, THEME_COUNT, UndoAction, View, WorkspaceProfile, update,
 };
 use omarag_domain::{
     CreateSource, CreateWorkspace, DocumentSummary, EvidenceMode, IngestRequest, JobId, JobStatus,
@@ -313,6 +315,7 @@ fn handle_mouse(state: &mut AppState, mouse: MouseEvent, screen: Rect) -> Option
         MouseEventKind::Drag(MouseButton::Left) => {
             handle_mouse_primary(state, mouse, screen, false)
         }
+        MouseEventKind::Up(MouseButton::Left) => finish_chat_selection(state, mouse, screen),
         MouseEventKind::Up(_) | MouseEventKind::Moved | MouseEventKind::Drag(_) => None,
     }
 }
@@ -369,11 +372,33 @@ fn handle_mouse_primary(
                 let input_height = if inner.height >= 9 { 3 } else { 1 };
                 let input_y = inner.bottom().saturating_sub(input_height);
                 if mouse.row >= input_y {
+                    state.chat.selection = None;
                     state.input_mode = InputMode::Text;
                     set_editor_cursor_from_column(
                         &mut state.chat.question,
                         mouse.column.saturating_sub(inner.x) as usize,
                     );
+                } else if !state.chat.answer.is_empty()
+                    && let Some(offset) = chat_answer_offset(
+                        &state.chat.answer,
+                        state.citation_cursor,
+                        inner.width,
+                        state.chat_scroll,
+                        mouse.column.saturating_sub(inner.x),
+                        mouse.row.saturating_sub(inner.y),
+                    )
+                {
+                    state.input_mode = InputMode::Nav;
+                    if activate {
+                        state.chat.selection = Some(ChatTextSelection {
+                            anchor: offset,
+                            focus: offset,
+                            moved: false,
+                        });
+                    } else if let Some(selection) = state.chat.selection.as_mut() {
+                        selection.focus = offset;
+                        selection.moved |= selection.anchor != offset;
+                    }
                 }
             }
             View::Books => {
@@ -473,6 +498,12 @@ fn handle_mouse_primary(
                     }
                 }
             }
+            View::Settings => {
+                let option_y = inner.y.saturating_add(3);
+                if activate && mouse.row >= option_y && mouse.row < option_y.saturating_add(4) {
+                    toggle_bold_term_explanations(state);
+                }
+            }
             _ => {}
         }
         return None;
@@ -481,25 +512,116 @@ fn handle_mouse_primary(
         let inner = bordered_inner(areas.inspector);
         if matches!(state.view, View::Conversation | View::Retrieval) {
             update(state, Action::SetFocusPane(FocusPane::Inspector));
-            let preview_height = if state.chat.citations.is_empty() || inner.height < 16 {
-                0
-            } else {
-                inner.height.min(10)
-            };
-            let list_y = inner.y.saturating_add(preview_height).saturating_add(3);
-            if mouse.row >= list_y && !state.chat.citations.is_empty() {
-                let index = (mouse.row.saturating_sub(list_y) as usize / 2)
-                    .min(state.chat.citations.len().saturating_sub(1));
-                state.citation_cursor = index;
-                state.citation_page_cursor = 0;
-                if activate {
-                    return selected_citation_command(state, false);
+            let [images, sources] = source_inspector_areas(inner);
+            let image_inner = bordered_inner(images);
+            if contains(image_inner, &mouse) {
+                let column = usize::from(
+                    mouse.column >= image_inner.x.saturating_add(image_inner.width / 2),
+                );
+                let row =
+                    usize::from(mouse.row >= image_inner.y.saturating_add(image_inner.height / 2));
+                let slot = row * 2 + column;
+                if let Some((citation_index, page_index, _)) =
+                    related_image_refs(state).get(slot).copied()
+                {
+                    state.citation_cursor = citation_index;
+                    state.citation_page_cursor = page_index;
+                    if activate {
+                        return selected_citation_command(state, true);
+                    }
+                }
+            } else if contains(bordered_inner(sources), &mouse) && !state.chat.citations.is_empty()
+            {
+                let sources_inner = bordered_inner(sources);
+                let row = mouse
+                    .row
+                    .saturating_sub(sources_inner.y)
+                    .saturating_add(state.inspector_scroll);
+                let citation_start = source_citation_row_offset(state);
+                if row >= citation_start {
+                    let index = (row.saturating_sub(citation_start) as usize / 2)
+                        .min(state.chat.citations.len().saturating_sub(1));
+                    state.citation_cursor = index;
+                    state.citation_page_cursor = 0;
+                    if activate {
+                        return selected_citation_command(state, false);
+                    }
                 }
             }
         }
         return None;
     }
     None
+}
+
+fn finish_chat_selection(
+    state: &mut AppState,
+    mouse: MouseEvent,
+    screen: Rect,
+) -> Option<UiCommand> {
+    if state.overlay.is_some() || state.view != View::Conversation || state.chat.answer.is_empty() {
+        return None;
+    }
+    let [_header, body, _footer] = screen_areas(screen);
+    let areas = app_areas(body, state.focus_pane);
+    if !contains(areas.workspace, &mouse) {
+        return None;
+    }
+    let inner = bordered_inner(areas.workspace);
+    let input_height = if inner.height >= 9 { 3 } else { 1 };
+    let answer_bottom = inner.bottom().saturating_sub(input_height);
+    if mouse.row >= answer_bottom {
+        return None;
+    }
+    if let Some(offset) = chat_answer_offset(
+        &state.chat.answer,
+        state.citation_cursor,
+        inner.width,
+        state.chat_scroll,
+        mouse.column.saturating_sub(inner.x),
+        mouse.row.saturating_sub(inner.y),
+    ) && let Some(selection) = state.chat.selection.as_mut()
+    {
+        selection.focus = offset;
+        selection.moved |= selection.anchor != offset;
+    }
+    let selection = state.chat.selection?;
+    if selection.moved {
+        let selected = chat_selection_text(
+            &state.chat.answer,
+            state.citation_cursor,
+            inner.width,
+            selection,
+        )?;
+        notify(state, NotificationLevel::Info, "Selection copied.");
+        return Some(UiCommand::CopyText(selected));
+    }
+    state.chat.selection = None;
+    if state.bold_term_explanations_disabled
+        || state.chat.active_run.is_some()
+        || state.chat.request_pending
+    {
+        return None;
+    }
+    let term = chat_bold_term_at(
+        &state.chat.answer,
+        state.citation_cursor,
+        inner.width,
+        state.chat_scroll,
+        mouse.column.saturating_sub(inner.x),
+        mouse.row.saturating_sub(inner.y),
+    )?;
+    let context = state.chat.question.value.trim().to_owned();
+    state.chat.question.set(if context.is_empty() {
+        format!(
+            "Erkläre den Fachbegriff „{term}“ kurz und einfach. Nutze ausschließlich die vorhandenen Quellen."
+        )
+    } else {
+        format!(
+            "Erkläre den Fachbegriff „{term}“ kurz und einfach im Zusammenhang mit der Frage „{context}“. Nutze ausschließlich die vorhandenen Quellen."
+        )
+    });
+    repeat_current_question(state)
 }
 
 fn citation_pdf_target(
@@ -547,6 +669,17 @@ fn handle_overlay_mouse(
     activate: bool,
 ) -> Option<UiCommand> {
     match overlay {
+        Overlay::ConfirmQuit => {
+            let area = confirm_quit_area(screen);
+            if activate && contains(area, &mouse) && mouse.row >= area.y.saturating_add(4) {
+                if mouse.column < area.x.saturating_add(area.width / 2) {
+                    update(state, Action::QuitRequested);
+                } else {
+                    update(state, Action::CloseOverlay);
+                }
+            }
+            None
+        }
         Overlay::Help => {
             if activate {
                 update(state, Action::CloseOverlay);
@@ -858,6 +991,7 @@ fn handle_delete_model_confirm_mouse(
 fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
     let next = matches!(mouse.kind, MouseEventKind::ScrollDown);
     match state.overlay {
+        Some(Overlay::ConfirmQuit) => {}
         Some(Overlay::Palette) => {
             let count = filtered_palette_commands(state).len();
             if count > 0 {
@@ -997,7 +1131,12 @@ fn handle_paste(state: &mut AppState, text: &str) {
 
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        update(state, Action::QuitRequested);
+        if state.overlay == Some(Overlay::ConfirmQuit) {
+            update(state, Action::QuitRequested);
+        } else {
+            state.overlay = Some(Overlay::ConfirmQuit);
+            state.input_mode = InputMode::Nav;
+        }
         return None;
     }
     if let Some(overlay) = state.overlay {
@@ -1044,7 +1183,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
 fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<UiCommand>> {
     let command = match code {
         KeyCode::Char('c') => {
-            update(state, Action::QuitRequested);
+            state.overlay = Some(Overlay::ConfirmQuit);
             None
         }
         KeyCode::Char('s') => {
@@ -1085,7 +1224,7 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             None
         }
         KeyCode::Char('q') => {
-            update(state, Action::QuitRequested);
+            state.overlay = Some(Overlay::ConfirmQuit);
             None
         }
         KeyCode::Char('i') => {
@@ -1461,6 +1600,18 @@ fn undo_last_action(state: &mut AppState) -> Option<UiCommand> {
 
 fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Option<UiCommand> {
     match overlay {
+        Overlay::ConfirmQuit => {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+                    update(state, Action::QuitRequested);
+                }
+                KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+                    update(state, Action::CloseOverlay);
+                }
+                _ => {}
+            }
+            None
+        }
         Overlay::Help => {
             if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) {
                 update(state, Action::CloseOverlay);
@@ -2005,6 +2156,7 @@ fn conversation_id(state: &mut AppState, workspace: &WorkspaceId) -> String {
 
 fn restore_chat_session(state: &mut AppState, session: ChatSession, include_answer: bool) {
     state.chat.question.set(session.question);
+    state.chat.selection = None;
     if !session.session_id.is_empty() {
         state
             .conversation_ids
@@ -2017,6 +2169,19 @@ fn restore_chat_session(state: &mut AppState, session: ChatSession, include_answ
         state.citation_cursor = 0;
         state.citation_page_cursor = 0;
     }
+}
+
+fn toggle_bold_term_explanations(state: &mut AppState) {
+    state.bold_term_explanations_disabled = !state.bold_term_explanations_disabled;
+    notify(
+        state,
+        NotificationLevel::Info,
+        if state.bold_term_explanations_disabled {
+            "Bold-term explanations disabled."
+        } else {
+            "Bold-term explanations enabled."
+        },
+    );
 }
 
 fn handle_chat_history(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
@@ -3393,6 +3558,11 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         return None;
     }
 
+    if state.view == View::Settings && matches!(key.code, KeyCode::Char('b' | 'B')) {
+        toggle_bold_term_explanations(state);
+        return None;
+    }
+
     if state.view == View::Settings && matches!(key.code, KeyCode::Char('m' | 'a')) {
         update(state, Action::ToggleInteractionLevel);
         update(state, Action::SetInputMode(InputMode::Nav));
@@ -4120,9 +4290,10 @@ mod tests {
             ..AppState::default()
         };
         state.chat.citations = vec![
-            citation("/tmp/first.pdf", &[4, 7]),
-            citation("/tmp/second.pdf", &[30]),
+            citation("/tmp/first.pdf", &[4, 7, 8]),
+            citation("/tmp/second.pdf", &[30, 31]),
         ];
+        assert_eq!(related_image_refs(&state).len(), 4);
 
         handle_event(&mut state, key(KeyCode::Right));
         let command = handle_event(&mut state, key(KeyCode::Enter));
@@ -4133,7 +4304,26 @@ mod tests {
 
         let [_header, body, _footer] = screen_areas(screen);
         let inspector = bordered_inner(app_areas(body, FocusPane::Inspector).inspector);
-        let second_source_row = inspector.y + inspector.height.min(10) + 3 + 2;
+        let [images, sources] = source_inspector_areas(inspector);
+        let images = bordered_inner(images);
+        let image_command = handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                images.x + images.width.saturating_mul(3) / 4,
+                images.y + 1,
+            ),
+            screen,
+        );
+        assert_eq!(state.citation_cursor, 1);
+        assert!(matches!(
+            image_command,
+            Some(UiCommand::OpenPageImage { path, page: 30, .. })
+                if path == "/tmp/second.pdf"
+        ));
+
+        let sources = bordered_inner(sources);
+        let second_source_row = sources.y + source_citation_row_offset(&state) + 2;
         let command = handle_mouse(
             &mut state,
             mouse(
@@ -4240,17 +4430,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_requests_a_clean_shutdown() {
+    fn ctrl_c_opens_confirmation_then_quits() {
         let mut state = AppState::default();
         handle_event(
             &mut state,
             modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
+        assert_eq!(state.overlay, Some(Overlay::ConfirmQuit));
+        assert!(!state.quit_requested);
+        handle_event(&mut state, key(KeyCode::Enter));
         assert!(state.quit_requested);
     }
 
     #[test]
-    fn ctrl_c_closes_from_confirmation_overlays() {
+    fn ctrl_c_replaces_other_confirmation_without_quitting() {
         let mut state = AppState {
             overlay: Some(Overlay::ConfirmModelDelete),
             ..AppState::default()
@@ -4259,7 +4452,10 @@ mod tests {
             &mut state,
             modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
-        assert!(state.quit_requested);
+        assert_eq!(state.overlay, Some(Overlay::ConfirmQuit));
+        assert!(!state.quit_requested);
+        handle_event(&mut state, key(KeyCode::Char('n')));
+        assert_eq!(state.overlay, None);
     }
 
     #[test]
@@ -4472,6 +4668,77 @@ mod tests {
         handle_event(&mut state, key(KeyCode::Char('m')));
         assert_eq!(state.interaction_level, InteractionLevel::Simple);
         assert_eq!(state.focus_pane, FocusPane::Workspace);
+        handle_event(&mut state, key(KeyCode::Char('b')));
+        assert!(state.bold_term_explanations_disabled);
+    }
+
+    #[test]
+    fn chat_drag_copies_rendered_text_and_bold_click_starts_an_explanation() {
+        let screen = Rect::new(0, 0, 160, 40);
+        let mut state = AppState {
+            view: View::Conversation,
+            focus_pane: FocusPane::Workspace,
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        state.chat.answer = "plain **Beton** end".into();
+        state.chat.question.set("Was ist Beton?");
+        let [_header, body, _footer] = screen_areas(screen);
+        let workspace = bordered_inner(app_areas(body, FocusPane::Workspace).workspace);
+
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                workspace.x + 6,
+                workspace.y,
+            ),
+            screen,
+        );
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                workspace.x + 10,
+                workspace.y,
+            ),
+            screen,
+        );
+        let copied = handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                workspace.x + 10,
+                workspace.y,
+            ),
+            screen,
+        );
+        assert_eq!(copied, Some(UiCommand::CopyText("Beton".into())));
+
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                workspace.x + 7,
+                workspace.y,
+            ),
+            screen,
+        );
+        let explanation = handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                workspace.x + 7,
+                workspace.y,
+            ),
+            screen,
+        );
+        assert!(matches!(
+            explanation,
+            Some(UiCommand::StartRun { question, .. })
+                if question.contains("Fachbegriff „Beton“")
+                    && question.contains("Was ist Beton?")
+        ));
     }
 
     #[test]

@@ -28,19 +28,19 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#v}" scripts/package-release.sh
-          APPIMAGE_EXTRACT_AND_RUN=1 "dist/Oracle-of-Daedalus-${VERSION#v}-x86_64.AppImage" --version
+          APPIMAGE_EXTRACT_AND_RUN=1 "dist/OmaRag-${VERSION#v}-x86_64.AppImage" --version
           (cd dist && sha256sum --check SHA256SUMS)
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/oracle-of-daedalus-*.tar.gz \
+            dist/omarag-*.tar.gz \
             dist/omarag_bridge-*.whl \
-            dist/Oracle-of-Daedalus-*.AppImage \
-            dist/Oracle-of-Daedalus-*.AppImage.zsync \
+            dist/OmaRag-*.AppImage \
+            dist/OmaRag-*.AppImage.zsync \
             dist/install.sh dist/SHA256SUMS \
-            --title "Oracle of Dædalus ${GITHUB_REF_NAME}" \
+            --title "OmaRag ${GITHUB_REF_NAME}" \
             --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
 
   container:

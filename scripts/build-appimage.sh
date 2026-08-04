@@ -1,14 +1,14 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BINARY=${1:-"$ROOT_DIR/target/release/omarag"}
 OUTPUT_DIR=${2:-"$ROOT_DIR/dist"}
-VERSION=${VERSION:-0.8.0}
+VERSION=${VERSION:-0.9.0}
 ARCH=${ARCH:-x86_64}
 APPIMAGETOOL=${APPIMAGETOOL:-"$ROOT_DIR/dist/appimagetool-$ARCH.AppImage"}
-APPDIR="$OUTPUT_DIR/Oracle-of-Daedalus.AppDir"
-OUTPUT="$OUTPUT_DIR/Oracle-of-Daedalus-$VERSION-$ARCH.AppImage"
+APPDIR="$OUTPUT_DIR/OmaRag.AppDir"
+OUTPUT="$OUTPUT_DIR/OmaRag-$VERSION-$ARCH.AppImage"
 
 if [ ! -x "$BINARY" ]; then
     printf 'Missing release binary: %s\n' "$BINARY" >&2
@@ -20,11 +20,14 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
     "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 install -m755 "$BINARY" "$APPDIR/usr/bin/oracle"
-install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/oracle-of-daedalus.desktop"
-install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/usr/share/applications/oracle-of-daedalus.desktop"
-install -m644 "$ROOT_DIR/assets/oracle-of-daedalus.svg" "$APPDIR/oracle-of-daedalus.svg"
-install -m644 "$ROOT_DIR/assets/oracle-of-daedalus.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/oracle-of-daedalus.svg"
+install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/omarag.desktop"
+install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/usr/share/applications/omarag.desktop"
+install -m644 "$ROOT_DIR/assets/omarag.svg" "$APPDIR/omarag.svg"
+install -m644 "$ROOT_DIR/assets/omarag.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/omarag.svg"
 
+# The single-quoted lines are the generated AppRun script, not expressions for
+# this build process to expand.
+# shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
     'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' \
     'ENV_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/oracle-of-daedalus/oracle.env' \
@@ -43,7 +46,7 @@ if [ ! -x "$APPIMAGETOOL" ]; then
     chmod 755 "$APPIMAGETOOL"
 fi
 
-UPDATE_INFO="gh-releases-zsync|Baulehrer|oracle-of-daedalus|latest|Oracle-of-Daedalus-*-$ARCH.AppImage.zsync"
+UPDATE_INFO="gh-releases-zsync|Baulehrer|OmaRag|latest|OmaRag-*-$ARCH.AppImage.zsync"
 ARCH=$ARCH VERSION=$VERSION APPIMAGE_EXTRACT_AND_RUN=1 \
     "$APPIMAGETOOL" --comp xz --updateinformation "$UPDATE_INFO" "$APPDIR" "$OUTPUT"
 chmod 755 "$OUTPUT"

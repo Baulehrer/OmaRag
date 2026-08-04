@@ -812,7 +812,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.8.0".into(),
+            omarag_version: "0.9.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "mock".into(),

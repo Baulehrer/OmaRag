@@ -1,5 +1,5 @@
 [Unit]
-Description=Check weekly for Oracle of Daedalus updates
+Description=Check weekly for OmaRag updates
 
 [Timer]
 OnBootSec=15min

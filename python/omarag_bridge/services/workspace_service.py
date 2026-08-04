@@ -145,7 +145,7 @@ processing:
   chunk_size: 384
   chunking_tokenizer: Qwen/Qwen3-Embedding-0.6B
   chunking_merge_peers: true
-  chunking_use_markdown_tables: false
+  chunking_use_markdown_tables: true
   split_pages: 25
   pictures: none
   auto_title: false
@@ -177,6 +177,8 @@ prompts:
     Uebernimm Zahlen, Einheiten und Formelzeichen exakt. Erfinde keine
     Seitenzahlen oder Fundstellen und widersprich einer Ausgabe nicht mit
     unmarkiertem Modellwissen. Reicht der Kontext nicht aus, sage das klar.
+    Formatiere Tabellen als Markdown und Mathematik als LaTeX zwischen
+    Dollarzeichen. Verweise im Fliesstext nicht auf Abbildungsnummern.
 """,
             encoding="utf-8",
         )

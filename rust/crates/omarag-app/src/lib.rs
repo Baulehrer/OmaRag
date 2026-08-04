@@ -6,7 +6,7 @@ use omarag_domain::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const THEME_COUNT: usize = 14;
+pub const THEME_COUNT: usize = 15;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -290,6 +290,7 @@ impl FocusPanel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
+    ConfirmQuit,
     Help,
     Palette,
     Workspaces,
@@ -304,6 +305,23 @@ pub enum Overlay {
     ChatHistory,
     DocumentTags,
     CustomModel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChatTextSelection {
+    pub anchor: usize,
+    pub focus: usize,
+    pub moved: bool,
+}
+
+impl ChatTextSelection {
+    pub const fn bounds(self) -> (usize, usize) {
+        if self.anchor <= self.focus {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1017,6 +1035,7 @@ pub struct ChatState {
     pub evidence_mode: EvidenceMode,
     pub citations: Vec<Citation>,
     pub receipt: Option<RunReceipt>,
+    pub selection: Option<ChatTextSelection>,
     pub error: Option<String>,
 }
 
@@ -1149,6 +1168,7 @@ pub struct AppState {
     pub editing_custom_profile: Option<usize>,
     pub chat_sessions: BTreeMap<WorkspaceId, Vec<ChatSession>>,
     pub conversation_ids: BTreeMap<WorkspaceId, String>,
+    pub bold_term_explanations_disabled: bool,
     pub document_tags: BTreeMap<String, Vec<String>>,
     pub tag_editor: EditorState,
     pub history_cursor: usize,
@@ -1182,6 +1202,7 @@ pub struct UiPreferences {
     pub custom_profiles: Vec<CustomLibraryProfile>,
     pub chat_sessions: BTreeMap<WorkspaceId, Vec<ChatSession>>,
     pub conversation_ids: BTreeMap<WorkspaceId, String>,
+    pub bold_term_explanations_disabled: bool,
     pub document_tags: BTreeMap<String, Vec<String>>,
 }
 
@@ -1224,12 +1245,13 @@ impl AppState {
         self.custom_profiles = preferences.custom_profiles;
         self.chat_sessions = preferences.chat_sessions;
         self.conversation_ids = preferences.conversation_ids;
+        self.bold_term_explanations_disabled = preferences.bold_term_explanations_disabled;
         self.document_tags = preferences.document_tags;
     }
 
     pub fn preferences(&self) -> UiPreferences {
         UiPreferences {
-            version: 4,
+            version: 5,
             view: self.view,
             focus_pane: self.focus_pane,
             theme_index: self.theme_index,
@@ -1248,6 +1270,7 @@ impl AppState {
             custom_profiles: self.custom_profiles.clone(),
             chat_sessions: self.chat_sessions.clone(),
             conversation_ids: self.conversation_ids.clone(),
+            bold_term_explanations_disabled: self.bold_term_explanations_disabled,
             document_tags: self.document_tags.clone(),
         }
     }
@@ -1681,6 +1704,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.chat.answer.clear();
             state.chat.citations.clear();
             state.chat.receipt = None;
+            state.chat.selection = None;
             state.chat.last_run = None;
             state.citation_cursor = 0;
             state.operation = OperationState {
@@ -1911,7 +1935,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.8.0".into(),
+            omarag_version: "0.9.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "local".into(),
@@ -2036,18 +2060,20 @@ mod tests {
         let mut state = AppState::default();
         state.navigate_view(View::Models);
         state.set_focus_pane(FocusPane::Inspector);
+        state.bold_term_explanations_disabled = true;
         let encoded = serde_json::to_string(&state.preferences()).unwrap();
         let mut restored = AppState::default();
         restored.apply_preferences(serde_json::from_str(&encoded).unwrap());
         assert_eq!(restored.view, View::Models);
         assert_eq!(restored.focus_pane, FocusPane::Workspace);
         assert_eq!(restored.route, Route::System);
+        assert!(restored.bold_term_explanations_disabled);
     }
 
     #[test]
     fn version_two_activity_and_out_of_range_theme_preferences_migrate() {
         let preferences: UiPreferences = serde_json::from_str(
-            r#"{"version":2,"view":"activity","focus_pane":"inspector","theme_index":29}"#,
+            r#"{"version":2,"view":"activity","focus_pane":"inspector","theme_index":31}"#,
         )
         .unwrap();
         let mut state = AppState::default();

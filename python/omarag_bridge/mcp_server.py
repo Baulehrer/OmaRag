@@ -35,7 +35,7 @@ class OmaRagApi:
                 detail = response.json().get("error", {}).get("message", response.text)
             except ValueError:
                 detail = response.text
-            raise RuntimeError(f"Oracle of Daedalus API {response.status_code}: {detail}") from exc
+            raise RuntimeError(f"OmaRag API {response.status_code}: {detail}") from exc
         return response.json()
 
     def ask(self, workspace_id: str, question: str, evidence_mode: str) -> dict[str, Any]:
@@ -50,22 +50,20 @@ class OmaRagApi:
             if current["status"] in {"completed", "failed", "cancelled"}:
                 return current
             time.sleep(0.2)
-        raise RuntimeError(
-            "Oracle-of-Daedalus-Antwort hat das Zeitlimit von 120 Sekunden ueberschritten"
-        )
+        raise RuntimeError("OmaRag-Antwort hat das Zeitlimit von 120 Sekunden ueberschritten")
 
 
 api = OmaRagApi(token=os.getenv("OMARAG_TOKEN"))
 mcp = FastMCP(
-    "Oracle of Daedalus",
-    instructions="Read-only Zugriff auf explizite Oracle-of-Daedalus-Workspaces.",
+    "OmaRag",
+    instructions="Read-only Zugriff auf explizite OmaRag-Workspaces.",
 )
 readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 
 
 @mcp.tool(annotations=readonly)
 def omarag_list_workspaces() -> list[dict[str, Any]]:
-    """Listet erreichbare Oracle-of-Daedalus-Workspaces ohne Aenderungen."""
+    """Listet erreichbare OmaRag-Workspaces ohne Aenderungen."""
     return api.request("GET", "/v1/workspaces")
 
 

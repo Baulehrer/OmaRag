@@ -1,5 +1,5 @@
 [Unit]
-Description=Oracle of Daedalus local evidence daemon
+Description=OmaRag local evidence daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -14,7 +14,7 @@ Environment=MKL_NUM_THREADS=4
 Environment=OPENBLAS_NUM_THREADS=4
 Environment=NUMEXPR_NUM_THREADS=4
 Environment=RAYON_NUM_THREADS=4
-ExecStart=@VENV@/bin/oracle-daedalusd --data-dir @DATA_DIR@ --host 127.0.0.1 --port 8765
+ExecStart=@VENV@/bin/omaragd --data-dir @DATA_DIR@ --host 127.0.0.1 --port 8765
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30

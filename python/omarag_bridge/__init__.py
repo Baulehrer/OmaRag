@@ -1,4 +1,4 @@
-"""Oracle of Daedalus backend bridge."""
+"""OmaRag backend bridge — Oracle of Metis & Aletheia."""
 
 from .runtime import configure_process_environment
 
@@ -7,4 +7,4 @@ from .runtime import configure_process_environment
 # Python-controlled boundary (launchers also export them before exec).
 configure_process_environment()
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
