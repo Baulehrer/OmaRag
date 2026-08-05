@@ -48,6 +48,9 @@ class FakeHaikuAdapter:
     async def ensure_database(self, database: Path) -> None:
         database.mkdir(parents=True, exist_ok=True)
 
+    async def warm(self, database: Path) -> None:
+        await self.ensure_database(database)
+
     async def ingest(self, database: Path, source: str, **options: Any) -> dict[str, Any]:
         self.ingest_calls += 1
         await self.ensure_database(database)
@@ -193,6 +196,9 @@ class FakeModelService:
 
     async def load(self, model: str, context_tokens: int, keep_alive: str) -> ModelOperationResult:
         return ModelOperationResult(model=model, operation="load", status="ok")
+
+    async def warm_embedding(self, model: str, keep_alive: str = "120s") -> None:
+        return None
 
     async def unload(self, model: str) -> ModelOperationResult:
         return ModelOperationResult(model=model, operation="unload", status="ok")

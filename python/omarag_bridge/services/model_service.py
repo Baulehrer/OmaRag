@@ -113,6 +113,8 @@ class ModelService:
         *,
         active_roles: set[ModelCategory] | None = None,
         worker_timeout_seconds: float = 0.0,
+        memory_state: str = "ready",
+        worker_expires_in_seconds: float = 0.0,
     ) -> ModelRuntimeResponse:
         payload = await self._ollama_json("GET", "/api/ps")
         models = []
@@ -170,6 +172,9 @@ class ModelService:
             roles=role_rows,
             query_worker_state="active" if active else "idle",
             query_worker_timeout_seconds=worker_timeout_seconds,
+            residency_policy="adaptive",
+            memory_state=memory_state,
+            worker_expires_in_seconds=worker_expires_in_seconds,
         )
 
     async def import_gguf(
@@ -288,6 +293,15 @@ class ModelService:
             {"model": model, "messages": [], "stream": False, "keep_alive": 0},
         )
         return ModelOperationResult(model=model, operation="unload", status="ok")
+
+    async def warm_embedding(self, model: str, keep_alive: str = "120s") -> None:
+        # Ollama's embedding endpoint requires real input; a tiny fixed probe is
+        # deterministic and avoids pretending that reranking has been warmed.
+        await self._ollama_json(
+            "POST",
+            "/api/embed",
+            {"model": model, "input": "OmaRag warmup", "keep_alive": keep_alive},
+        )
 
     async def delete(self, model: str) -> ModelOperationResult:
         try:

@@ -3,14 +3,14 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: ghcr.io/baulehrer/omarag:0.9.0
+    image: ghcr.io/baulehrer/omarag:1.0.0
     command:
       - --host
       - 0.0.0.0
       - --port
       - "8765"
       - --token
-      - ${OMARAG_TOKEN:?OMARAG_TOKEN muss gesetzt sein}
+      - ${OMARAG_TOKEN:?OMARAG_TOKEN must be set}
     environment:
       OMARAG_OLLAMA_URL: http://host.docker.internal:11434
       MALLOC_ARENA_MAX: "2"

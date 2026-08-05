@@ -96,3 +96,13 @@ async def test_chat_gets_next_heavy_resource_slot() -> None:
     await asyncio.gather(first, second, question)
 
     assert order == ["index-1", "chat", "index-2"]
+
+
+async def test_speculative_warmup_never_waits_behind_foreground_work() -> None:
+    resources = ResourceCoordinator()
+
+    async with resources.indexing(), resources.warmup() as admission:
+        assert admission == "skipped_busy"
+
+    async with resources.warmup() as admission:
+        assert admission == "ready"

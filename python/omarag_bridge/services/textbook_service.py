@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 import re
@@ -40,30 +41,84 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def archive_source(workspace_path: Path, source: Path, fingerprint: str) -> Path:
-    """Keep an immutable, hash-addressed original inside the workspace."""
+_FICLONE = 0x40049409
+
+
+def _stream_copy_and_hash(source: Path, target: Path) -> str:
+    digest = hashlib.sha256()
+    with source.open("rb") as incoming, target.open("r+b") as outgoing:
+        outgoing.seek(0)
+        outgoing.truncate()
+        while block := incoming.read(4 * 1024 * 1024):
+            digest.update(block)
+            outgoing.write(block)
+        outgoing.flush()
+        os.fsync(outgoing.fileno())
+    shutil.copystat(source, target, follow_symlinks=True)
+    return digest.hexdigest()
+
+
+def _reflink_and_hash(source: Path, target: Path) -> str | None:
+    """Create an independent copy-on-write clone when the filesystem supports it."""
+    try:
+        with source.open("rb") as incoming, target.open("r+b") as outgoing:
+            fcntl.ioctl(outgoing.fileno(), _FICLONE, incoming.fileno())
+        shutil.copystat(source, target, follow_symlinks=True)
+        return file_sha256(target)
+    except OSError:
+        return None
+
+
+def archive_source(
+    workspace_path: Path, source: Path, expected_fingerprint: str | None = None
+) -> tuple[Path, str, str]:
+    """Keep an immutable original, preferring a cheap copy-on-write clone.
+
+    The fallback copies and hashes in one streaming pass.  A hardlink is
+    intentionally not used: editing the user's original must never alter the
+    indexed evidence.
+    """
     if not source.is_file():
         raise NotFoundError(f"Source {source} was not found")
     originals = workspace_path / "sources" / "originals"
     originals.mkdir(parents=True, exist_ok=True)
     suffix = source.suffix.lower() or ".bin"
-    target = originals / f"{fingerprint}{suffix}"
-    if target.exists():
-        if file_sha256(target) != fingerprint:
-            raise ConflictError("Managed source hash does not match its filename")
-        return target
+    if expected_fingerprint:
+        target = originals / f"{expected_fingerprint}{suffix}"
+        if target.exists():
+            source_size = source.stat().st_size
+            target_stat = target.stat()
+            if target_stat.st_size != source_size:
+                raise ConflictError("Managed source size does not match the import source")
+            # Verify legacy writable archives once, then make subsequent reuse
+            # a metadata-only operation. New archives are immutable below.
+            if target_stat.st_mode & 0o222:
+                if file_sha256(target) != expected_fingerprint:
+                    raise ConflictError("Managed source hash does not match its filename")
+                target.chmod(target_stat.st_mode & ~0o222)
+            return target, expected_fingerprint, "existing"
 
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{fingerprint[:12]}-", dir=originals)
+    prefix = f".{(expected_fingerprint or 'archive')[:12]}-"
+    fd, temporary_name = tempfile.mkstemp(prefix=prefix, dir=originals)
     os.close(fd)
     temporary = Path(temporary_name)
     try:
-        shutil.copy2(source, temporary)
-        if file_sha256(temporary) != fingerprint:
-            raise ConflictError("Source changed while Oracle was archiving it")
+        fingerprint = _reflink_and_hash(source, temporary)
+        storage_mode = "reflink"
+        if fingerprint is None:
+            fingerprint = _stream_copy_and_hash(source, temporary)
+            storage_mode = "copy"
+        if expected_fingerprint and fingerprint != expected_fingerprint:
+            raise ConflictError("Source changed while OmaRag was archiving it")
+        target = originals / f"{fingerprint}{suffix}"
+        if target.exists():
+            temporary.unlink(missing_ok=True)
+            return target, fingerprint, "existing"
         temporary.replace(target)
+        target.chmod(target.stat().st_mode & ~0o222)
     finally:
         temporary.unlink(missing_ok=True)
-    return target
+    return target, fingerprint, storage_mode
 
 
 def _normalize_isbn(value: str) -> str | None:
@@ -143,7 +198,11 @@ def inspect_source(source: Path) -> ImportCandidate:
     source = source.expanduser().resolve()
     if not source.is_file():
         raise NotFoundError(f"Source {source} was not found")
+    before = source.stat()
     fingerprint = file_sha256(source)
+    after = source.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ConflictError("Source changed while OmaRag was inspecting it")
     embedded, text = _pdf_signals(source)
     proposals: list[MetadataProposal] = []
 
@@ -242,6 +301,8 @@ def inspect_source(source: Path) -> ImportCandidate:
         id=f"candidate-{uuid4().hex[:12]}",
         source=str(source),
         fingerprint=fingerprint,
+        size_bytes=after.st_size,
+        mtime_ns=after.st_mtime_ns,
         metadata=book,
         proposals=proposals,
         issues=issues,
@@ -279,10 +340,16 @@ class TextbookService:
             current = Path(source.path).expanduser().resolve()
             if str(current) != candidate["source"]:
                 raise ConflictError("Import source changed after metadata review")
-            fingerprint = file_sha256(current)
-            if fingerprint != candidate["fingerprint"] or (
-                source.fingerprint and source.fingerprint != fingerprint
-            ):
+            try:
+                stat = current.stat()
+            except OSError as exc:
+                raise ConflictError("Import source is no longer readable") from exc
+            unchanged = (
+                int(candidate.get("size_bytes", -1)) == stat.st_size
+                and int(candidate.get("mtime_ns", -1)) == stat.st_mtime_ns
+            )
+            fingerprint = str(candidate["fingerprint"])
+            if not unchanged or (source.fingerprint and source.fingerprint != fingerprint):
                 raise ConflictError("Import source content changed after metadata review")
             if source.metadata is None or not source.metadata.confirmed:
                 raise ConflictError("Bibliographic metadata must be confirmed before indexing")

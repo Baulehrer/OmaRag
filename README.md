@@ -101,8 +101,8 @@ The AppImage is the small console client. It connects to the daemon installed ab
 Docker-hosted daemon; it intentionally does not bundle Python, Haiku, models or your libraries.
 
 ```bash
-chmod +x OmaRag-0.9.0-x86_64.AppImage
-./OmaRag-0.9.0-x86_64.AppImage
+chmod +x OmaRag-1.0.0-x86_64.AppImage
+./OmaRag-1.0.0-x86_64.AppImage
 ```
 
 It contains GitHub zsync update metadata, so `AppImageUpdate` can apply binary-delta updates when
@@ -122,8 +122,9 @@ the host through `host.docker.internal`, and exposes the API only on `127.0.0.1:
 ### Lean runtime behavior
 
 The long-lived API process does not import Haiku, Docling, PyTorch or SentenceTransformers.
-Indexing runs in a disposable worker; search and answers share an on-demand worker which exits
-after 30 idle seconds. This returns native model allocations and swap to the operating system
+Indexing runs in a disposable worker; search and answers share an on-demand worker. Its adaptive
+residency is 120 seconds when memory is healthy, 30 seconds when guarded and immediate release
+when indexing is waiting for memory. This returns native model allocations and swap to the operating system
 instead of retaining a conversion high-water mark in an idle daemon. Worker budgets can be tuned
 with `OMARAG_WORKER_IMPORT_MEMORY_MAX_MB`, `OMARAG_WORKER_QUERY_MEMORY_MAX_MB` and
 `OMARAG_WORKER_QUERY_IDLE_SECONDS`. The systemd unit delegates child cgroups and the workers also
@@ -133,6 +134,10 @@ the control plane; `OMARAG_API_MEMORY_MAX_MB` adjusts that ceiling when required
 Ollama models used by that worker are explicitly unloaded at the same boundary; set
 `OMARAG_UNLOAD_OLLAMA_MODELS_ON_WORKER_EXIT=false` only when deliberate model residency matters
 more than the smallest idle footprint.
+
+Run `oracle-cli doctor` for a plain-English readiness report, or `oracle-cli --json doctor` for
+automation. It checks component versions, Haiku, configured models, memory, workspace permissions
+and cgroup support without reading document contents or printing the private API token.
 
 ## The few controls worth remembering
 
@@ -161,9 +166,12 @@ configure a remote provider. The default library profile does none of those duri
 OmaRag keeps operational metadata in SQLite and lets **Vanilla Haiku RAG** remain the sole owner
 of the vector database. It does not patch or fork Haiku's retrieval behavior.
 
-## Release 0.9 boundaries
+## Release 1.0 boundaries
 
 - Linux x86_64 is the supported packaged platform.
+- Indexed originals are kept immutable for reproducible citations. OmaRag uses a copy-on-write
+  filesystem clone when available and otherwise copies and hashes in one streaming pass; it never
+  hardlinks a mutable source file into the evidence archive.
 - The backend is local-first. Authenticated citation previews now work across the API; opening the
   original PDF still requires the file to be reachable by the client or its desktop opener.
 - Visual evidence is rendered only when requested and cropped from Docling provenance. No VL model

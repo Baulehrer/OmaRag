@@ -33,7 +33,6 @@ use omarag_tui::{
 };
 use ratatui_image::picker::Picker;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Cursor, Read, Write, stdout},
@@ -46,6 +45,7 @@ use std::{
 };
 use sysinfo::System;
 use tokio::sync::mpsc;
+use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -68,6 +68,10 @@ enum BackendMessage {
         result: Result<(), String>,
     },
     ExternalOpened(Result<(), String>),
+    ClipboardCopied {
+        selection: bool,
+        result: Result<(), String>,
+    },
     ImportAnalyzed(ImportPreflight),
     DocumentDeleted(Result<omarag_domain::DocumentSummary, String>),
     DocumentRestored(Result<omarag_domain::DocumentSummary, String>),
@@ -92,6 +96,7 @@ enum BackendMessage {
         operation: ModelOperation,
         result: Result<(), String>,
     },
+    WarmupFinished,
     FilesystemChanged,
 }
 
@@ -300,10 +305,6 @@ async fn main() -> Result<()> {
     )
     .ok();
     let mut watched_directory = None::<std::path::PathBuf>;
-    // A calm global cadence keeps Metis and Aletheia alive even while the
-    // application is idle, without turning the terminal into a busy renderer.
-    let mut redraw = tokio::time::interval(Duration::from_millis(600));
-    redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut jobs_refresh = tokio::time::interval(Duration::from_secs(5));
     let mut monitor_refresh = tokio::time::interval(Duration::from_secs(2));
     let mut model_refresh = tokio::time::interval(Duration::from_secs(10));
@@ -313,6 +314,9 @@ async fn main() -> Result<()> {
     let mut chat_previews = Vec::new();
     let mut preview_pending = BTreeSet::new();
     let mut preview_scope = PreviewScope::default();
+    let mut observed_draft = String::new();
+    let mut draft_warmup_requested = false;
+    let mut warmup_deadline: Option<TokioInstant> = None;
     let mut saved_preferences = serde_json::to_vec(&state.preferences()).unwrap_or_default();
     if let Ok((models, roles)) =
         load_ollama_models(&model_api, state.active_workspace.as_deref()).await
@@ -322,6 +326,29 @@ async fn main() -> Result<()> {
     }
     let result = async {
         loop {
+            let draft = state.chat.question.value.trim().to_owned();
+            if draft != observed_draft {
+                observed_draft.clone_from(&draft);
+                if draft.is_empty() {
+                    draft_warmup_requested = false;
+                }
+                warmup_deadline = (draft.chars().count() >= 3
+                    && !draft_warmup_requested
+                    && state.chat.active_run.is_none()
+                    && !state.chat.request_pending
+                    && !state.jobs.values().any(|job| !is_terminal_job(&job.status)))
+                .then(|| TokioInstant::now() + Duration::from_millis(500));
+            }
+            let animating = state.operation.active
+                || state.chat.request_pending
+                || state.chat.active_run.is_some()
+                || state.jobs.values().any(|job| !is_terminal_job(&job.status));
+            let redraw_delay = if animating {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(2)
+            };
+            let warmup_at = warmup_deadline;
             let theme = Theme::at(state.theme_index);
             sync_directory_watcher(
                 directory_watcher.as_mut(),
@@ -342,8 +369,30 @@ async fn main() -> Result<()> {
                 render_with_previews(frame, &state, &theme, &metrics, &mut chat_previews)
             })?;
             tokio::select! {
-                _ = redraw.tick() => {
-                    metrics.animation_tick = metrics.animation_tick.wrapping_add(1);
+                _ = tokio::time::sleep(redraw_delay) => {
+                    if animating {
+                        metrics.animation_tick = metrics.animation_tick.wrapping_add(1);
+                    }
+                }
+                _ = async {
+                    if let Some(at) = warmup_at {
+                        tokio::time::sleep_until(at).await;
+                    }
+                }, if warmup_at.is_some() => {
+                    warmup_deadline = None;
+                    let draft = state.chat.question.value.trim().to_owned();
+                    if draft == observed_draft
+                        && draft.chars().count() >= 3
+                        && let Some(workspace) = state.active_workspace.clone()
+                    {
+                        draft_warmup_requested = true;
+                        spawn_command(
+                            Arc::clone(&client),
+                            model_api.clone(),
+                            UiCommand::WarmupChat(workspace),
+                            backend_tx.clone(),
+                        );
+                    }
                 }
                 _ = jobs_refresh.tick() => {
                     spawn_command(
@@ -532,6 +581,16 @@ fn runtime_metrics(system: &System, animation_tick: u64) -> RuntimeMetrics {
         loaded_models: Vec::new(),
         model_roles: Vec::new(),
     }
+}
+
+fn is_terminal_job(status: &omarag_domain::JobStatus) -> bool {
+    matches!(
+        status,
+        omarag_domain::JobStatus::Completed
+            | omarag_domain::JobStatus::Paused
+            | omarag_domain::JobStatus::Cancelled
+            | omarag_domain::JobStatus::Failed
+    )
 }
 
 #[derive(Default)]
@@ -755,7 +814,20 @@ async fn import_gguf(
 async fn bootstrap(client: &dyn OmaRagClient, state: &mut AppState) {
     match client.meta().await {
         Ok(meta) => {
+            let backend_version = meta.omarag_version.clone();
             update(state, Action::BackendConnected(meta));
+            if backend_version != env!("CARGO_PKG_VERSION") {
+                update(
+                    state,
+                    Action::Notify(Notification {
+                        level: NotificationLevel::Warning,
+                        message: format!(
+                            "Version mismatch: TUI {} · API {backend_version}. Restart the daemon after updating.",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    }),
+                );
+            }
             match client.list_workspaces().await {
                 Ok(workspaces) => {
                     update(state, Action::WorkspacesLoaded(workspaces));
@@ -787,10 +859,23 @@ async fn load_workspace_features(
         client.config(workspace),
     );
     let documents = documents.map_err(|error| error.to_string())?;
-    let detail_documents = documents.clone();
-    let details = tokio::task::spawn_blocking(move || inspect_documents(&detail_documents))
-        .await
-        .unwrap_or_default();
+    let details = documents
+        .iter()
+        .map(|document| {
+            (
+                document.id.clone(),
+                DocumentInsight {
+                    size_bytes: document.size_bytes,
+                    pages: document.page_count,
+                    sha256: document.fingerprint.clone(),
+                    chunks: document
+                        .pipeline_stats
+                        .get("chunks")
+                        .and_then(serde_json::Value::as_u64),
+                },
+            )
+        })
+        .collect();
     Ok(Box::new(WorkspaceFeatures {
         documents,
         sources: sources.map_err(|error| error.to_string())?,
@@ -902,16 +987,28 @@ fn spawn_command(
                 session_id,
                 question,
                 evidence_mode,
+                filters,
             } => BackendMessage::RunStarted(
                 client
-                    .start_run(
-                        workspace,
-                        RunRequest::question(question, evidence_mode).with_session_id(session_id),
-                    )
+                    .start_run(workspace, {
+                        let mut request = RunRequest::question(question, evidence_mode)
+                            .with_session_id(session_id);
+                        request.filters = filters;
+                        request
+                    })
                     .await
                     .map(|run| run.id)
                     .map_err(|error| error.to_string()),
             ),
+            UiCommand::WarmupChat(workspace) => {
+                if let Ok(request) = model_api.request(
+                    reqwest::Method::POST,
+                    &format!("/v1/workspaces/{workspace}/runtime/warmup"),
+                ) {
+                    let _ = request.timeout(Duration::from_secs(30)).send().await;
+                }
+                BackendMessage::WarmupFinished
+            }
             UiCommand::CancelRun(run_id) => BackendMessage::RunCancelled(
                 client
                     .cancel_run(run_id)
@@ -1276,7 +1373,14 @@ fn spawn_command(
             UiCommand::ExportChat { workspace, session } => {
                 BackendMessage::ExternalOpened(export_chat(&workspace, &session))
             }
-            UiCommand::CopyText(value) => BackendMessage::ExternalOpened(copy_text(&value)),
+            UiCommand::CopyText(value) => BackendMessage::ClipboardCopied {
+                selection: false,
+                result: copy_text(&value),
+            },
+            UiCommand::CopySelection(value) => BackendMessage::ClipboardCopied {
+                selection: true,
+                result: copy_text(&value),
+            },
         };
         let _ = tx.send(message).await;
     });
@@ -1542,7 +1646,8 @@ fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
                 page_index,
                 path,
                 page,
-                remote_preview: page_index == 0,
+                remote_preview: page_index == 0
+                    || (citation.primary_anchors.is_empty() && citation.context_anchors.is_empty()),
                 title,
                 primary_anchors: citation
                     .primary_anchors
@@ -1736,39 +1841,6 @@ fn pdf_info(path: &str) -> Option<(bool, u32)> {
     Some((encrypted, pages))
 }
 
-fn inspect_documents(
-    documents: &[omarag_domain::DocumentSummary],
-) -> BTreeMap<String, DocumentInsight> {
-    documents
-        .iter()
-        .map(|document| {
-            let source = document
-                .managed_source
-                .as_deref()
-                .unwrap_or(&document.source);
-            let path = std::path::Path::new(source);
-            let size_bytes = path.metadata().map_or(0, |metadata| metadata.len());
-            let pages = pdf_info(source)
-                .map(|(_, pages)| pages)
-                .filter(|pages| *pages > 0);
-            let sha256 = std::fs::File::open(path).ok().and_then(|mut file| {
-                let mut hasher = Sha256::new();
-                std::io::copy(&mut file, &mut hasher).ok()?;
-                Some(format!("{:x}", hasher.finalize()))
-            });
-            (
-                document.id.clone(),
-                DocumentInsight {
-                    size_bytes,
-                    pages,
-                    sha256,
-                    chunks: None,
-                },
-            )
-        })
-        .collect()
-}
-
 fn copy_text(value: &str) -> Result<(), String> {
     let mut child = Command::new("wl-copy")
         .stdin(Stdio::piped())
@@ -1780,13 +1852,20 @@ fn copy_text(value: &str) -> Result<(), String> {
                 .spawn()
         })
         .map_err(|error| format!("No clipboard helper available: {error}"))?;
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "Clipboard input unavailable".to_string())?
+        .ok_or_else(|| "Clipboard input unavailable".to_string())?;
+    stdin
         .write_all(value.as_bytes())
         .map_err(|error| error.to_string())?;
-    Ok(())
+    drop(stdin);
+    let status = child.wait().map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Clipboard helper exited with {status}"))
+    }
 }
 
 fn export_chat(workspace: &str, session: &omarag_app::ChatSession) -> Result<(), String> {
@@ -1877,7 +1956,7 @@ fn remember_chat_session(state: &mut AppState, timestamp: String) {
     let Some(workspace) = state.active_workspace.clone() else {
         return;
     };
-    if state.chat.question.value.trim().is_empty() || state.chat.answer.trim().is_empty() {
+    if state.chat.submitted_question.trim().is_empty() || state.chat.answer.trim().is_empty() {
         return;
     }
     let session = omarag_app::ChatSession {
@@ -1892,10 +1971,12 @@ fn remember_chat_session(state: &mut AppState, timestamp: String) {
             },
             |receipt| receipt.session_id.clone(),
         ),
-        question: state.chat.question.value.clone(),
+        question: state.chat.submitted_question.clone(),
         answer: state.chat.answer.clone(),
         citations: state.chat.citations.clone(),
         receipt: state.chat.receipt.clone(),
+        scope_document_id: state.chat.scope_document_id.clone(),
+        scope_title: state.chat.scope_title.clone(),
         created_at: timestamp,
     };
     let sessions = state.chat_sessions.entry(workspace).or_default();
@@ -1907,6 +1988,7 @@ fn remember_chat_session(state: &mut AppState, timestamp: String) {
 
 fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool {
     match message {
+        BackendMessage::WarmupFinished => {}
         BackendMessage::WorkspaceOpened(result) => match result {
             Ok(id) => {
                 update(state, Action::WorkspaceOpened(id));
@@ -1994,6 +2076,22 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 notify_error(state, error);
             }
         }
+        BackendMessage::ClipboardCopied { selection, result } => match result {
+            Ok(()) => {
+                update(
+                    state,
+                    Action::Notify(Notification {
+                        level: NotificationLevel::Info,
+                        message: if selection {
+                            "Selection copied.".into()
+                        } else {
+                            "Copied to clipboard.".into()
+                        },
+                    }),
+                );
+            }
+            Err(error) => notify_error(state, error),
+        },
         BackendMessage::ImportAnalyzed(preflight) => {
             state.library.preflight = preflight;
         }
@@ -2331,6 +2429,24 @@ mod tests {
         assert_eq!(
             restored.library.filter,
             omarag_app::LibraryFilter::Duplicates
+        );
+    }
+
+    #[test]
+    fn copied_chat_selection_gets_a_specific_toast() {
+        let mut state = AppState::default();
+
+        apply_backend_message(
+            &mut state,
+            BackendMessage::ClipboardCopied {
+                selection: true,
+                result: Ok(()),
+            },
+        );
+
+        assert_eq!(
+            state.notifications.last().map(|item| item.message.as_str()),
+            Some("Selection copied.")
         );
     }
 }

@@ -305,6 +305,7 @@ pub enum Overlay {
     ChatHistory,
     DocumentTags,
     CustomModel,
+    BookScope,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -503,7 +504,15 @@ pub struct ChatSession {
     pub citations: Vec<Citation>,
     #[serde(default)]
     pub receipt: Option<RunReceipt>,
+    #[serde(default)]
+    pub scope_document_id: Option<String>,
+    #[serde(default = "default_all_books_label")]
+    pub scope_title: String,
     pub created_at: String,
+}
+
+fn default_all_books_label() -> String {
+    "All books".into()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1025,9 +1034,12 @@ fn byte_at_column(value: &str, start: usize, end: usize, column: usize) -> usize
         .map_or(end, |(offset, _)| start + offset)
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChatState {
     pub question: EditorState,
+    /// The question associated with the answer currently shown in the chat.
+    /// Kept separately so the composer can be cleared immediately after send.
+    pub submitted_question: String,
     pub answer: String,
     pub active_run: Option<RunId>,
     pub last_run: Option<RunId>,
@@ -1037,6 +1049,36 @@ pub struct ChatState {
     pub receipt: Option<RunReceipt>,
     pub selection: Option<ChatTextSelection>,
     pub error: Option<String>,
+    pub phase: String,
+    pub phase_label: String,
+    pub phase_elapsed_ms: f64,
+    pub scope_document_id: Option<String>,
+    pub scope_title: String,
+    pub scope_cursor: usize,
+}
+
+impl Default for ChatState {
+    fn default() -> Self {
+        Self {
+            question: EditorState::default(),
+            submitted_question: String::new(),
+            answer: String::new(),
+            active_run: None,
+            last_run: None,
+            request_pending: false,
+            evidence_mode: EvidenceMode::default(),
+            citations: Vec::new(),
+            receipt: None,
+            selection: None,
+            error: None,
+            phase: "idle".into(),
+            phase_label: String::new(),
+            phase_elapsed_ms: 0.0,
+            scope_document_id: None,
+            scope_title: default_all_books_label(),
+            scope_cursor: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1706,6 +1748,9 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.chat.receipt = None;
             state.chat.selection = None;
             state.chat.last_run = None;
+            state.chat.phase = "waiting".into();
+            state.chat.phase_label = "Waiting".into();
+            state.chat.phase_elapsed_ms = 0.0;
             state.citation_cursor = 0;
             state.operation = OperationState {
                 label: "Preparing answer".into(),
@@ -1863,6 +1908,7 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
     let is_run_event = matches!(
         event.event_type.as_str(),
         "assistant.started"
+            | "run.phase"
             | "assistant.delta"
             | "citation.added"
             | "run.completed"
@@ -1873,6 +1919,26 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
         return;
     }
     match event.event_type.as_str() {
+        "run.phase" => {
+            state.chat.phase = event
+                .payload
+                .get("phase")
+                .and_then(|value| value.as_str())
+                .unwrap_or("working")
+                .to_owned();
+            state.chat.phase_label = event
+                .payload
+                .get("label")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Working")
+                .to_owned();
+            state.chat.phase_elapsed_ms = event
+                .payload
+                .get("elapsed_ms")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_default();
+            state.operation.label.clone_from(&state.chat.phase_label);
+        }
         "assistant.delta" => {
             if let Some(delta) = event.payload.get("delta").and_then(|value| value.as_str()) {
                 state.chat.answer.push_str(delta);
@@ -1890,6 +1956,7 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok());
             state.chat.active_run = None;
+            state.chat.phase = "completed".into();
             state.operation.active = false;
         }
         "run.cancelled" => {
@@ -1935,7 +2002,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.9.0".into(),
+            omarag_version: "1.0.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "local".into(),

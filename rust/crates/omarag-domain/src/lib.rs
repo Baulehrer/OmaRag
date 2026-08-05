@@ -222,6 +222,14 @@ pub struct DocumentSummary {
     pub quality: Option<DocumentQuality>,
     #[serde(default = "default_pipeline_version")]
     pub pipeline_version: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default = "default_archive_mode")]
+    pub archive_mode: String,
+}
+
+fn default_archive_mode() -> String {
+    "unknown".into()
 }
 
 fn default_docling_parser() -> String {
@@ -322,7 +330,7 @@ pub struct JobSnapshot {
     pub progress_detail: Option<JobProgressDetail>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct JobProgressDetail {
     pub current_document: Option<String>,
     pub page_start: Option<u32>,
@@ -334,6 +342,10 @@ pub struct JobProgressDetail {
     pub recovered_segments: u32,
     #[serde(default)]
     pub memory_state: String,
+    #[serde(default)]
+    pub eta_seconds_low: Option<f64>,
+    #[serde(default)]
+    pub eta_seconds_high: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -512,6 +524,20 @@ pub struct RunReceipt {
     pub reused_source_count: u32,
     pub new_source_count: u32,
     pub source_check: SourceCheck,
+    #[serde(default)]
+    pub phase_timings_ms: BTreeMap<String, f64>,
+    #[serde(default = "default_retrieval_mode")]
+    pub retrieval_mode: String,
+    #[serde(default = "default_rerank_status")]
+    pub rerank_status: String,
+}
+
+fn default_retrieval_mode() -> String {
+    "hybrid".into()
+}
+
+fn default_rerank_status() -> String {
+    "unknown".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -591,6 +617,10 @@ pub struct ImportCandidate {
     pub id: String,
     pub source: String,
     pub fingerprint: String,
+    #[serde(default)]
+    pub size_bytes: u64,
+    #[serde(default)]
+    pub mtime_ns: u64,
     pub metadata: BookMetadata,
     #[serde(default)]
     pub proposals: Vec<MetadataProposal>,
@@ -688,16 +718,16 @@ pub struct ApiErrorResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum OmaRagError {
-    #[error("Backend nicht erreichbar: {0}")]
+    #[error("Backend unavailable: {0}")]
     Transport(String),
-    #[error("Backendfehler {status} ({code}): {message}")]
+    #[error("Backend error {status} ({code}): {message}")]
     Api {
         status: u16,
         code: String,
         message: String,
         retryable: bool,
     },
-    #[error("Ungueltige Backendantwort: {0}")]
+    #[error("Invalid backend response: {0}")]
     Protocol(String),
 }
 

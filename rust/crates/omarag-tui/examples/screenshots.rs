@@ -131,6 +131,9 @@ fn demo_state() -> AppState {
         reused_source_count: 1,
         new_source_count: 1,
         source_check: SourceCheck::Verified,
+        phase_timings_ms: Default::default(),
+        retrieval_mode: "hybrid".into(),
+        rerank_status: "applied".into(),
     });
     state
 }
@@ -176,6 +179,8 @@ fn document(title: &str, pages: u32) -> DocumentSummary {
         source: format!("/home/metis/Knowledge/{title}"),
         segment_document_ids: vec![],
         page_count: Some(pages),
+        size_bytes: 0,
+        archive_mode: "reflink".into(),
         parser_id: "docling".into(),
         status: "ready".into(),
         imported_at: "2026-07-26T20:00:00Z".into(),

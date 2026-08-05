@@ -36,6 +36,8 @@ def _memory_gib() -> float:
 
 def _runtime_profile() -> dict[str, int]:
     memory = _memory_gib()
+    if memory <= 10:
+        return {"embedding_batch": 8, "search_limit": 6, "context_chars": 4000}
     if memory < 18:
         return {"embedding_batch": 16, "search_limit": 6, "context_chars": 4000}
     if memory <= 32:

@@ -79,6 +79,8 @@ async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
     runtime = await client.get("/v1/models/runtime")
     assert runtime.status_code == 200
     assert runtime.json()["models"][0]["name"] == "test/chat-2b"
+    assert runtime.json()["residency_policy"] == "adaptive"
+    assert runtime.json()["memory_state"] in {"ready", "guarded", "waiting"}
 
     loaded = await client.post(
         "/v1/models/load",
@@ -120,6 +122,17 @@ async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
         "operation": "delete",
         "status": "ok",
     }
+
+
+async def test_safe_runtime_warmup_reports_what_it_prepared(
+    client: httpx2.AsyncClient, workspace: dict[str, object]
+) -> None:
+    response = await client.post(f"/v1/workspaces/{workspace['id']}/runtime/warmup")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["keep_alive_seconds"] > 0
+    assert "chat" in payload["warmed_roles"]
 
 
 async def test_model_defaults_are_preflighted_applied_atomically_and_reported(
@@ -380,6 +393,8 @@ async def test_search_and_run_have_stable_domain_models(
         await asyncio.sleep(0.01)
     assert run["answer"] == "Antwort auf: Was bedeutet XC4?"
     assert run["citations"][0]["pages"] == [1]
+    assert run["receipt"]["retrieval_mode"] == "hybrid"
+    assert run["receipt"]["phase_timings_ms"]["warming"] >= 0
 
     analysis_response = await client.post(
         f"/v1/workspaces/{workspace_id}/runs",

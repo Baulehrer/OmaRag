@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ class JobService:
         self.resources = resources
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._writer_lock = asyncio.Lock()
+        self._segment_samples: dict[tuple[str, int], list[tuple[float, int]]] = {}
 
     @property
     def active(self) -> bool:
@@ -60,7 +62,7 @@ class JobService:
     ) -> tuple[JobSnapshot, bool]:
         workspace = self.workspaces.get(workspace_id)
         if workspace.read_only:
-            raise ReadOnlyError("In einen Read-only-Workspace kann nicht importiert werden")
+            raise ReadOnlyError("A read-only workspace cannot accept imports")
         job_id = f"job-{uuid4().hex[:12]}"
         payload = request.model_dump(mode="json")
         job, reused = self.store.create_job_idempotent(
@@ -119,13 +121,27 @@ class JobService:
                     source_path = (
                         str(candidate_path.resolve()) if candidate_path.exists() else raw_source
                     )
-                    fingerprint = await asyncio.to_thread(_source_fingerprint, source_path)
                     provided_fingerprint = source.get("fingerprint")
-                    if provided_fingerprint and provided_fingerprint != fingerprint:
-                        raise ConflictError(
-                            "Source changed after import preflight",
-                            details={"source": source_path},
+                    managed_source = source_path
+                    archive_mode = "external"
+                    is_local_file = Path(source_path).is_file()
+                    if is_local_file and provided_fingerprint:
+                        # Preflight already read the file. Use its verified hash
+                        # to reject/skip duplicates before allocating an archive.
+                        fingerprint = str(provided_fingerprint)
+                    elif is_local_file:
+                        await self._phase(job_id, index, total, "archiving", 0, 0, 0)
+                        archived, fingerprint, archive_mode = await asyncio.to_thread(
+                            archive_source,
+                            Path(self.workspaces.get(job.workspace_id).path),
+                            Path(source_path),
+                            None,
                         )
+                        managed_source = str(archived)
+                    else:
+                        fingerprint = await asyncio.to_thread(_source_fingerprint, source_path)
+                        if provided_fingerprint and str(provided_fingerprint) != fingerprint:
+                            raise ConflictError("Source changed after import preflight")
                     initial = self.store.checkpoint_data(job_id, f"source-init-{index}")
                     generation_id = str(
                         (initial or {}).get("generation_id") or f"gen-{uuid4().hex[:16]}"
@@ -169,6 +185,15 @@ class JobService:
                         # generation only after every replacement segment is
                         # searchable, so a failed rebuild leaves the old book
                         # intact.
+                    if is_local_file and provided_fingerprint:
+                        await self._phase(job_id, index, total, "archiving", 0, 0, 0)
+                        archived, fingerprint, archive_mode = await asyncio.to_thread(
+                            archive_source,
+                            Path(self.workspaces.get(job.workspace_id).path),
+                            Path(source_path),
+                            str(provided_fingerprint),
+                        )
+                        managed_source = str(archived)
                     progress = index / total
                     self.store.update_job(
                         job_id, progress=progress, phase="ingest", checkpoint=f"source-{index}"
@@ -181,7 +206,7 @@ class JobService:
                         job_id=job_id,
                         payload={
                             "phase": "ingest",
-                            "phase_label": "Dokument importieren",
+                            "phase_label": "Importing document",
                             "overall_progress": progress,
                             "units": {"kind": "files", "done": index, "total": total},
                             "checkpoint": f"source-{index}",
@@ -193,16 +218,6 @@ class JobService:
                         if metadata_payload is not None
                         else None
                     )
-                    managed_source = source_path
-                    if Path(source_path).is_file():
-                        managed_source = str(
-                            await asyncio.to_thread(
-                                archive_source,
-                                Path(self.workspaces.get(job.workspace_id).path),
-                                Path(source_path),
-                                fingerprint,
-                            )
-                        )
                     result = await self.adapter.ingest(
                         self.workspaces.database_path(job.workspace_id),
                         managed_source,
@@ -220,6 +235,9 @@ class JobService:
                         on_segment=lambda segment, source_index=index: self._segment_committed(
                             job_id, source_index, segment
                         ),
+                        on_phase=lambda phase, start, end, pages, source_index=index: self._phase(
+                            job_id, source_index, total, phase, start, end, pages
+                        ),
                         segment_sizer=self.resources.segment_pages,
                         metadata=book_metadata,
                         original_source=source_path,
@@ -228,6 +246,9 @@ class JobService:
                     result.setdefault("generation_id", generation_id)
                     result.setdefault("original_source", source_path)
                     result.setdefault("managed_source", managed_source)
+                    result.setdefault("archive_mode", archive_mode)
+                    if Path(managed_source).is_file():
+                        result.setdefault("size_bytes", Path(managed_source).stat().st_size)
                     self.store.upsert_document(job.workspace_id, source_path, fingerprint, result)
                     self.store.checkpoint(job_id, f"source-result-{index}", result)
                     imported.append(result)
@@ -254,11 +275,33 @@ class JobService:
                 await self._fail(job, exc.code, exc.message, exc.details, exc.retryable)
             except Exception as exc:  # daemon boundary: normalize provider errors
                 await self._fail(job, "INGEST_FAILED", str(exc), {}, True)
+            finally:
+                for key in [key for key in self._segment_samples if key[0] == job_id]:
+                    self._segment_samples.pop(key, None)
 
     async def _segment_committed(
         self, job_id: str, source_index: int, segment: dict[str, Any]
     ) -> None:
         self.store.record_segment(job_id, source_index, segment)
+        samples = self._segment_samples.setdefault((job_id, source_index), [])
+        samples.append((time.monotonic(), int(segment["page_end"])))
+        if len(samples) > 8:
+            del samples[:-8]
+        job = self.store.get_job(job_id)
+        detail = job.progress_detail.model_dump(mode="json") if job.progress_detail else {}
+        if (
+            len(samples) >= 2
+            and detail.get("total_pages")
+            and detail.get("memory_state") != "waiting"
+        ):
+            elapsed = samples[-1][0] - samples[0][0]
+            pages_done = samples[-1][1] - samples[0][1]
+            if elapsed > 0 and pages_done > 0:
+                remaining = max(0, int(detail["total_pages"]) - samples[-1][1])
+                estimate = remaining * elapsed / pages_done
+                detail["eta_seconds_low"] = estimate * 0.8
+                detail["eta_seconds_high"] = estimate * 1.25
+                self.store.update_job(job_id, progress_detail=detail)
         metadata = segment.get("metadata", {})
         cache_path = metadata.get("cache_path")
         cache_key = metadata.get("cache_key")
@@ -286,6 +329,59 @@ class JobService:
                 "page_start": segment["page_start"],
                 "page_end": segment["page_end"],
                 "cache_hit": bool(metadata.get("cache_hit")),
+            },
+        )
+
+    async def _phase(
+        self,
+        job_id: str,
+        source_index: int,
+        source_total: int,
+        phase: str,
+        start: int,
+        end: int,
+        pages: int,
+    ) -> None:
+        labels = {
+            "archiving": "Archiving source",
+            "profiling": "Profiling pages",
+            "converting": "Converting pages",
+            "chunking": "Building chunks",
+            "embedding": "Embedding chunks",
+            "committing": "Committing segment",
+            "verifying": "Verifying index",
+        }
+        current = self.store.get_job(job_id)
+        progress = current.progress
+        if pages > 0:
+            progress = (source_index + end / pages) / max(source_total, 1)
+        detail = current.progress_detail.model_dump(mode="json") if current.progress_detail else {}
+        detail.update(
+            {
+                "current_document": str(source_index + 1),
+                "page_start": start or None,
+                "page_end": end or None,
+                "total_pages": pages or detail.get("total_pages"),
+                "memory_state": self.resources.memory().state,
+            }
+        )
+        if detail["memory_state"] == "waiting":
+            detail["eta_seconds_low"] = None
+            detail["eta_seconds_high"] = None
+        self.store.update_job(job_id, phase=phase, progress=progress, progress_detail=detail)
+        await self.events.emit(
+            "job.progress",
+            correlation_id=job_id,
+            workspace_id=current.workspace_id,
+            job_id=job_id,
+            payload={
+                "phase": phase,
+                "phase_label": labels.get(phase, phase.replace("_", " ").title()),
+                "overall_progress": progress,
+                "page_start": start or None,
+                "page_end": end or None,
+                "total_pages": pages or None,
+                "memory_state": detail["memory_state"],
             },
         )
 
@@ -368,7 +464,7 @@ class JobService:
     async def pause(self, job_id: str) -> JobSnapshot:
         job = self.store.get_job(job_id)
         if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
-            raise ConflictError(f"Job im Zustand {job.status} kann nicht pausiert werden")
+            raise ConflictError(f"A job in state {job.status} cannot be paused")
         job = self.store.update_job(job_id, status=JobStatus.PAUSE_REQUESTED)
         await self.events.emit(
             "job.pause.requested",
@@ -381,7 +477,7 @@ class JobService:
     async def resume(self, job_id: str) -> JobSnapshot:
         job = self.store.get_job(job_id)
         if job.status not in {JobStatus.PAUSED, JobStatus.PAUSE_REQUESTED, JobStatus.FAILED}:
-            raise ConflictError(f"Job im Zustand {job.status} kann nicht fortgesetzt werden")
+            raise ConflictError(f"A job in state {job.status} cannot be resumed")
         job = self.store.update_job(job_id, status=JobStatus.RUNNING, error=None)
         await self.events.emit(
             "job.resumed",

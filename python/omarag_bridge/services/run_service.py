@@ -118,6 +118,29 @@ class RunService:
         run = self.store.get_run(run_id)
         request = self.store.get_run_request(run_id)
         started = time.perf_counter()
+        phase_started = started
+        current_phase: str | None = None
+        phase_timings: dict[str, float] = {}
+
+        async def phase(name: str, label: str) -> None:
+            nonlocal current_phase, phase_started
+            now = time.perf_counter()
+            if current_phase is not None:
+                phase_timings[current_phase] = (now - phase_started) * 1000
+            current_phase = name
+            phase_started = now
+            await self.events.emit(
+                "run.phase",
+                correlation_id=run_id,
+                workspace_id=run.workspace_id,
+                run_id=run_id,
+                payload={
+                    "phase": name,
+                    "label": label,
+                    "elapsed_ms": (now - started) * 1000,
+                },
+            )
+
         try:
             turn = self.store.session_turn(run.workspace_id, run.session_id)
             await self.events.emit(
@@ -128,6 +151,7 @@ class RunService:
                 payload={"session_id": run.session_id, "turn": turn},
             )
             evidence_mode = EvidenceMode(request.get("evidence_mode", EvidenceMode.STRICT))
+            await phase("waiting", "Waiting")
             cache_status = AnswerCacheStatus.BYPASS
             index_fingerprint = self.store.workspace_index_fingerprint(run.workspace_id)
             config_fingerprint = self._config_fingerprint(run.workspace_id)
@@ -150,6 +174,7 @@ class RunService:
                 cache_status = AnswerCacheStatus.HIT if cached else AnswerCacheStatus.MISS
 
             if cached is not None:
+                await phase("checking_sources", "Checking sources")
                 answer = str(cached["answer"])
                 citations = [Citation.model_validate(item) for item in cached["citations"]]
             else:
@@ -162,6 +187,9 @@ class RunService:
                     request.get("document_policy", "current-only"),
                 )
                 async with self.resources.chat():
+                    await phase("warming", "Warming models")
+                    await self.adapter.warm(self.workspaces.database_path(run.workspace_id))
+                    await phase("searching_and_drafting", "Searching & drafting")
                     answer, citations = await operation(
                         self.workspaces.database_path(run.workspace_id),
                         request["question"],
@@ -169,6 +197,7 @@ class RunService:
                         document_filter=document_filter_for_ids(segment_ids),
                         evidence_mode=evidence_mode,
                     )
+                await phase("checking_sources", "Checking sources")
                 citations = [
                     citation.model_copy(
                         update={
@@ -211,6 +240,16 @@ class RunService:
                 if all(item.verification_status == "verified" for item in citations)
                 else SourceCheck.REVIEWED
             )
+            await phase("preparing_evidence", "Preparing evidence")
+            rerank_status = (
+                "applied"
+                if any(item.rerank_score is not None for item in citations)
+                else "configured"
+                if self._reranker_configured(run.workspace_id)
+                else "not_configured"
+            )
+            if current_phase is not None:
+                phase_timings[current_phase] = (time.perf_counter() - phase_started) * 1000
             receipt = RunReceipt(
                 session_id=run.session_id,
                 turn=turn,
@@ -220,17 +259,12 @@ class RunService:
                 reused_source_count=reused,
                 new_source_count=max(0, len(citations) - reused),
                 source_check=source_check,
+                phase_timings_ms=phase_timings,
+                retrieval_mode="hybrid",
+                rerank_status=rerank_status,
             )
             # Normalize the provider result into modest deltas without exposing
             # internal Pydantic-AI events or chain-of-thought.
-            for start in range(0, len(answer), 160):
-                await self.events.emit(
-                    "assistant.delta",
-                    correlation_id=run_id,
-                    workspace_id=run.workspace_id,
-                    run_id=run_id,
-                    payload={"delta": answer[start : start + 160]},
-                )
             citation_data = [item.model_dump(mode="json") for item in citations]
             for citation in citation_data:
                 await self.events.emit(
@@ -239,6 +273,14 @@ class RunService:
                     workspace_id=run.workspace_id,
                     run_id=run_id,
                     payload=citation,
+                )
+            for start in range(0, len(answer), 160):
+                await self.events.emit(
+                    "assistant.delta",
+                    correlation_id=run_id,
+                    workspace_id=run.workspace_id,
+                    run_id=run_id,
+                    payload={"delta": answer[start : start + 160]},
                 )
             self.store.update_run(
                 run_id,
@@ -268,6 +310,14 @@ class RunService:
     def _config_fingerprint(self, workspace_id: str) -> str:
         workspace = Path(self.workspaces.get(workspace_id).path)
         return hashlib.sha256((workspace / "haiku.rag.yaml").read_bytes()).hexdigest()
+
+    def _reranker_configured(self, workspace_id: str) -> bool:
+        config = Path(self.workspaces.get(workspace_id).path) / "haiku.rag.yaml"
+        try:
+            text = config.read_text(encoding="utf-8").casefold()
+        except OSError:
+            return False
+        return "rerank" in text and not re.search(r"rerank[^\n]*:\s*(?:null|none|false)\b", text)
 
     async def _fail(self, run: RunSnapshot, code: str, message: str, retryable: bool) -> None:
         error = {"code": code, "message": message, "retryable": retryable}

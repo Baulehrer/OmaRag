@@ -1,6 +1,6 @@
-# Release scope: 0.8.0
+# Release scope: 1.0.0
 
-Status: 4 August 2026. The plugin system remains deliberately out of scope.
+Status: 5 August 2026. The plugin system remains deliberately out of scope.
 
 ## Included
 
@@ -23,6 +23,11 @@ Status: 4 August 2026. The plugin system remains deliberately out of scope.
 - Persistent conversation IDs, a bounded generation-aware exact-answer cache and a compact answer
   receipt showing fresh/reused answers, checked sources and known/new evidence.
 - Segmented long-book processing without a product file/page limit.
+- Real phase telemetry, measured indexing ETA ranges and a compact Metis/Aletheia activity display.
+- Book-scoped chat, a first-run readiness card and lazy evidence enrichment only when selected.
+- Safe opportunistic model warm-up, adaptive worker residency and idle TUI redraw throttling.
+- A scriptable `oracle-cli doctor` readiness check with plain-English corrective actions.
+- Immutable managed originals using reflinks where possible and a single-pass copy/hash fallback.
 - Cooperative pause between PDF segments and chat-priority resource coordination.
 - Lazy API startup plus isolated import/query workers; native model memory is reclaimed when the
   worker exits instead of remaining swapped out in the idle daemon.
@@ -34,7 +39,7 @@ Status: 4 August 2026. The plugin system remains deliberately out of scope.
   per-worker memory limits in the systemd service.
 - AppImage client, release installer, weekly auto-update timer and zsync update metadata.
 
-## Deliberate 0.8 boundaries
+## Deliberate 1.0 boundaries
 
 - Linux x86_64 is the packaged target.
 - AppImage contains the console client; Docker or the installer provides the Python/Haiku daemon.

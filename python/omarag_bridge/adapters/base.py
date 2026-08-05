@@ -21,6 +21,14 @@ class HaikuAdapter(ABC):
     @abstractmethod
     async def ensure_database(self, database: Path) -> None: ...
 
+    async def warm(self, database: Path) -> None:
+        """Prepare the lightweight query runtime without answering a question."""
+        await self.ensure_database(database)
+
+    async def citation_details(self, database: Path, citation: Citation) -> Citation:
+        """Resolve expensive page anchors only when a client asks for them."""
+        return citation
+
     @abstractmethod
     async def ingest(
         self,
@@ -35,6 +43,7 @@ class HaikuAdapter(ABC):
         document_fingerprint: str | None = None,
         resume_segments: list[dict[str, Any]] | None = None,
         on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_phase: Callable[[str, int, int, int], Awaitable[None]] | None = None,
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,

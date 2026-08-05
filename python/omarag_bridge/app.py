@@ -61,6 +61,7 @@ from .models.domain import (
     BackendMeta,
     BackupSummary,
     BookMetadata,
+    Citation,
     ConfigDocument,
     DocumentSummary,
     EvaluationReport,
@@ -81,6 +82,8 @@ from .models.domain import (
     RunSnapshot,
     SearchHit,
     SourceDefinition,
+    WarmupResponse,
+    WarmupStatus,
     WorkspaceManifest,
     WorkspaceSummary,
 )
@@ -180,6 +183,7 @@ def build_services(settings: Settings) -> Services:
     events = EventService(store, settings.event_poll_seconds, settings.event_keepalive_seconds)
     token, token_path = _resolve_bearer_token(settings)
     resources = ResourceCoordinator()
+    adapter.set_residency_policy(resources.residency_seconds)
     jobs = JobService(store, workspaces, events, adapter, resources)
     runs = RunService(
         store,
@@ -247,7 +251,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ):
             from fastapi import HTTPException
 
-            raise HTTPException(status_code=401, detail="Ungueltiges Bearer-Token")
+            raise HTTPException(status_code=401, detail="Invalid bearer token")
 
     protected = [Depends(authorize)]
 
@@ -364,11 +368,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             active_roles.update({ModelCategory.CHAT, ModelCategory.VL, ModelCategory.RERANK})
         if services.jobs.active:
             active_roles.add(ModelCategory.EMBEDDING)
-        return await services.models.runtime(
+        runtime = await services.models.runtime(
             roles,
             active_roles=active_roles,
             worker_timeout_seconds=services.settings.worker_query_idle_seconds,
         )
+        return runtime.model_copy(
+            update={
+                "residency_policy": "adaptive",
+                "memory_state": services.resources.memory().state,
+                "query_worker_state": getattr(
+                    services.adapter, "query_worker_state", runtime.query_worker_state
+                ),
+                "worker_expires_in_seconds": float(
+                    getattr(services.adapter, "worker_expires_in_seconds", 0.0)
+                ),
+            }
+        )
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/runtime/warmup",
+        response_model=WarmupResponse,
+        dependencies=protected,
+    )
+    async def runtime_warmup(workspace_id: str) -> WarmupResponse:
+        services.workspaces.get(workspace_id)
+        async with services.resources.warmup() as admission:
+            if admission != "ready":
+                status_value = (
+                    WarmupStatus.SKIPPED_MEMORY
+                    if admission == "skipped_memory"
+                    else WarmupStatus.SKIPPED_BUSY
+                )
+                return WarmupResponse(
+                    status=status_value,
+                    detail="Foreground work or memory pressure has priority.",
+                )
+            roles = services.features.configured_model_roles(workspace_id)
+            chat = roles.get("chat")
+            embedding = roles.get("embedding")
+            if not chat and not embedding:
+                return WarmupResponse(
+                    status=WarmupStatus.NOT_NEEDED,
+                    detail="No chat or embedding model is configured.",
+                )
+            keep_seconds = services.resources.residency_seconds()
+            keep_alive = f"{max(1, round(keep_seconds))}s"
+            warmed: list[str] = []
+            await services.adapter.warm(services.workspaces.database_path(workspace_id))
+            if chat:
+                await services.models.load(chat, 8192, keep_alive)
+                warmed.append("chat")
+            if embedding and embedding != chat:
+                await services.models.warm_embedding(embedding, keep_alive)
+                warmed.append("embedding")
+            return WarmupResponse(
+                status=WarmupStatus.READY,
+                warmed_roles=warmed,
+                keep_alive_seconds=keep_seconds,
+                detail="Query runtime is ready.",
+            )
 
     @app.post(
         "/v1/workspaces/{workspace_id}/model-defaults/preflight",
@@ -957,6 +1016,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return services.store.get_run(run_id)
 
     @app.get(
+        "/v1/workspaces/{workspace_id}/runs/{run_id}/citations/{citation_index}",
+        response_model=Citation,
+        dependencies=protected,
+    )
+    async def citation_details(workspace_id: str, run_id: str, citation_index: int) -> Citation:
+        services.workspaces.get(workspace_id)
+        run = services.store.get_run(run_id)
+        if run.workspace_id != workspace_id:
+            raise ConflictError("Run does not belong to this workspace")
+        if citation_index < 0 or citation_index >= len(run.citations):
+            from .models.errors import NotFoundError
+
+            raise NotFoundError("Citation was not found")
+        citation = run.citations[citation_index]
+        if not citation.primary_anchors and not citation.context_anchors:
+            async with services.resources.chat():
+                # Another visible page may have queued the same lazy citation.
+                # Re-read after admission so only the first request pays for it.
+                latest = services.store.get_run(run_id)
+                citation = latest.citations[citation_index]
+                if not citation.primary_anchors and not citation.context_anchors:
+                    citation = await services.adapter.citation_details(
+                        services.workspaces.database_path(workspace_id), citation
+                    )
+                    citations = list(latest.citations)
+                    citations[citation_index] = citation
+                    services.store.update_run(
+                        run_id,
+                        citations=[item.model_dump(mode="json") for item in citations],
+                    )
+        return citation
+
+    @app.get(
         "/v1/workspaces/{workspace_id}/runs/{run_id}/citations/{citation_index}/preview",
         dependencies=protected,
     )
@@ -974,8 +1066,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             from .models.errors import NotFoundError
 
             raise NotFoundError("Citation was not found")
+        citation = await citation_details(workspace_id, run_id, citation_index)
         payload = await render_citation_preview(
-            run.citations[citation_index],
+            citation,
             Path(workspace.path) / ".oracle-cache" / "previews",
             max_px,
         )

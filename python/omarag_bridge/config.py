@@ -26,7 +26,9 @@ class Settings(BaseSettings):
     api_swap_max_mb: int = Field(default=0, ge=0)
     api_tasks_max: int = Field(default=64, ge=16, le=256)
     unload_ollama_models_on_worker_exit: bool = True
-    worker_query_idle_seconds: float = Field(default=30.0, ge=0.0, le=600.0)
+    # Upper bound; the resource coordinator shortens this to 30s or 0s when
+    # memory becomes guarded or constrained. An explicit env override wins.
+    worker_query_idle_seconds: float = Field(default=120.0, ge=0.0, le=600.0)
     worker_import_memory_high_mb: int = Field(default=7168, ge=512)
     worker_import_memory_max_mb: int = Field(default=9216, ge=768)
     worker_import_swap_max_mb: int = Field(default=1024, ge=0)

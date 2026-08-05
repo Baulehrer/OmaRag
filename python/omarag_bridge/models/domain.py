@@ -33,7 +33,7 @@ class BackendMeta(StrictModel):
     api_version: str = "1.0"
     min_client_version: str = "1.0"
     max_client_version: str = "1.x"
-    omarag_version: str = "0.9.0"
+    omarag_version: str = "1.0.0"
     haiku_version: str | None = None
     adapter: str | None = None
     backend_id: str
@@ -94,6 +94,8 @@ class ImportCandidate(StrictModel):
     id: str
     source: str
     fingerprint: str
+    size_bytes: int = Field(default=0, ge=0)
+    mtime_ns: int = Field(default=0, ge=0)
     metadata: BookMetadata
     proposals: list[MetadataProposal] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
@@ -167,6 +169,8 @@ class JobProgressDetail(StrictModel):
     cache_hits: int = 0
     recovered_segments: int = 0
     memory_state: str = "ready"
+    eta_seconds_low: float | None = Field(default=None, ge=0.0)
+    eta_seconds_high: float | None = Field(default=None, ge=0.0)
 
 
 class JobSnapshot(StrictModel):
@@ -271,6 +275,9 @@ class RunReceipt(StrictModel):
     reused_source_count: int = Field(ge=0)
     new_source_count: int = Field(ge=0)
     source_check: SourceCheck
+    phase_timings_ms: dict[str, float] = Field(default_factory=dict)
+    retrieval_mode: str = "hybrid"
+    rerank_status: str = "unknown"
 
 
 class RunSnapshot(StrictModel):
@@ -306,6 +313,8 @@ class DocumentSummary(StrictModel):
     book: BookMetadata | None = None
     quality: DocumentQuality | None = None
     pipeline_version: str = "textbook-v1"
+    size_bytes: int = Field(default=0, ge=0)
+    archive_mode: str = "unknown"
 
 
 class SourceDefinition(StrictModel):
@@ -466,6 +475,23 @@ class ModelRuntimeResponse(StrictModel):
     roles: list[ModelRoleRuntime] = Field(default_factory=list)
     query_worker_state: str = "idle"
     query_worker_timeout_seconds: float = 0.0
+    residency_policy: str = "adaptive"
+    memory_state: str = "ready"
+    worker_expires_in_seconds: float = 0.0
+
+
+class WarmupStatus(StrEnum):
+    READY = "ready"
+    SKIPPED_BUSY = "skipped_busy"
+    SKIPPED_MEMORY = "skipped_memory"
+    NOT_NEEDED = "not_needed"
+
+
+class WarmupResponse(StrictModel):
+    status: WarmupStatus
+    warmed_roles: list[str] = Field(default_factory=list)
+    keep_alive_seconds: float = 0.0
+    detail: str = ""
 
 
 class ModelResidency(StrEnum):

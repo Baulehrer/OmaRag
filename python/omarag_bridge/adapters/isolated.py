@@ -24,8 +24,8 @@ from ..models.errors import OmaRagError
 from ..runtime import configure_process_environment, release_native_memory
 from .base import HaikuAdapter
 
-_QUERY_OPERATIONS = {"search", "ask", "analyze"}
-_CALLBACK_NAMES = {"segment_guard", "before_segment", "on_segment", "segment_sizer"}
+_QUERY_OPERATIONS = {"warm", "search", "ask", "analyze", "citation_details"}
+_CALLBACK_NAMES = {"segment_guard", "before_segment", "on_segment", "on_phase", "segment_sizer"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +243,9 @@ class _ChildCallbacks:
     async def on_segment(self, segment: dict[str, Any]) -> None:
         self._call("on_segment", segment)
 
+    async def on_phase(self, phase: str, start: int, end: int, pages: int) -> None:
+        self._call("on_phase", phase, start, end, pages)
+
     def segment_sizer(self, preferred: int, scanned: bool) -> int:
         return int(self._call("segment_sizer", preferred, scanned))
 
@@ -261,6 +264,8 @@ class _ChildCallbacks:
             result["before_segment"] = self.before_segment
         if "on_segment" in self.enabled:
             result["on_segment"] = self.on_segment
+        if "on_phase" in self.enabled:
+            result["on_phase"] = self.on_phase
         if "segment_sizer" in self.enabled:
             result["segment_sizer"] = self.segment_sizer
         if "segment_guard" in self.enabled:
@@ -419,17 +424,30 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         self._query_reaper: asyncio.Task[None] | None = None
         self._query_ollama_targets: set[tuple[str, str]] = set()
         self._query_lock = asyncio.Lock()
+        self._residency_policy: Callable[[], float] = lambda: self.query_idle_seconds
+        self._query_expires_at = 0.0
 
     @property
     def available(self) -> bool:
         return self._available
+
+    @property
+    def query_worker_state(self) -> str:
+        return "ready" if self._query_worker is not None and self._query_worker.alive else "idle"
+
+    @property
+    def worker_expires_in_seconds(self) -> float:
+        return max(0.0, self._query_expires_at - time.monotonic())
+
+    def set_residency_policy(self, policy: Callable[[], float]) -> None:
+        self._residency_policy = policy
 
     def _spawn(self, limits: WorkerLimits, idle_seconds: float) -> _WorkerHandle:
         parent, child = self._context.Pipe(duplex=True)
         process = self._context.Process(
             target=_worker_main,
             args=(child, idle_seconds, limits.memory_max),
-            name="oracle-haiku-worker",
+            name="omarag-haiku-worker",
         )
         process.start()
         child.close()
@@ -513,7 +531,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         if not self.available:
             raise _remote_error(
                 {
-                    "message": "Haiku RAG ist in der aktiven Python-Runtime nicht installiert",
+                    "message": "Haiku RAG is not installed in the active Python runtime",
                     "code": "HAIKU_UNAVAILABLE",
                     "status_code": 503,
                     "retryable": True,
@@ -537,6 +555,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
                 if self._query_reaper is not None:
                     self._query_reaper.cancel()
                     self._query_reaper = None
+                    self._query_expires_at = 0.0
                 if self.unload_ollama_models and args:
                     self._query_ollama_targets.update(
                         _ollama_targets(Path(args[0]), operation, self.ollama_url)
@@ -589,24 +608,29 @@ class IsolatedHaikuAdapter(HaikuAdapter):
     def _schedule_query_reaper(self, worker: _WorkerHandle) -> None:
         if self._query_reaper is not None:
             self._query_reaper.cancel()
+        lifetime = max(0.0, min(self.query_idle_seconds, self._residency_policy()))
+        self._query_expires_at = time.monotonic() + lifetime
         self._query_reaper = asyncio.create_task(
-            self._reap_query_worker(worker), name="oracle-query-worker-reaper"
+            self._reap_query_worker(worker, lifetime), name="omarag-query-worker-reaper"
         )
 
-    async def _reap_query_worker(self, worker: _WorkerHandle) -> None:
+    async def _reap_query_worker(self, worker: _WorkerHandle, lifetime: float) -> None:
         try:
-            await asyncio.sleep(self.query_idle_seconds)
-            # Native trimming happens after the result has been sent, before
-            # the child's idle poll begins. Wait for that phase rather than
-            # assuming it always completes within a fixed two-second margin.
-            for _ in range(60):
-                if not worker.alive:
+            deadline = time.monotonic() + lifetime
+            while True:
+                now = time.monotonic()
+                allowed = max(0.0, min(self.query_idle_seconds, self._residency_policy()))
+                deadline = min(deadline, now + allowed)
+                self._query_expires_at = deadline
+                remaining = deadline - now
+                if remaining <= 0:
                     break
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(min(2.0, remaining))
             async with self._query_lock:
                 if self._query_worker is worker:
                     worker.terminate()
                     self._query_worker = None
+                    self._query_expires_at = 0.0
                     await self._unload_query_models()
         except asyncio.CancelledError:
             raise
@@ -618,6 +642,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             with suppress(asyncio.CancelledError):
                 await reaper
         self._query_reaper = None
+        self._query_expires_at = 0.0
         async with self._query_lock:
             if self._query_worker is not None:
                 self._query_worker.terminate()
@@ -669,6 +694,12 @@ class IsolatedHaikuAdapter(HaikuAdapter):
     async def ensure_database(self, database: Path) -> None:
         await self._call("ensure_database", database)
 
+    async def warm(self, database: Path) -> None:
+        await self._call("warm", database)
+
+    async def citation_details(self, database: Path, citation: Citation) -> Citation:
+        return await self._call("citation_details", database, citation)
+
     async def ingest(
         self,
         database: Path,
@@ -682,6 +713,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         document_fingerprint: str | None = None,
         resume_segments: list[dict[str, Any]] | None = None,
         on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_phase: Callable[[str, int, int, int], Awaitable[None]] | None = None,
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
@@ -698,6 +730,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             document_fingerprint=document_fingerprint,
             resume_segments=resume_segments,
             on_segment=on_segment,
+            on_phase=on_phase,
             segment_sizer=segment_sizer,
             metadata=metadata,
             original_source=original_source,

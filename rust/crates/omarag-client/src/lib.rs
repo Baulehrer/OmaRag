@@ -17,6 +17,15 @@ use url::Url;
 pub trait OmaRagClient: Send + Sync {
     async fn meta(&self) -> OmaResult<BackendMeta>;
     async fn health(&self) -> OmaResult<HealthReport>;
+    async fn model_runtime(&self, workspace: Option<WorkspaceId>) -> OmaResult<serde_json::Value> {
+        let _ = workspace;
+        Err(OmaRagError::Protocol("Model runtime is unavailable".into()))
+    }
+    async fn system_dependencies(&self) -> OmaResult<serde_json::Value> {
+        Err(OmaRagError::Protocol(
+            "Dependency report is unavailable".into(),
+        ))
+    }
     async fn list_workspaces(&self) -> OmaResult<Vec<WorkspaceSummary>>;
     async fn open_workspace(&self, id: WorkspaceId) -> OmaResult<WorkspaceManifest>;
     async fn create_workspace(&self, request: CreateWorkspace) -> OmaResult<WorkspaceManifest>;
@@ -146,7 +155,7 @@ impl HttpOmaRagClient {
                 retryable: body.error.retryable,
             },
             Err(error) => OmaRagError::Protocol(format!(
-                "HTTP {status} ohne gueltiges Fehlerobjekt: {error}"
+                "HTTP {status} without a valid error object: {error}"
             )),
         }
     }
@@ -199,6 +208,19 @@ impl OmaRagClient for HttpOmaRagClient {
 
     async fn health(&self) -> OmaResult<HealthReport> {
         self.send_empty(Method::GET, "/v1/health").await
+    }
+
+    async fn model_runtime(&self, workspace: Option<WorkspaceId>) -> OmaResult<serde_json::Value> {
+        let path = workspace.map_or_else(
+            || "/v1/models/runtime".into(),
+            |workspace| format!("/v1/models/runtime?workspace_id={workspace}"),
+        );
+        self.send_empty(Method::GET, &path).await
+    }
+
+    async fn system_dependencies(&self) -> OmaResult<serde_json::Value> {
+        self.send_empty(Method::GET, "/v1/system/dependencies")
+            .await
     }
 
     async fn list_workspaces(&self) -> OmaResult<Vec<WorkspaceSummary>> {
@@ -812,7 +834,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "0.9.0".into(),
+            omarag_version: "1.0.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "mock".into(),

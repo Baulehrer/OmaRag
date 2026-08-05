@@ -612,18 +612,214 @@ fn render_header(
         ])),
         identity,
     );
-    let (metis, aletheia) = companion_poses(metrics.animation_tick);
+    let activity = header_activity(state);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Metis ", Style::default().fg(theme.purple)),
-            Span::styled(metis, Style::default().fg(theme.purple)),
-            Span::raw("   "),
-            Span::styled("Aletheia ", Style::default().fg(theme.cyan)),
-            Span::styled(aletheia, Style::default().fg(theme.cyan)),
-        ]))
+        Paragraph::new(convergence_line(
+            activity,
+            metrics.animation_tick,
+            companions.width,
+            header_phase_label(state),
+            theme,
+        ))
         .alignment(Alignment::Right),
         companions,
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderActivity {
+    Idle,
+    Answering,
+    Indexing { percent: u8 },
+}
+
+fn header_activity(state: &AppState) -> HeaderActivity {
+    if state.chat.request_pending || state.chat.active_run.is_some() {
+        return HeaderActivity::Answering;
+    }
+    let Some(job) = active_index_job(state) else {
+        return HeaderActivity::Idle;
+    };
+    let progress = if job.progress.is_finite() {
+        job.progress.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    HeaderActivity::Indexing {
+        percent: (progress * 100.0).round() as u8,
+    }
+}
+
+fn active_index_job(state: &AppState) -> Option<&JobSnapshot> {
+    let active_workspace = state.active_workspace.as_deref();
+    state
+        .jobs
+        .values()
+        .filter(|job| {
+            !is_terminal(&job.status)
+                && (job.kind.eq_ignore_ascii_case("ingest")
+                    || job.kind.to_ascii_lowercase().contains("index"))
+                && active_workspace.is_none_or(|workspace| job.workspace_id == workspace)
+        })
+        .max_by(|left, right| {
+            index_activity_priority(&left.status)
+                .cmp(&index_activity_priority(&right.status))
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+        })
+}
+
+fn index_activity_priority(status: &JobStatus) -> u8 {
+    match status {
+        JobStatus::Running | JobStatus::PauseRequested => 2,
+        JobStatus::Queued => 1,
+        JobStatus::Paused | JobStatus::Completed | JobStatus::Cancelled | JobStatus::Failed => 0,
+    }
+}
+
+fn convergence_line(
+    activity: HeaderActivity,
+    tick: u64,
+    available_width: u16,
+    phase_label: &str,
+    theme: &Theme,
+) -> Line<'static> {
+    let compact = available_width < 48;
+    let (metis, aletheia) = if compact {
+        ("◆", "◇")
+    } else {
+        companion_poses(tick)
+    };
+    let mut spans = vec![
+        Span::styled("Metis ", Style::default().fg(theme.purple)),
+        Span::styled(metis, Style::default().fg(theme.purple)),
+        Span::raw(" "),
+    ];
+    match activity {
+        HeaderActivity::Idle => spans.push(Span::raw(if compact { "· " } else { "  " })),
+        HeaderActivity::Indexing { percent } => {
+            let meter_width = if compact { 2 } else { 4 };
+            spans.extend(progress_half_spans(
+                percent,
+                meter_width,
+                true,
+                theme.purple,
+                theme.muted,
+            ));
+            spans.push(Span::styled(
+                format!(" {} {percent}% ", compact_phase(phase_label, 9)),
+                Style::default()
+                    .fg(theme.orange)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.extend(progress_half_spans(
+                percent,
+                meter_width,
+                false,
+                theme.cyan,
+                theme.muted,
+            ));
+            spans.push(Span::raw(" "));
+        }
+        HeaderActivity::Answering => {
+            let (left, center, right) = convergence_frame(tick, compact);
+            spans.push(Span::styled(left, Style::default().fg(theme.purple)));
+            spans.push(Span::styled(
+                if phase_label.is_empty() {
+                    center.to_owned()
+                } else {
+                    format!(
+                        " {} ",
+                        compact_phase(phase_label, if compact { 8 } else { 18 })
+                    )
+                },
+                Style::default()
+                    .fg(theme.orange)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(right, Style::default().fg(theme.cyan)));
+            spans.push(Span::raw(" "));
+        }
+    }
+    spans.push(Span::styled(aletheia, Style::default().fg(theme.cyan)));
+    spans.push(Span::styled(" Aletheia", Style::default().fg(theme.cyan)));
+    Line::from(spans)
+}
+
+fn compact_phase(label: &str, limit: usize) -> String {
+    let label = label
+        .replace("Searching & drafting", "Search + draft")
+        .replace("Preparing evidence", "Evidence")
+        .replace("Warming models", "Warming")
+        .replace("Profiling pages", "Profiling")
+        .replace("Converting pages", "Converting")
+        .replace("Building chunks", "Chunking")
+        .replace("Embedding chunks", "Embedding")
+        .replace("Committing segment", "Committing")
+        .replace("Verifying index", "Verifying");
+    truncate(&label.to_ascii_uppercase(), limit)
+}
+
+fn header_phase_label(state: &AppState) -> &str {
+    if state.chat.request_pending || state.chat.active_run.is_some() {
+        return &state.chat.phase_label;
+    }
+    active_index_job(state).map_or("INDEXING", |job| job.phase.as_str())
+}
+
+fn progress_half_spans(
+    percent: u8,
+    width: usize,
+    points_right: bool,
+    active: Color,
+    muted: Color,
+) -> Vec<Span<'static>> {
+    let filled = if percent >= 100 {
+        width
+    } else {
+        usize::from(percent) * width / 100
+    };
+    if filled == width {
+        return vec![Span::styled("━".repeat(width), Style::default().fg(active))];
+    }
+    let remaining = width.saturating_sub(filled + 1);
+    if points_right {
+        vec![
+            Span::styled("━".repeat(filled), Style::default().fg(active)),
+            Span::styled("╸", Style::default().fg(active)),
+            Span::styled("─".repeat(remaining), Style::default().fg(muted)),
+        ]
+    } else {
+        vec![
+            Span::styled("─".repeat(remaining), Style::default().fg(muted)),
+            Span::styled("╺", Style::default().fg(active)),
+            Span::styled("━".repeat(filled), Style::default().fg(active)),
+        ]
+    }
+}
+
+fn convergence_frame(tick: u64, compact: bool) -> (&'static str, &'static str, &'static str) {
+    let frame = (tick % 6) as usize;
+    if compact {
+        const FRAMES: [(&str, &str, &str); 6] = [
+            ("◆───", "┆", "───◇"),
+            ("─◆──", "┆", "──◇─"),
+            ("──◆─", "┆", "─◇──"),
+            ("────", "✦", "────"),
+            ("──◆─", "┆", "─◇──"),
+            ("─◆──", "┆", "──◇─"),
+        ];
+        FRAMES[frame]
+    } else {
+        const FRAMES: [(&str, &str, &str); 6] = [
+            ("◆───────", "┆", "───────◇"),
+            ("───◆────", "┆", "────◇───"),
+            ("──────◆─", "┆", "─◇──────"),
+            ("────────", "✦", "────────"),
+            ("──────◆─", "┆", "─◇──────"),
+            ("───◆────", "┆", "────◇───"),
+        ];
+        FRAMES[frame]
+    }
 }
 
 fn companion_poses(tick: u64) -> (&'static str, &'static str) {
@@ -1015,17 +1211,45 @@ fn render_chat_workspace(
             false,
         )
     } else if state.chat.answer.is_empty() {
-        (
-            Text::from(vec![
+        let phase_display = chat_phase_display(state);
+        let empty_lines = if state.documents.is_empty()
+            && !state.chat.request_pending
+            && state.chat.active_run.is_none()
+        {
+            vec![
+                Line::from(""),
+                Line::styled(
+                    "YOUR LIBRARY IS READY FOR ITS FIRST BOOK",
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::from(""),
+                Line::from("1  Press I to add a PDF"),
+                Line::from("2  Check the Models preset if needed"),
+                Line::from("3  Return here and ask a question"),
+                Line::from(""),
+                Line::styled(
+                    "Everything stays local. Sources open on the cited PDF page.",
+                    Style::default().fg(theme.muted),
+                ),
+            ]
+        } else {
+            vec![
                 Line::from(""),
                 Line::styled(
                     if state.chat.request_pending || state.chat.active_run.is_some() {
                         format!(
-                            "{} Searching your library…",
-                            spinner(metrics.animation_tick)
+                            "{} {}…",
+                            spinner(metrics.animation_tick),
+                            if phase_display.is_empty() {
+                                "Searching your library"
+                            } else {
+                                &phase_display
+                            }
                         )
                     } else {
-                        "Ask a question across your private library.".into()
+                        format!("Ask a question across {}.", state.chat.scope_title)
                     },
                     Style::default()
                         .fg(theme.focus)
@@ -1036,9 +1260,9 @@ fn render_chat_workspace(
                     "Answers stay local and carry their evidence into the inspector.",
                     Style::default().fg(theme.muted),
                 ),
-            ]),
-            false,
-        )
+            ]
+        };
+        (Text::from(empty_lines), false)
     } else {
         (
             selectable_answer(
@@ -1064,10 +1288,27 @@ fn render_chat_workspace(
         frame,
         input,
         &state.chat.question,
-        "Ask your library · Enter send · Ctrl+E evidence",
+        &format!(
+            "{} · Enter send · Ctrl+B books · Ctrl+E evidence",
+            state.chat.scope_title
+        ),
         state.focus_pane == FocusPane::Workspace && state.input_mode == InputMode::Text,
         theme,
     );
+}
+
+fn chat_phase_display(state: &AppState) -> String {
+    if state.chat.phase == "waiting"
+        && let Some(detail) = state
+            .jobs
+            .values()
+            .find(|job| !is_terminal(&job.status))
+            .and_then(|job| job.progress_detail.as_ref())
+        && let (Some(start), Some(end)) = (detail.page_start, detail.page_end)
+    {
+        return format!("Waiting · indexing pages {start}–{end}");
+    }
+    state.chat.phase_label.clone()
 }
 
 fn render_books_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Theme) {
@@ -1094,7 +1335,7 @@ fn render_books_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, t
                 ),
             ]),
             Line::styled(
-                "/ search  ·  I add PDFs  ·  F filter  ·  O sort",
+                "/ search  ·  I add PDFs  ·  A ask this book  ·  F filter  ·  O sort",
                 Style::default().fg(theme.muted),
             ),
         ]),
@@ -1161,6 +1402,7 @@ fn render_books_workspace(frame: &mut Frame<'_>, area: Rect, state: &AppState, t
                 theme,
                 &[
                     ("Open", 'O', theme.green),
+                    ("Ask", 'A', theme.orange),
                     ("Info", 'N', theme.cyan),
                     ("Tags", 'T', theme.yellow),
                     ("Delete", 'D', theme.red),
@@ -2004,6 +2246,12 @@ fn render_system_workspace(
         .map_or("not connected".into(), |meta| {
             format!("{} · API {}", meta.backend_id, meta.api_version)
         });
+    let backend_version = state
+        .backend
+        .as_ref()
+        .map_or("unknown", |meta| meta.omarag_version.as_str());
+    let client_version = env!("CARGO_PKG_VERSION");
+    let versions_match = backend_version == client_version;
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled("RUNTIME", Style::default().fg(theme.muted)),
@@ -2015,6 +2263,40 @@ fn render_system_workspace(
                 Span::styled("Connection  ", Style::default().fg(theme.muted)),
                 Span::styled(state.connection.label(), Style::default().fg(theme.green)),
             ]),
+            Line::from(vec![
+                Span::styled("Versions    ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("TUI {client_version} · API {backend_version}"),
+                    Style::default().fg(if versions_match {
+                        theme.green
+                    } else {
+                        theme.red
+                    }),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("Haiku RAG   ", Style::default().fg(theme.muted)),
+                Span::styled(
+                    state
+                        .backend
+                        .as_ref()
+                        .and_then(|meta| meta.haiku_version.as_deref())
+                        .unwrap_or("not installed"),
+                    Style::default().fg(theme.text),
+                ),
+            ]),
+            Line::styled(
+                if versions_match {
+                    "Components are compatible."
+                } else {
+                    "Version mismatch: restart the daemon after updating OmaRag."
+                },
+                Style::default().fg(if versions_match {
+                    theme.muted
+                } else {
+                    theme.red
+                }),
+            ),
             Line::from(vec![
                 Span::styled("CPU         ", Style::default().fg(theme.muted)),
                 Span::styled(
@@ -2539,11 +2821,23 @@ fn render_source_inspector(
 ) {
     let [images_area, sources_area] = source_inspector_areas(area);
     let image_refs = related_image_refs(state);
+    let has_picture_refs = state
+        .chat
+        .citations
+        .iter()
+        .any(|citation| !citation.picture_refs.is_empty());
+    let evidence_title = if image_refs.is_empty() {
+        "Related images".into()
+    } else if has_picture_refs {
+        format!("Related images · {}", image_refs.len())
+    } else {
+        format!("Page evidence · {}", image_refs.len())
+    };
     let images_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
-            " Related images · 4 ",
+            format!(" {evidence_title} "),
             Style::default()
                 .fg(theme.purple)
                 .add_modifier(Modifier::BOLD),
@@ -2559,25 +2853,9 @@ fn render_source_inspector(
             images_inner,
         );
     } else {
-        let [top, bottom] =
-            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(images_inner);
-        let [top_left, top_right] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
-        let [bottom_left, bottom_right] =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .areas(bottom);
-        let tiles = [top_left, top_right, bottom_left, bottom_right];
+        let tiles = evidence_tiles(images_inner, image_refs.len());
         for (slot, tile) in tiles.into_iter().enumerate() {
-            let Some((citation_index, page_index, page)) = image_refs.get(slot).copied() else {
-                frame.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(theme.border)),
-                    tile,
-                );
-                continue;
-            };
+            let (citation_index, page_index, page) = image_refs[slot];
             let selected =
                 citation_index == state.citation_cursor && page_index == state.citation_page_cursor;
             let tile_block = Block::default()
@@ -2639,6 +2917,28 @@ fn render_source_inspector(
             .scroll((state.inspector_scroll, 0)),
         sources_inner,
     );
+}
+
+fn evidence_tiles(area: Rect, count: usize) -> Vec<Rect> {
+    match count {
+        0 => Vec::new(),
+        1 => vec![area],
+        2 => Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area)
+            .to_vec(),
+        _ => {
+            let rows = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            rows.iter()
+                .flat_map(|row| {
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .split(*row)
+                        .to_vec()
+                })
+                .take(count.min(4))
+                .collect()
+        }
+    }
 }
 
 pub(crate) fn source_inspector_areas(area: Rect) -> [Rect; 2] {
@@ -2831,6 +3131,16 @@ fn inspector_lines(
                     "Size       {}",
                     detail.map_or("unknown".into(), |item| format_bytes(item.size_bytes))
                 )),
+                Line::from(format!(
+                    "Original   {}",
+                    match document.archive_mode.as_str() {
+                        "reflink" => "space-saving clone",
+                        "copy" => "managed copy",
+                        "existing" => "managed original reused",
+                        "external" => "external source",
+                        _ => "managed original",
+                    }
+                )),
                 Line::from(format!("Tags       {tags}")),
                 Line::from(""),
                 Line::styled(
@@ -2847,7 +3157,7 @@ fn inspector_lines(
                     Style::default().fg(theme.muted),
                 )];
             };
-            vec![
+            let mut lines = vec![
                 Line::styled(
                     job.kind.to_ascii_uppercase(),
                     Style::default()
@@ -2858,13 +3168,31 @@ fn inspector_lines(
                 Line::from(format!("Status     {:?}", job.status)),
                 Line::from(format!("Progress   {:.0}%", job.progress * 100.0)),
                 Line::from(format!("Phase      {}", job.phase)),
+            ];
+            if let Some(detail) = &job.progress_detail {
+                if let (Some(start), Some(end), Some(total)) =
+                    (detail.page_start, detail.page_end, detail.total_pages)
+                {
+                    lines.push(Line::from(format!("Pages      {start}–{end} / {total}")));
+                }
+                lines.push(Line::from(format!("Memory     {}", detail.memory_state)));
+                if let (Some(low), Some(high)) = (detail.eta_seconds_low, detail.eta_seconds_high) {
+                    lines.push(Line::from(format!(
+                        "ETA        {}–{}",
+                        format_duration(low.round() as u64),
+                        format_duration(high.round() as u64)
+                    )));
+                }
+            }
+            lines.extend([
                 Line::from(format!("Updated    {}", job.updated_at)),
                 Line::from(""),
                 Line::styled(
                     "Space pause/resume · X cancel",
                     Style::default().fg(theme.muted),
                 ),
-            ]
+            ]);
+            lines
         }
         View::Models => {
             let Some(entry) = state.model_manager.entries.get(state.model_manager.cursor) else {
@@ -3109,6 +3437,10 @@ fn receipt_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
         Span::raw("Source check · "),
         Span::styled(check_label, Style::default().fg(check_color)),
     ]));
+    lines.push(Line::from(format!(
+        "Retrieval · {} · Reranker · {}",
+        receipt.retrieval_mode, receipt.rerank_status
+    )));
     if receipt.cache_status == AnswerCacheStatus::Hit {
         lines.push(Line::styled(
             "Same books and settings",
@@ -4111,6 +4443,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
             ("E", "Edit"),
             ("X", "Export"),
         ],
+        Some(Overlay::BookScope) => &[("↑↓", "Select"), ("Enter", "Apply"), ("Esc", "Cancel")],
         Some(Overlay::WorkspaceProfile) => &[("↑↓", "Select"), ("Enter", "Apply"), ("Esc", "Back")],
         Some(Overlay::CustomProfileEditor) => &[
             ("Tab", "Field"),
@@ -4237,10 +4570,48 @@ fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         Some(Overlay::WorkspaceProfile) => render_workspace_profiles(frame, state, theme),
         Some(Overlay::CustomProfileEditor) => render_custom_profile_editor(frame, state, theme),
         Some(Overlay::ChatHistory) => render_chat_history(frame, state, theme),
+        Some(Overlay::BookScope) => render_book_scope(frame, state, theme),
         Some(Overlay::DocumentTags) => render_document_tags(frame, state, theme),
         Some(Overlay::CustomModel) => render_custom_model(frame, state, theme),
         None => {}
     }
+}
+
+fn render_book_scope(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
+    let area = centered(
+        64,
+        (state.documents.len() as u16 + 5).clamp(9, 22),
+        frame.area(),
+    );
+    frame.render_widget(Clear, area);
+    let mut items = Vec::with_capacity(state.documents.len() + 1);
+    items.push(ListItem::new(Line::styled(
+        "All books",
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+    )));
+    items.extend(state.documents.iter().map(|document| {
+        ListItem::new(Line::from(vec![
+            Span::styled("PDF  ", Style::default().fg(theme.cyan)),
+            Span::raw(truncate(
+                &document.title,
+                area.width.saturating_sub(10) as usize,
+            )),
+        ]))
+    }));
+    let mut list_state = ListState::default();
+    list_state.select(Some(state.chat.scope_cursor.min(state.documents.len())));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("│› ")
+            .highlight_style(Style::default().bg(theme.selection).fg(theme.focus))
+            .block(panel(
+                "Question scope · ↑↓ choose · Enter apply · Esc cancel",
+                true,
+                theme,
+            )),
+        area,
+        &mut list_state,
+    );
 }
 
 fn render_confirm_quit(frame: &mut Frame<'_>, theme: &Theme) {
@@ -5885,7 +6256,7 @@ fn status_symbol(status: &JobStatus) -> &'static str {
 fn is_terminal(status: &JobStatus) -> bool {
     matches!(
         status,
-        JobStatus::Completed | JobStatus::Cancelled | JobStatus::Failed
+        JobStatus::Paused | JobStatus::Completed | JobStatus::Cancelled | JobStatus::Failed
     )
 }
 fn spinner(tick: u64) -> &'static str {
@@ -6180,6 +6551,79 @@ mod tests {
         assert!(!idle.contains("CONNECTED"));
         assert!(!idle.contains("CONNECTING"));
         assert_ne!(idle, active);
+    }
+
+    #[test]
+    fn header_convergence_uses_real_index_progress_and_indeterminate_answer_motion() {
+        let mut indexing = AppState {
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        indexing.jobs.insert(
+            "job-1".into(),
+            JobSnapshot {
+                id: "job-1".into(),
+                workspace_id: "library-1".into(),
+                kind: "ingest".into(),
+                status: JobStatus::Running,
+                progress: 0.34,
+                phase: "embedding".into(),
+                payload: serde_json::json!({}),
+                result: None,
+                error: None,
+                created_at: "2026-08-05T10:00:00Z".into(),
+                updated_at: "2026-08-05T10:01:00Z".into(),
+                last_event_id: None,
+                checkpoint: None,
+                progress_detail: None,
+            },
+        );
+        let progress = rendered_metrics(
+            160,
+            42,
+            &indexing,
+            Theme::default(),
+            &RuntimeMetrics {
+                animation_tick: 2,
+                ..RuntimeMetrics::default()
+            },
+        );
+        let compact = rendered_metrics(
+            80,
+            24,
+            &indexing,
+            Theme::default(),
+            &RuntimeMetrics::default(),
+        );
+        assert!(progress.contains("EMBEDDING 34%"));
+        assert!(progress.contains('╸'));
+        assert!(progress.contains('╺'));
+        assert!(compact.contains("EMBEDDING 34%"));
+        assert!(compact.contains("Aletheia"));
+
+        indexing.jobs.get_mut("job-1").unwrap().progress_detail =
+            Some(omarag_domain::JobProgressDetail {
+                page_start: Some(26),
+                page_end: Some(50),
+                total_pages: Some(300),
+                ..omarag_domain::JobProgressDetail::default()
+            });
+        indexing.chat.request_pending = true;
+        indexing.chat.phase = "waiting".into();
+        indexing.chat.phase_label = "Waiting".into();
+        let waiting = rendered_metrics(
+            160,
+            42,
+            &indexing,
+            Theme::default(),
+            &RuntimeMetrics {
+                animation_tick: 3,
+                ..RuntimeMetrics::default()
+            },
+        );
+        assert!(waiting.contains("WAITING"));
+        assert!(!waiting.contains("INDEX 34%"));
+        assert!(waiting.contains("Waiting · indexing pages 26–50"));
     }
 
     #[test]

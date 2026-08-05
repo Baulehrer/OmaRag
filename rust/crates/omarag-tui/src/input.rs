@@ -27,6 +27,7 @@ use omarag_domain::{
     RunId, SearchRequest, UpdateConfig, WorkspaceId,
 };
 use ratatui::layout::Rect;
+use std::collections::BTreeMap;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use unicode_width::UnicodeWidthChar;
 use uuid::Uuid;
@@ -51,7 +52,9 @@ pub enum UiCommand {
         session_id: String,
         question: String,
         evidence_mode: EvidenceMode,
+        filters: BTreeMap<String, serde_json::Value>,
     },
+    WarmupChat(WorkspaceId),
     CancelRun(RunId),
     Search {
         workspace: WorkspaceId,
@@ -142,6 +145,7 @@ pub enum UiCommand {
         session: ChatSession,
     },
     CopyText(String),
+    CopySelection(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,23 +568,20 @@ fn finish_chat_selection(
     }
     let [_header, body, _footer] = screen_areas(screen);
     let areas = app_areas(body, state.focus_pane);
-    if !contains(areas.workspace, &mouse) {
-        return None;
-    }
     let inner = bordered_inner(areas.workspace);
     let input_height = if inner.height >= 9 { 3 } else { 1 };
     let answer_bottom = inner.bottom().saturating_sub(input_height);
-    if mouse.row >= answer_bottom {
-        return None;
-    }
-    if let Some(offset) = chat_answer_offset(
-        &state.chat.answer,
-        state.citation_cursor,
-        inner.width,
-        state.chat_scroll,
-        mouse.column.saturating_sub(inner.x),
-        mouse.row.saturating_sub(inner.y),
-    ) && let Some(selection) = state.chat.selection.as_mut()
+    let released_on_answer = contains(areas.workspace, &mouse) && mouse.row < answer_bottom;
+    if released_on_answer
+        && let Some(offset) = chat_answer_offset(
+            &state.chat.answer,
+            state.citation_cursor,
+            inner.width,
+            state.chat_scroll,
+            mouse.column.saturating_sub(inner.x),
+            mouse.row.saturating_sub(inner.y),
+        )
+        && let Some(selection) = state.chat.selection.as_mut()
     {
         selection.focus = offset;
         selection.moved |= selection.anchor != offset;
@@ -593,11 +594,11 @@ fn finish_chat_selection(
             inner.width,
             selection,
         )?;
-        notify(state, NotificationLevel::Info, "Selection copied.");
-        return Some(UiCommand::CopyText(selected));
+        return Some(UiCommand::CopySelection(selected));
     }
     state.chat.selection = None;
-    if state.bold_term_explanations_disabled
+    if !released_on_answer
+        || state.bold_term_explanations_disabled
         || state.chat.active_run.is_some()
         || state.chat.request_pending
     {
@@ -611,7 +612,12 @@ fn finish_chat_selection(
         mouse.column.saturating_sub(inner.x),
         mouse.row.saturating_sub(inner.y),
     )?;
-    let context = state.chat.question.value.trim().to_owned();
+    let context = if state.chat.submitted_question.trim().is_empty() {
+        state.chat.question.value.trim()
+    } else {
+        state.chat.submitted_question.trim()
+    }
+    .to_owned();
     state.chat.question.set(if context.is_empty() {
         format!(
             "Erkläre den Fachbegriff „{term}“ kurz und einfach. Nutze ausschließlich die vorhandenen Quellen."
@@ -845,6 +851,22 @@ fn handle_overlay_mouse(
             }
             None
         }
+        Overlay::BookScope => {
+            let area = centered(64, (state.documents.len() as u16 + 5).clamp(9, 22), screen);
+            if contains(area, &mouse) {
+                let index = mouse.row.saturating_sub(area.y + 2) as usize;
+                if index <= state.documents.len() {
+                    state.chat.scope_cursor = index;
+                    if activate {
+                        return handle_book_scope(
+                            state,
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                        );
+                    }
+                }
+            }
+            None
+        }
         Overlay::DocumentTags => {
             let area = centered(58, 9, screen);
             if activate && contains(area, &mouse) && mouse.row >= area.bottom().saturating_sub(2) {
@@ -1033,6 +1055,10 @@ fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
             let key = if next { KeyCode::Down } else { KeyCode::Up };
             let _ = handle_chat_history(state, KeyEvent::new(key, KeyModifiers::NONE));
         }
+        Some(Overlay::BookScope) => {
+            let key = if next { KeyCode::Down } else { KeyCode::Up };
+            let _ = handle_book_scope(state, KeyEvent::new(key, KeyModifiers::NONE));
+        }
         Some(Overlay::DocumentTags) => {}
         Some(Overlay::CustomModel) => {}
         None => {
@@ -1205,6 +1231,18 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             update(state, Action::NavigateView(View::Models));
             update(state, Action::SetFocusPane(FocusPane::Workspace));
             Some(refresh_model_catalog_command(state))
+        }
+        KeyCode::Char('b') => {
+            if state.view == View::Conversation {
+                state.chat.scope_cursor = state
+                    .chat
+                    .scope_document_id
+                    .as_ref()
+                    .and_then(|id| state.documents.iter().position(|item| &item.id == id))
+                    .map_or(0, |index| index + 1);
+                state.overlay = Some(Overlay::BookScope);
+            }
+            None
         }
         KeyCode::Char('a') => {
             update(state, Action::NavigateView(View::Indexing));
@@ -1518,13 +1556,32 @@ fn repeat_current_question(state: &mut AppState) -> Option<UiCommand> {
         return None;
     }
     let session_id = conversation_id(state, &workspace);
+    state.chat.submitted_question.clone_from(&question);
+    state.chat.question.set("");
     update(state, Action::RunRequestStarted);
     Some(UiCommand::StartRun {
         workspace,
         session_id,
         question,
         evidence_mode: state.chat.evidence_mode,
+        filters: chat_scope_filters(state),
     })
+}
+
+fn chat_scope_filters(state: &AppState) -> BTreeMap<String, serde_json::Value> {
+    let mut filters = BTreeMap::new();
+    if let Some(document_id) = &state.chat.scope_document_id {
+        filters.insert("logical_document_id".into(), serde_json::json!(document_id));
+    }
+    filters
+}
+
+fn displayed_answer_question(state: &AppState) -> String {
+    if state.chat.submitted_question.trim().is_empty() {
+        state.chat.question.value.clone()
+    } else {
+        state.chat.submitted_question.clone()
+    }
 }
 
 fn export_current_chat(state: &AppState) -> Option<UiCommand> {
@@ -1549,10 +1606,12 @@ fn export_current_chat(state: &AppState) -> Option<UiCommand> {
                 },
                 |receipt| receipt.session_id.clone(),
             ),
-            question: state.chat.question.value.clone(),
+            question: displayed_answer_question(state),
             answer: state.chat.answer.clone(),
             citations: state.chat.citations.clone(),
             receipt: state.chat.receipt.clone(),
+            scope_document_id: state.chat.scope_document_id.clone(),
+            scope_title: state.chat.scope_title.clone(),
             created_at: "now".into(),
         },
     })
@@ -1678,6 +1737,7 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
         Overlay::CustomProfileEditor => handle_custom_profile_editor(state, key),
         Overlay::ConfirmLibraryDelete => handle_library_delete_confirmation(state, key),
         Overlay::ChatHistory => handle_chat_history(state, key),
+        Overlay::BookScope => handle_book_scope(state, key),
         Overlay::DocumentTags => handle_document_tags(state, key),
         Overlay::CustomModel => handle_custom_model(state, key),
     }
@@ -2155,8 +2215,11 @@ fn conversation_id(state: &mut AppState, workspace: &WorkspaceId) -> String {
 }
 
 fn restore_chat_session(state: &mut AppState, session: ChatSession, include_answer: bool) {
+    state.chat.submitted_question.clone_from(&session.question);
     state.chat.question.set(session.question);
     state.chat.selection = None;
+    state.chat.scope_document_id = session.scope_document_id.clone();
+    state.chat.scope_title = session.scope_title.clone();
     if !session.session_id.is_empty() {
         state
             .conversation_ids
@@ -2169,6 +2232,33 @@ fn restore_chat_session(state: &mut AppState, session: ChatSession, include_answ
         state.citation_cursor = 0;
         state.citation_page_cursor = 0;
     }
+}
+
+fn handle_book_scope(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+    let len = state.documents.len() + 1;
+    match key.code {
+        KeyCode::Esc => state.overlay = None,
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.chat.scope_cursor = (state.chat.scope_cursor + len - 1) % len;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.chat.scope_cursor = (state.chat.scope_cursor + 1) % len;
+        }
+        KeyCode::Enter => {
+            if state.chat.scope_cursor == 0 {
+                state.chat.scope_document_id = None;
+                state.chat.scope_title = "All books".into();
+            } else if let Some(document) = state.documents.get(state.chat.scope_cursor - 1) {
+                state.chat.scope_document_id = Some(document.id.clone());
+                state.chat.scope_title.clone_from(&document.title);
+            }
+            state.overlay = None;
+            let message = format!("Chat scope: {}", state.chat.scope_title);
+            notify(state, NotificationLevel::Info, &message);
+        }
+        _ => {}
+    }
+    None
 }
 
 fn toggle_bold_term_explanations(state: &mut AppState) {
@@ -3430,12 +3520,15 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
             }
             let evidence_mode = state.chat.evidence_mode;
             let session_id = conversation_id(state, &workspace);
+            state.chat.submitted_question.clone_from(&question);
+            state.chat.question.set("");
             update(state, Action::RunRequestStarted);
             Some(UiCommand::StartRun {
                 workspace,
                 session_id,
                 question,
                 evidence_mode,
+                filters: chat_scope_filters(state),
             })
         }
         Route::Search => {
@@ -3554,6 +3647,17 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
                 update(state, Action::OpenOverlay(Overlay::Palette));
             }
             _ => {}
+        }
+        return None;
+    }
+
+    if state.view == View::Books && matches!(key.code, KeyCode::Char('a' | 'A')) {
+        if let Some(document) = selected_library_document(state).cloned() {
+            state.chat.scope_document_id = Some(document.id);
+            state.chat.scope_title = document.title;
+            update(state, Action::NavigateView(View::Conversation));
+            update(state, Action::SetFocusPane(FocusPane::Workspace));
+            update(state, Action::SetInputMode(InputMode::Text));
         }
         return None;
     }
@@ -4355,6 +4459,31 @@ mod tests {
     }
 
     #[test]
+    fn sending_chat_clears_the_composer_and_keeps_the_submitted_question() {
+        let mut state = AppState {
+            input_mode: InputMode::Text,
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        state.chat.question.set("Was ist Beton?");
+        state.chat.scope_document_id = Some("book-beton".into());
+
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+
+        let Some(UiCommand::StartRun {
+            question, filters, ..
+        }) = command
+        else {
+            panic!("chat submission did not start a run");
+        };
+        assert_eq!(question, "Was ist Beton?");
+        assert_eq!(filters["logical_document_id"], "book-beton");
+        assert!(state.chat.question.value.is_empty());
+        assert_eq!(state.chat.question.cursor, 0);
+        assert_eq!(state.chat.submitted_question, "Was ist Beton?");
+    }
+
+    #[test]
     fn file_browser_multiselect_confirms_one_ingest_request() {
         let root =
             std::env::temp_dir().join(format!("oracle-import-test-{}", uuid::Uuid::new_v4()));
@@ -4713,7 +4842,7 @@ mod tests {
             ),
             screen,
         );
-        assert_eq!(copied, Some(UiCommand::CopyText("Beton".into())));
+        assert_eq!(copied, Some(UiCommand::CopySelection("Beton".into())));
 
         handle_mouse(
             &mut state,
@@ -5202,6 +5331,8 @@ mod tests {
                 answer: "Answer".into(),
                 citations: Vec::new(),
                 receipt: None,
+                scope_document_id: None,
+                scope_title: "All books".into(),
                 created_at: "now".into(),
             }],
         );

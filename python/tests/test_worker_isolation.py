@@ -8,6 +8,7 @@ import pytest
 from omarag_bridge.adapters.isolated import (
     IsolatedHaikuAdapter,
     WorkerLimits,
+    _ChildCallbacks,
     _ollama_targets,
     _unload_ollama_targets,
 )
@@ -113,3 +114,27 @@ def test_query_cleanup_uses_official_keep_alive_zero_request(monkeypatch) -> Non
         "body": b'{"model": "embed-local", "keep_alive": 0}',
         "timeout": 5,
     }
+
+
+async def test_worker_forwards_index_phase_callbacks() -> None:
+    class Connection:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def send(self, message: dict[str, object]) -> None:
+            self.sent.append(message)
+
+        def recv(self) -> dict[str, object]:
+            return {
+                "type": "callback_result",
+                "id": self.sent[-1]["id"],
+                "result": None,
+            }
+
+    connection = Connection()
+    callbacks = _ChildCallbacks(connection, {"on_phase"})
+
+    await callbacks.options()["on_phase"]("embedding", 26, 50, 300)
+
+    assert connection.sent[-1]["name"] == "on_phase"
+    assert connection.sent[-1]["args"] == ("embedding", 26, 50, 300)

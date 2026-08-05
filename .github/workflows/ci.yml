@@ -46,6 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Build CPU image
-        run: docker build --build-arg VERSION=0.9.0 -f deploy/Dockerfile -t omarag:test .
+        run: docker build --build-arg VERSION=1.0.0 -f deploy/Dockerfile -t omarag:test .
       - name: Verify non-root runtime
         run: test "$(docker run --rm --entrypoint id omarag:test -u)" != "0"

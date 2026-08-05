@@ -108,6 +108,8 @@ class WorkspaceFeatureService:
                             record.get("pipeline_version")
                             or current_result.get("pipeline_version", "textbook-v1")
                         ),
+                        size_bytes=int(current_result.get("size_bytes") or 0),
+                        archive_mode=str(current_result.get("archive_mode") or "unknown"),
                     )
                 )
         unique: dict[str, DocumentSummary] = {}

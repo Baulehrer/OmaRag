@@ -4,8 +4,12 @@ import asyncio
 from pathlib import Path
 
 import httpx2
+import pytest
 from fastapi import FastAPI
 from PIL import Image
+
+from omarag_bridge.models.errors import ConflictError
+from omarag_bridge.services import textbook_service
 
 
 async def test_import_preflight_confirms_metadata_and_archives_original(
@@ -54,8 +58,38 @@ async def test_import_preflight_confirms_metadata_and_archives_original(
 
     documents = (await client.get(f"/v1/workspaces/{workspace_id}/documents")).json()
     assert documents[0]["book"]["confirmed"] is True
+    assert documents[0]["archive_mode"] in {"reflink", "copy", "existing"}
     assert Path(documents[0]["managed_source"]).is_file()
     assert Path(documents[0]["managed_source"]).parent.name == "originals"
+
+
+def test_managed_original_fallback_is_independent_and_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    source = tmp_path / "book.pdf"
+    original = b"stable textbook evidence"
+    source.write_bytes(original)
+    fingerprint = textbook_service.file_sha256(source)
+    monkeypatch.setattr(textbook_service, "_reflink_and_hash", lambda _source, _target: None)
+
+    archived, verified, mode = textbook_service.archive_source(workspace, source, fingerprint)
+    assert verified == fingerprint
+    assert mode == "copy"
+    assert archived.read_bytes() == original
+    assert archived.stat().st_mode & 0o222 == 0
+
+    source.write_bytes(b"the user's file changed later")
+    assert archived.read_bytes() == original
+    with pytest.raises(ConflictError, match="size"):
+        textbook_service.archive_source(workspace, source, fingerprint)
+    source.write_bytes(original)
+    reused, reused_fingerprint, reused_mode = textbook_service.archive_source(
+        workspace, source, fingerprint
+    )
+    assert reused == archived
+    assert reused_fingerprint == fingerprint
+    assert reused_mode == "existing"
 
 
 async def test_silver_retrieval_evaluation_compares_public_search_variants(

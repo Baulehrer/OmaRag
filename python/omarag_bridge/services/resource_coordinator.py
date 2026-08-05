@@ -47,12 +47,26 @@ class ResourceCoordinator:
     def memory(self) -> MemorySnapshot:
         return _memory_snapshot()
 
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    @property
+    def waiting_chats(self) -> int:
+        return self._waiting_chats
+
+    def residency_seconds(self) -> float:
+        """Adaptive query residency: fast when safe, aggressive under pressure."""
+        return {"ready": 120.0, "guarded": 30.0, "waiting": 0.0}[self.memory().state]
+
     def segment_pages(self, preferred: int, scanned: bool) -> int:
         """Reduce future conversion units before memory pressure becomes an OOM."""
         snapshot = self.memory()
         headroom = max(0, snapshot.available - snapshot.reserve)
         # OCR and table models have a much steeper per-page peak than native text.
         per_page = 180 * 1024**2 if scanned else 72 * 1024**2
+        if snapshot.total <= 10 * 1024**3:
+            preferred = min(preferred, 4 if scanned else 12)
         safe_pages = max(1, headroom // per_page)
         return max(1, min(preferred, int(safe_pages)))
 
@@ -77,6 +91,28 @@ class ResourceCoordinator:
                 self._waiting_chats -= 1
         try:
             yield
+        finally:
+            async with self._condition:
+                self._busy = False
+                self._condition.notify_all()
+
+    @asynccontextmanager
+    async def warmup(self) -> AsyncIterator[str]:
+        """Claim a heavy slot without ever delaying foreground work."""
+        if self.memory().state == "waiting":
+            yield "skipped_memory"
+            return
+        async with self._condition:
+            if self._busy or self._waiting_chats:
+                admission = "skipped_busy"
+            else:
+                self._busy = True
+                admission = "ready"
+        if admission != "ready":
+            yield admission
+            return
+        try:
+            yield "ready"
         finally:
             async with self._condition:
                 self._busy = False

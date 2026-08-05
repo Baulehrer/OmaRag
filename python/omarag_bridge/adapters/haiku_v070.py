@@ -489,6 +489,11 @@ class VanillaHaikuAdapter(HaikuAdapter):
         async with self._client(database, create=True):
             pass
 
+    async def warm(self, database: Path) -> None:
+        await self.ensure_database(database)
+        async with self._client(database) as rag:
+            await rag.list_documents()
+
     async def ingest(
         self,
         database: Path,
@@ -502,6 +507,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         document_fingerprint: str | None = None,
         resume_segments: list[dict[str, Any]] | None = None,
         on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_phase: Callable[[str, int, int, int], Awaitable[None]] | None = None,
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
@@ -521,6 +527,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 document_fingerprint=document_fingerprint,
                 resume_segments=resume_segments,
                 on_segment=on_segment,
+                on_phase=on_phase,
                 segment_sizer=segment_sizer,
                 metadata=metadata,
                 original_source=original_source,
@@ -553,6 +560,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         document_fingerprint: str | None = None,
         resume_segments: list[dict[str, Any]] | None = None,
         on_segment: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        on_phase: Callable[[str, int, int, int], Awaitable[None]] | None = None,
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
@@ -564,6 +572,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
             source,
             _cache_file(database, f"profile-{document_fingerprint}"),
         )
+        if on_phase is not None:
+            await on_phase("profiling", 0, 0, total_pages)
         if isinstance(scanned_pages, bool):
             scanned_pages = [scanned_pages] * total_pages
         if total_pages == 0:
@@ -682,6 +692,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 raise asyncio.CancelledError
             try:
                 async with guard():
+                    if on_phase is not None:
+                        await on_phase("converting", start + 1, end, total_pages)
                     pdf_bytes = await asyncio.to_thread(_pdf_slice, source, start, end)
                     with tempfile.NamedTemporaryFile(
                         mode="wb", suffix=".pdf", delete=False
@@ -738,6 +750,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
                                 converted_segments += 1
                             else:
                                 cache_hits += 1
+                            if on_phase is not None:
+                                await on_phase("chunking", start + 1, end, total_pages)
                             chunks = _content_chunks(await segment_rag.chunk(docling_document))
                             document_metadata = {
                                 "logical_document_id": logical_id,
@@ -759,6 +773,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
                                 f"{source_uri}#oracle-pages={start + 1}-{end}"
                                 f"&generation={generation_id}"
                             )
+                            if on_phase is not None:
+                                await on_phase("embedding", start + 1, end, total_pages)
                             document = await segment_rag.import_document(
                                 docling_document,
                                 chunks,
@@ -766,6 +782,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
                                 title=(document_metadata.get("book_title") or source.name),
                                 metadata=document_metadata,
                             )
+                            if on_phase is not None:
+                                await on_phase("committing", start + 1, end, total_pages)
                             segment_manifest = [
                                 _chunk_manifest(
                                     chunk,
@@ -822,6 +840,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
             start = end if kind_boundary else max(start + 1, end - 1)
         # Only retire the previous generation after every new segment is
         # searchable. Interrupted work remains staged and can be resumed.
+        if on_phase is not None:
+            await on_phase("verifying", total_pages, total_pages, total_pages)
         async with self._client(database) as rag:
             for document_id in old_document_ids:
                 with suppress(Exception):
@@ -926,7 +946,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
             )
         return hits
 
-    async def _citation(self, rag: Any, cite: Any, index: int) -> Citation:
+    def _basic_citation(self, cite: Any, index: int) -> Citation:
         chunk_id = str(_value(cite, "chunk_id", "id", default=f"chunk-{index}"))
         document_id = _value(cite, "document_id")
         document_meta = dict(_value(cite, "document_meta", default={}) or {})
@@ -940,45 +960,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         pages = [page + page_offset for page in _int_list(_value(cite, "page_numbers", "pages"))]
         all_refs = _string_list(_value(cite, "doc_item_refs"))
         chunk_ids = _string_list(_value(cite, "chunk_ids")) or [chunk_id]
-        primary_refs: list[str] = []
-        if chunk_id:
-            try:
-                primary_chunk = await rag.get_chunk_by_id(chunk_id)
-                if primary_chunk is not None:
-                    primary_refs = _string_list(
-                        _value(primary_chunk, "metadata", default={}).get("doc_item_refs", [])
-                    )
-            except Exception:
-                # Citation display must keep working with old/partial stores.
-                primary_refs = []
-        primary_set = set(primary_refs)
-        context_refs = [ref for ref in all_refs if ref not in primary_set]
-        document = None
-        if document_id:
-            try:
-                stored = await rag.get_document_by_id(document_id)
-                document = stored.get_docling_document() if stored is not None else None
-            except Exception:
-                document = None
-        primary_anchors = (
-            _anchors_for_refs(document, primary_refs or all_refs, page_offset=page_offset)
-            if document is not None
-            else []
-        )
-        context_anchors = (
-            _anchors_for_refs(document, context_refs, page_offset=page_offset)
-            if document is not None
-            else []
-        )
-        element_types = list(
-            dict.fromkeys(
-                anchor.element_type
-                for anchor in [*primary_anchors, *context_anchors]
-                if anchor.element_type
-            )
-        )
-        if not element_types:
-            element_types = _string_list(_value(cite, "labels"))
+        element_types = _string_list(_value(cite, "labels"))
         return Citation(
             chunk_id=chunk_id,
             chunk_ids=chunk_ids,
@@ -992,14 +974,67 @@ class VanillaHaikuAdapter(HaikuAdapter):
             element_types=element_types,
             doc_item_refs=all_refs,
             picture_refs=_string_list(_value(cite, "picture_refs")),
-            primary_anchors=primary_anchors,
-            context_anchors=context_anchors,
+            primary_anchors=[],
+            context_anchors=[],
             excerpt=str(_value(cite, "content", "excerpt", default="")),
             retrieval_rank=index + 1,
             rerank_score=_value(cite, "score", "rerank_score"),
             book=book,
             verification_status="provider-grounded",
         )
+
+    async def _citation_details_with_rag(self, rag: Any, citation: Citation) -> Citation:
+        if citation.primary_anchors or citation.context_anchors:
+            return citation
+        primary_refs: list[str] = []
+        if citation.chunk_id:
+            with suppress(Exception):
+                primary_chunk = await rag.get_chunk_by_id(citation.chunk_id)
+                if primary_chunk is not None:
+                    primary_refs = _string_list(
+                        (_value(primary_chunk, "metadata", default={}) or {}).get(
+                            "doc_item_refs", []
+                        )
+                    )
+        primary_set = set(primary_refs)
+        context_refs = [ref for ref in citation.doc_item_refs if ref not in primary_set]
+        document = None
+        if citation.document_id:
+            with suppress(Exception):
+                stored = await rag.get_document_by_id(citation.document_id)
+                document = stored.get_docling_document() if stored is not None else None
+        if document is None:
+            return citation
+        local_pages = getattr(document, "pages", {}) or {}
+        local_first = min((int(page) for page in local_pages), default=1)
+        page_offset = max(0, min(citation.pages or [1]) - local_first)
+        primary = _anchors_for_refs(
+            document, primary_refs or citation.doc_item_refs, page_offset=page_offset
+        )
+        context = _anchors_for_refs(document, context_refs, page_offset=page_offset)
+        element_types = list(
+            dict.fromkeys(
+                anchor.element_type for anchor in [*primary, *context] if anchor.element_type
+            )
+        )
+        return citation.model_copy(
+            update={
+                "primary_anchors": primary,
+                "context_anchors": context,
+                "element_types": element_types or citation.element_types,
+            }
+        )
+
+    async def _citation(self, rag: Any, cite: Any, index: int) -> Citation:
+        """Compatibility helper for clients that explicitly request rich provenance."""
+        return await self._citation_details_with_rag(rag, self._basic_citation(cite, index))
+
+    async def citation_details(self, database: Path, citation: Citation) -> Citation:
+        if citation.primary_anchors or citation.context_anchors:
+            return citation
+        await self.ensure_database(database)
+        async with self._client(database) as rag:
+            return await self._citation_details_with_rag(rag, citation)
 
     async def ask(
         self,
@@ -1024,7 +1059,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         ) as rag:
             answer, raw_citations = await rag.ask(question, **kwargs)
             citations = _deduplicate_citations(
-                [await self._citation(rag, cite, index) for index, cite in enumerate(raw_citations)]
+                [self._basic_citation(cite, index) for index, cite in enumerate(raw_citations)]
             )
         return str(answer), citations
 
@@ -1053,7 +1088,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
             answer = _value(result, "answer", default="")
             raw_citations = _value(result, "citations", default=[]) or []
             citations = _deduplicate_citations(
-                [await self._citation(rag, cite, index) for index, cite in enumerate(raw_citations)]
+                [self._basic_citation(cite, index) for index, cite in enumerate(raw_citations)]
             )
         return str(answer), citations
 
