@@ -1,10 +1,20 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 
-from .domain import BookMetadata, EvidenceMode, StrictModel
+from .domain import (
+    BookMetadata,
+    EvaluationCase,
+    EvidenceMode,
+    HardwareTier,
+    PerformanceProfile,
+    PrivacyPolicy,
+    RetentionPolicy,
+    StrictModel,
+)
 
 ProcessingProfile = Literal[
     "default",
@@ -16,7 +26,7 @@ ProcessingProfile = Literal[
     "eco",
     "balanced",
 ]
-RetrievalProfile = Literal["auto", "fast", "balanced", "deep"]
+RetrievalProfile = Literal["auto", "fast", "normal", "quality", "balanced", "deep"]
 ValidityPolicy = Literal["prefer-current", "strict"]
 DocumentPolicy = Literal["current-only", "all-editions"]
 TextFilter = str | list[str]
@@ -55,6 +65,25 @@ class PatchWorkspaceRequest(StrictModel):
     read_only: bool | None = None
 
 
+class UpdatePrivacyPolicyRequest(StrictModel):
+    policy: PrivacyPolicy = Field(default_factory=PrivacyPolicy)
+
+
+class UpdateRetentionPolicyRequest(StrictModel):
+    policy: RetentionPolicy = Field(default_factory=RetentionPolicy)
+
+
+class ExecuteRetentionCleanupRequest(StrictModel):
+    plan_id: str = Field(pattern=r"^sha256:[0-9a-f]{24}$")
+    confirm: Literal["PURGE_EXPIRED"]
+
+
+class ExecuteDocumentPurgeRequest(StrictModel):
+    plan_id: str = Field(pattern=r"^sha256:[0-9a-f]{24}$")
+    confirm: Literal["PURGE_DOCUMENT"]
+    backup_confirm: Literal["PURGE_BACKUPS"] | None = None
+
+
 class CloneWorkspaceRequest(StrictModel):
     name: str = Field(min_length=1, max_length=120)
     id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{1,62}$")
@@ -67,6 +96,17 @@ class SourceInput(StrictModel):
     candidate_id: str | None = None
     metadata: BookMetadata | None = None
 
+    @model_validator(mode="after")
+    def path_matches_declared_type(self) -> SourceInput:
+        normalized = self.path.strip()
+        scheme = urlsplit(normalized).scheme.casefold()
+        is_http = scheme in {"http", "https"}
+        if self.type == "file" and scheme:
+            raise ValueError("a file source must be a local path without a URI scheme")
+        if self.type == "url" and not is_http:
+            raise ValueError("type=url requires an HTTP(S) URL")
+        return self
+
 
 class IndexingOptions(StrictModel):
     """Safe, versioned controls for the public book indexing pipeline.
@@ -75,9 +115,10 @@ class IndexingOptions(StrictModel):
     accidentally create an index that is incompatible with its generation.
     """
 
-    pipeline: Literal["book-v2", "compatible"] = "book-v2"
+    pipeline: Literal["book-v3", "book-v2", "compatible"] = "book-v3"
     enrichment: Literal["captions", "vlm"] = "captions"
     llm_fallback: Literal["auto", "off"] = "auto"
+    visual_dense: Literal["off", "on"] = "off"
 
 
 class IngestRequest(StrictModel):
@@ -93,7 +134,7 @@ class IngestRequest(StrictModel):
 
 class SearchOptions(StrictModel):
     profile: RetrievalProfile = "auto"
-    max_sources: int | None = Field(default=None, ge=1, le=14)
+    max_sources: int | None = Field(default=None, ge=1, le=18)
     deadline_ms: int | None = Field(default=None, ge=3000, le=35000)
 
 
@@ -126,6 +167,13 @@ class GenerateEvaluationRequest(StrictModel):
     limit: int = Field(default=30, ge=5, le=300)
 
 
+class ImportEvaluationRequest(StrictModel):
+    id: str | None = Field(default=None, pattern=r"^eval-[A-Za-z0-9._-]{1,64}$")
+    cases: list[EvaluationCase] = Field(min_length=1, max_length=2000)
+    baseline_id: str | None = None
+    require_reviewed: bool = True
+
+
 class RunEvaluationRequest(StrictModel):
     evaluation_id: str | None = None
     variants: list[Literal["fts", "vector", "hybrid"]] = Field(
@@ -137,9 +185,10 @@ class RunEvaluationRequest(StrictModel):
 class RunOptions(StrictModel):
     profile: RetrievalProfile = "auto"
     memory: Literal["auto", "off"] = "auto"
-    max_sources: int | None = Field(default=None, ge=1, le=14)
+    max_sources: int | None = Field(default=None, ge=1, le=18)
     max_answer_tokens: int | None = Field(default=None, ge=64, le=768)
     deadline_ms: int | None = Field(default=None, ge=3000, le=60000)
+    verifier: Literal["auto", "off"] = "auto"
 
 
 class RunRequest(StrictModel):
@@ -159,6 +208,11 @@ class RunRequest(StrictModel):
 
     @model_validator(mode="after")
     def deadline_matches_mode(self) -> RunRequest:
+        if self.images:
+            raise ValueError(
+                "image question inputs are not source-bound in V1.2; "
+                "use the cited visual-evidence panel instead"
+            )
         if (
             self.mode == "rag"
             and self.options.deadline_ms is not None
@@ -255,6 +309,53 @@ class ModelDefaultsRequest(StrictModel):
     vector_dim: int = Field(default=1024, ge=64, le=8192)
 
 
+class HardwareScanRequest(StrictModel):
+    """Read-only hardware discovery; ``force`` bypasses an application cache."""
+
+    force: bool = False
+
+
+class HardwareBenchmarkRequest(StrictModel):
+    """Explicit consent to benchmark already installed models; never pulls weights."""
+
+    profile: PerformanceProfile = PerformanceProfile.NORMAL
+    tier: HardwareTier | None = None
+    confirm: Literal["BENCHMARK"]
+
+
+class ModelRecommendationRequest(StrictModel):
+    performance_profile: PerformanceProfile = PerformanceProfile.NORMAL
+    workspace_id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=63,
+        pattern=r"^[a-z0-9][a-z0-9-]{1,62}$",
+    )
+
+
+class ModelProfilePreflightRequest(ModelRecommendationRequest):
+    """Preview a profile without downloads, config writes or reindexing."""
+
+    benchmark_tier: HardwareTier | None = None
+
+
+class ModelProfileApplyRequest(StrictModel):
+    """Consent envelope for the mutations described by a prior preflight."""
+
+    preflight_id: str = Field(min_length=1, max_length=160)
+    confirm: Literal["APPLY"]
+    download_consent: Literal["DOWNLOAD_MODELS"] | None = None
+
+
+class ModelProfileApplyAndReindexRequest(StrictModel):
+    """Consent envelope for an embedding-changing, staged profile rebuild."""
+
+    preflight_id: str = Field(min_length=1, max_length=160)
+    confirm: Literal["APPLY_AND_REINDEX"]
+    download_consent: Literal["DOWNLOAD_MODELS"] | None = None
+    indexing: IndexingOptions = Field(default_factory=IndexingOptions)
+
+
 class RestoreBackupRequest(StrictModel):
     confirm: str
 
@@ -264,3 +365,7 @@ class RestoreBackupRequest(StrictModel):
         if value != "RESTORE":
             raise ValueError("confirm must equal RESTORE")
         return value
+
+
+class PinRequest(StrictModel):
+    pinned: bool = True

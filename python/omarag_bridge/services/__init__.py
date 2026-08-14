@@ -5,6 +5,7 @@ from .model_service import ModelService
 from .resource_coordinator import ResourceCoordinator
 from .run_service import RunService
 from .textbook_service import TextbookService
+from .visual_evidence_service import VisualEvidenceService
 from .workspace_feature_service import WorkspaceFeatureService
 from .workspace_service import WorkspaceService
 
@@ -17,6 +18,7 @@ __all__ = [
     "ResourceCoordinator",
     "RunService",
     "TextbookService",
+    "VisualEvidenceService",
     "WorkspaceFeatureService",
     "WorkspaceService",
 ]

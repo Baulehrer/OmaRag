@@ -26,9 +26,10 @@ class Settings(BaseSettings):
     api_swap_max_mb: int = Field(default=0, ge=0)
     api_tasks_max: int = Field(default=64, ge=16, le=256)
     unload_ollama_models_on_worker_exit: bool = True
-    # Upper bound; the resource coordinator shortens this to 30s or 0s when
-    # memory becomes guarded or constrained. An explicit env override wins.
-    worker_query_idle_seconds: float = Field(default=120.0, ge=0.0, le=600.0)
+    # Upper bound; the resource coordinator grows hot-query residency from 30s
+    # to at most 5m and drops it to zero under memory pressure. An explicit env
+    # override may choose a lower ceiling.
+    worker_query_idle_seconds: float = Field(default=300.0, ge=0.0, le=600.0)
     worker_import_memory_high_mb: int = Field(default=7168, ge=512)
     worker_import_memory_max_mb: int = Field(default=9216, ge=768)
     worker_import_swap_max_mb: int = Field(default=1024, ge=0)
@@ -39,7 +40,9 @@ class Settings(BaseSettings):
     worker_utility_memory_max_mb: int = Field(default=2048, ge=256)
     worker_utility_swap_max_mb: int = Field(default=256, ge=0)
     worker_tasks_max: int = Field(default=96, ge=16, le=512)
-    answer_cache_max_entries: int = Field(default=256, ge=16, le=4096)
+    answer_cache_max_entries: int = Field(default=64, ge=16, le=4096)
+    answer_cache_max_bytes: int = Field(default=128 * 1024**2, ge=1024**2)
+    retention_sweep_seconds: float = Field(default=3600.0, ge=1.0, le=86400.0)
 
     @property
     def state_database(self) -> Path:

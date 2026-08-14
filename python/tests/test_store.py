@@ -72,6 +72,11 @@ def test_segment_ledger_and_document_fingerprint_survive_restart(tmp_path: Path)
         "logical_document_id": "book-1",
         "generation_id": "gen-1",
         "segment_document_ids": ["haiku-segment-1"],
+        "runtime_lock": {
+            "embedding_provider": "ollama",
+            "embedding_model": "embed:1",
+            "embedding_digest": "sha256:abc",
+        },
     }
     store.upsert_document(workspace.id, "/books/daedalus.pdf", "abc123", result)
     store.close()
@@ -81,6 +86,7 @@ def test_segment_ledger_and_document_fingerprint_survive_restart(tmp_path: Path)
     indexed = reopened.document_by_fingerprint(workspace.id, "abc123")
     assert indexed is not None
     assert indexed["generation_id"] == "gen-1"
+    assert reopened.workspace_index_runtime_locks(workspace.id) == [result["runtime_lock"]]
     reopened.close()
 
 
@@ -163,6 +169,41 @@ def test_answer_cache_is_bounded_and_document_generations_invalidate_it(tmp_path
     )
     assert store.workspace_index_fingerprint(workspace.id) != before
     assert store.answer_cache_size(workspace.id) == 0
+    store.close()
+
+
+def test_answer_cache_is_bounded_by_encoded_payload_bytes(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    workspace = WorkspaceService(tmp_path / "workspaces", store).create(
+        CreateWorkspaceRequest(name="Byte Cache")
+    )
+    for index in range(2):
+        store.cache_answer(
+            cache_key=f"large-{index}",
+            workspace_id=workspace.id,
+            index_fingerprint="index",
+            config_fingerprint="config",
+            request={"question": str(index)},
+            answer="x" * 600_000,
+            citations=[],
+            max_entries=64,
+            max_bytes=1024**2,
+        )
+    assert store.answer_cache_size(workspace.id) == 1
+    assert store.cached_answer("large-1") is not None
+
+    store.cache_answer(
+        cache_key="too-large",
+        workspace_id=workspace.id,
+        index_fingerprint="index",
+        config_fingerprint="config",
+        request={"question": "oversized"},
+        answer="y" * (2 * 1024**2),
+        citations=[],
+        max_entries=64,
+        max_bytes=1024**2,
+    )
+    assert store.cached_answer("too-large") is None
     store.close()
 
 
@@ -285,6 +326,11 @@ def test_book_v2_store_round_trip_and_generation_gate(tmp_path: Path) -> None:
     restored = store.book_knowledge_snapshot(workspace.id, "book-v2")
     assert restored["schema_version"] == "2"
     assert restored["evidence"][0]["evidence_id"] == "ev-one"
+    assert restored["evidence"][0]["raw_content"] == ""
+    indexed_result = store.document_by_fingerprint(workspace.id, "pdf-sha")["result"]
+    assert "book_knowledge_snapshot" not in indexed_result
+    assert "chunk_manifest" not in indexed_result
+    assert "segments" not in indexed_result
 
     routed = store.route_book_knowledge(workspace.id, "Grundlagen", limit=4)
     assert routed[0]["section_node_id"] == "sec-1"

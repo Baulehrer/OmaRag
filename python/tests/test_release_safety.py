@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import stat
 from pathlib import Path
 
@@ -10,9 +11,29 @@ from omarag_bridge.app import create_app
 from omarag_bridge.config import Settings
 from omarag_bridge.main import parser, settings_from_args
 from omarag_bridge.models.api import CreateWorkspaceRequest
+from omarag_bridge.models.domain import JobStatus
+from omarag_bridge.models.errors import ConflictError
+from omarag_bridge.runtime import configure_process_environment
+from omarag_bridge.services.job_service import JobService
 from omarag_bridge.services.resource_coordinator import ResourceCoordinator
 from omarag_bridge.services.workspace_service import WorkspaceService
 from omarag_bridge.store import StateStore
+
+
+def test_offline_worker_environment_removes_proxy_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("all_proxy", "socks5://proxy.invalid:1080")
+
+    configure_process_environment(offline_models=True)
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+    assert os.environ["DO_NOT_TRACK"] == "1"
+    assert os.environ["OLLAMA_NO_CLOUD"] == "1"
+    assert "HTTPS_PROXY" not in os.environ
+    assert "all_proxy" not in os.environ
 
 
 def test_generated_token_is_persistent_and_private(tmp_path: Path) -> None:
@@ -108,3 +129,55 @@ async def test_speculative_warmup_never_waits_behind_foreground_work() -> None:
 
     async with resources.warmup() as admission:
         assert admission == "ready"
+
+
+async def test_config_writer_fails_before_waiting_on_a_paused_job() -> None:
+    service = JobService.__new__(JobService)
+    service._admission_lock = asyncio.Lock()
+    service._writer_lock = asyncio.Lock()
+    current = asyncio.current_task()
+    assert current is not None
+    service._tasks = {"paused-job": current}
+    await service._writer_lock.acquire()
+
+    try:
+        with pytest.raises(ConflictError, match="queued, running, or paused"):
+            async with asyncio.timeout(0.1):
+                async with service.writer(fail_if_active=True):
+                    pytest.fail("active job must reject configuration admission")
+    finally:
+        service._writer_lock.release()
+
+
+async def test_pause_checkpoint_does_not_wait_while_holding_writer_lock() -> None:
+    class Store:
+        def __init__(self) -> None:
+            self.job = type(
+                "Job",
+                (),
+                {
+                    "id": "job-1",
+                    "workspace_id": "workspace-1",
+                    "status": JobStatus.PAUSE_REQUESTED,
+                },
+            )()
+
+        def get_job(self, _job_id: str):
+            return self.job
+
+        def update_job(self, _job_id: str, **updates):
+            for key, value in updates.items():
+                setattr(self.job, key, value)
+            return self.job
+
+    class Events:
+        async def emit(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = JobService.__new__(JobService)
+    service.store = Store()
+    service.events = Events()
+
+    async with asyncio.timeout(0.1):
+        assert await service._continue("job-1") is False
+    assert service.store.job.status.value == "paused"

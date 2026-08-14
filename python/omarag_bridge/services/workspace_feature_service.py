@@ -6,8 +6,9 @@ import shutil
 import tarfile
 import tempfile
 import threading
-from datetime import UTC, datetime
-from io import StringIO
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from io import BytesIO, StringIO
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,6 +20,8 @@ from ..models.domain import (
     BackupSummary,
     BookMetadata,
     ConfigDocument,
+    DocumentPurgePlan,
+    DocumentPurgeResult,
     DocumentQuality,
     DocumentSummary,
     JobStatus,
@@ -39,6 +42,31 @@ def _sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _secure_write_text(path: Path, content: str) -> None:
+    """Atomically publish managed text with private directory/file modes."""
+
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            stream.write(content)
+            temporary = Path(stream.name)
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class WorkspaceFeatureService:
     """Portable workspace features which do not duplicate Haiku's RAG store."""
 
@@ -48,12 +76,25 @@ class WorkspaceFeatureService:
         self.store = store
         self.workspaces = workspaces
         self.adapter = adapter
+        self.content_egress_guard: Callable[[str, str], None] | None = None
         self._backup_locks: dict[str, threading.RLock] = {}
         self._backup_locks_guard = threading.Lock()
 
     def _backup_lock(self, workspace_id: str) -> threading.RLock:
         with self._backup_locks_guard:
             return self._backup_locks.setdefault(workspace_id, threading.RLock())
+
+    def _validate_ollama_endpoint(self, content: str) -> None:
+        data = self._round_trip_yaml().load(content) or {}
+        providers = data.get("providers") or {}
+        ollama = providers.get("ollama") if isinstance(providers, dict) else None
+        configured = ollama.get("base_url") if isinstance(ollama, dict) else None
+        expected = self.workspaces.ollama_url.rstrip("/")
+        if not configured or str(configured).rstrip("/") != expected:
+            raise ConflictError(
+                "Workspace providers.ollama.base_url must match the configured local runtime",
+                details={"expected_base_url": expected},
+            )
 
     def documents(self, workspace_id: str) -> list[DocumentSummary]:
         return self._documents(workspace_id, include_hidden=False)
@@ -149,24 +190,31 @@ class WorkspaceFeatureService:
         self, workspace_id: str, restored: dict[str, dict[str, object]]
     ) -> None:
         path = self._restored_path(workspace_id)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(restored, indent=2), encoding="utf-8")
-        temporary.replace(path)
+        _secure_write_text(path, json.dumps(restored, indent=2))
 
     def _hidden_documents(self, workspace_id: str) -> set[str]:
         path = self._hidden_path(workspace_id)
+        persisted = self.store.hidden_document_ids(workspace_id)
         if not path.exists():
-            return set()
+            return persisted
         try:
-            return set(json.loads(path.read_text(encoding="utf-8")))
+            return persisted | set(json.loads(path.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError, TypeError):
-            return set()
+            return persisted
 
     def _write_hidden_documents(self, workspace_id: str, hidden: set[str]) -> None:
+        # The SQLite set is the operational query filter. Publish it first so
+        # an adapter deletion failure cannot leave surviving segments visible.
+        self.store.replace_hidden_documents(workspace_id, hidden)
         path = self._hidden_path(workspace_id)
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(sorted(hidden), indent=2), encoding="utf-8")
-        temporary.replace(path)
+        _secure_write_text(path, json.dumps(sorted(hidden), indent=2))
+
+    def reconcile_hidden_documents(self, workspace_id: str) -> None:
+        """Migrate/repair legacy sidecar deletions into the query-time store."""
+
+        hidden = self._hidden_documents(workspace_id)
+        if hidden != self.store.hidden_document_ids(workspace_id):
+            self.store.replace_hidden_documents(workspace_id, hidden)
 
     async def delete_document(self, workspace_id: str, document_id: str) -> None:
         manifest = self.workspaces.get(workspace_id)
@@ -201,6 +249,25 @@ class WorkspaceFeatureService:
         restore_source = document.managed_source if document else None
         if document is None or not restore_source or not Path(restore_source).is_file():
             raise ConflictError("Original PDF is unavailable; restore cannot continue")
+        if document.pipeline_version in {"book-index-v2", "book-index-v3"}:
+            generation_id = document.generation_id or ""
+            if generation_id and self.store.hidden_document_rebuilt(
+                workspace_id,
+                document_id,
+                generation_id,
+            ):
+                # A confirmed full rebuild has already recreated the exact
+                # document under the current generation/config. Publishing is
+                # therefore a logical flag change, not an unsafe ad-hoc ingest.
+                hidden.discard(document_id)
+                self._write_hidden_documents(workspace_id, hidden)
+                return
+            raise ConflictError(
+                "A structured book can only be restored through a confirmed full reindex; "
+                "the hidden document remains excluded from every query"
+            )
+        if self.content_egress_guard is not None:
+            self.content_egress_guard(workspace_id, self.workspaces.ollama_url)
         result = await self.adapter.ingest(
             self.workspaces.database_path(workspace_id),
             restore_source,
@@ -216,6 +283,157 @@ class WorkspaceFeatureService:
         self._write_restored_documents(workspace_id, restored)
         hidden.discard(document_id)
         self._write_hidden_documents(workspace_id, hidden)
+
+    def document_purge_preflight(self, workspace_id: str, document_id: str) -> DocumentPurgePlan:
+        manifest = self.workspaces.get(workspace_id)
+        if manifest.read_only:
+            raise ReadOnlyError("Read-only workspace cannot purge documents")
+        state = self.store.document_purge_state(workspace_id, document_id)
+        backups = self.list_backups(workspace_id)
+        backup_ids = [item.id for item in backups]
+        pinned_backup_ids = [item.id for item in backups if item.pinned]
+        created = datetime.now(UTC)
+        material = json.dumps(
+            {
+                "workspace_id": workspace_id,
+                "document_id": document_id,
+                "generation_id": state["generation_id"],
+                "fingerprint": state["fingerprint"],
+                "backups": backup_ids,
+                "pinned_runs": state["pinned_run_ids"],
+                "nonce": uuid4().hex,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        plan_id = "sha256:" + hashlib.sha256(material.encode()).hexdigest()[:24]
+        return DocumentPurgePlan(
+            plan_id=plan_id,
+            workspace_id=workspace_id,
+            document_id=document_id,
+            generation_id=str(state["generation_id"]),
+            fingerprint=str(state["fingerprint"]),
+            segment_document_ids=list(state["segment_document_ids"]),
+            media_assets=int(state["media_assets"]),
+            pinned_run_ids=list(state["pinned_run_ids"]),
+            backup_ids=backup_ids,
+            pinned_backup_ids=pinned_backup_ids,
+            requires_backup_confirmation=bool(backup_ids),
+            can_purge=not state["pinned_run_ids"] and not pinned_backup_ids,
+            created_at=created,
+            expires_at=created + timedelta(minutes=15),
+        )
+
+    async def purge_document(
+        self,
+        plan: DocumentPurgePlan,
+        *,
+        backup_confirmed: bool,
+    ) -> DocumentPurgeResult:
+        """Irreversibly remove one exactly pinned book and its derived state."""
+
+        if plan.expires_at <= datetime.now(UTC):
+            raise ConflictError("Document purge preflight expired")
+        if not plan.can_purge or plan.pinned_run_ids or plan.pinned_backup_ids:
+            raise ConflictError(
+                "Pinned runs or backups block permanent document deletion",
+                details={
+                    "run_ids": plan.pinned_run_ids,
+                    "backup_ids": plan.pinned_backup_ids,
+                },
+            )
+        current_backups = self.list_backups(plan.workspace_id)
+        current_backup_ids = [item.id for item in current_backups]
+        if current_backup_ids != plan.backup_ids:
+            raise ConflictError("Workspace backups changed after purge preflight")
+        if any(item.pinned for item in current_backups):
+            raise ConflictError("A pinned backup blocks permanent document deletion")
+        if current_backups and not backup_confirmed:
+            raise ConflictError("PURGE_BACKUPS confirmation is required")
+
+        state = self.store.document_purge_state(plan.workspace_id, plan.document_id)
+        if (
+            state["generation_id"] != plan.generation_id
+            or state["fingerprint"] != plan.fingerprint
+            or list(state["segment_document_ids"]) != plan.segment_document_ids
+        ):
+            raise ConflictError("Document changed after purge preflight")
+        if state["pinned_run_ids"]:
+            raise ConflictError("A pinned run now references this document")
+
+        hidden = self._hidden_documents(plan.workspace_id)
+        hidden.add(plan.document_id)
+        self._write_hidden_documents(plan.workspace_id, hidden)
+        targets = plan.segment_document_ids or [plan.document_id]
+        for target in targets:
+            await self.adapter.delete_document(
+                self.workspaces.database_path(plan.workspace_id), target
+            )
+
+        removed = self.store.purge_document_state(
+            plan.workspace_id,
+            plan.document_id,
+            expected_generation_id=plan.generation_id,
+            expected_fingerprint=plan.fingerprint,
+        )
+        restored = self._restored_documents(plan.workspace_id)
+        if restored.pop(plan.document_id, None) is not None:
+            restored_path = self._restored_path(plan.workspace_id)
+            if restored:
+                self._write_restored_documents(plan.workspace_id, restored)
+            else:
+                restored_path.unlink(missing_ok=True)
+        workspace = Path(self.workspaces.get(plan.workspace_id).path).resolve()
+        managed_source = Path(str(removed.get("managed_source") or ""))
+        original_removed = False
+        if managed_source.is_file():
+            resolved_source = managed_source.resolve()
+            originals = (workspace / "sources" / "originals").resolve()
+            if resolved_source.is_relative_to(originals) and not any(
+                Path(str(record.get("managed_source") or "")).resolve() == resolved_source
+                for record in self.store.book_records(plan.workspace_id)
+            ):
+                resolved_source.unlink(missing_ok=True)
+                original_removed = True
+
+        removed_backups = 0
+        if current_backups:
+            with self._backup_lock(plan.workspace_id):
+                for backup in current_backups:
+                    archive = Path(backup.path)
+                    if archive.parent.resolve() == (workspace / "snapshots").resolve():
+                        archive.unlink(missing_ok=True)
+                    (workspace / "backup-manifests" / f"{backup.id}.json").unlink(missing_ok=True)
+                    removed_backups += 1
+
+        shutil.rmtree(workspace / ".oracle-cache" / "previews", ignore_errors=True)
+        hidden = self._hidden_documents(plan.workspace_id)
+        hidden.discard(plan.document_id)
+        self._write_hidden_documents(plan.workspace_id, hidden)
+
+        from ..models.media import MediaAsset
+        from .media_service import mark_media_blob_references, sweep_unreferenced_media_blobs
+
+        assets = [
+            MediaAsset.model_validate(item)
+            for item in self.store.all_book_media_assets(plan.workspace_id)
+        ]
+        marked = mark_media_blob_references(
+            assets,
+            visual_evidence=self.store.run_visual_evidence(plan.workspace_id),
+        )
+        sweep_unreferenced_media_blobs(
+            self.workspaces.database_path(plan.workspace_id), marked, dry_run=False
+        )
+        return DocumentPurgeResult(
+            workspace_id=plan.workspace_id,
+            document_id=plan.document_id,
+            generation_id=plan.generation_id,
+            removed_segments=len(targets),
+            removed_media_assets=int(removed["media_assets"]),
+            removed_backups=removed_backups,
+            original_removed=original_removed,
+        )
 
     def _sources_path(self, workspace_id: str) -> Path:
         return Path(self.workspaces.get(workspace_id).path) / "sources.yaml"
@@ -266,17 +484,15 @@ class WorkspaceFeatureService:
 
     def _write_sources(self, workspace_id: str, sources: list[SourceDefinition]) -> None:
         path = self._sources_path(workspace_id)
-        temporary = path.with_suffix(".yaml.tmp")
-        temporary.write_text(
+        _secure_write_text(
+            path,
             json.dumps(
                 {"sources": [item.model_dump(mode="json") for item in sources]},
                 indent=2,
                 ensure_ascii=False,
             )
             + "\n",
-            encoding="utf-8",
         )
-        temporary.replace(path)
 
     def quality(self, workspace_id: str) -> QualityReport:
         documents = self.documents(workspace_id)
@@ -323,6 +539,7 @@ class WorkspaceFeatureService:
         current = self.config(workspace_id)
         if if_match is not None and if_match.strip('"') != current.etag:
             raise EtagConflictError("Konfiguration wurde zwischenzeitlich geaendert")
+        self._validate_ollama_endpoint(content)
         self.adapter.validate_config(content)
         if self.store.book_records(workspace_id):
             yaml = self._round_trip_yaml()
@@ -344,12 +561,121 @@ class WorkspaceFeatureService:
                 )
         path = Path(manifest.path) / "haiku.rag.yaml"
         backup = path.with_suffix(".yaml.bak")
-        temporary = path.with_suffix(".yaml.tmp")
         shutil.copy2(path, backup)
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(path)
+        backup.chmod(0o600)
+        _secure_write_text(path, content)
         self.store.clear_answer_cache(workspace_id)
         return self.config(workspace_id)
+
+    def render_model_defaults(
+        self,
+        workspace_id: str,
+        request: ModelDefaultsRequest,
+        if_match: str | None,
+        *,
+        profile_metadata: dict[str, object] | None = None,
+    ) -> ConfigDocument:
+        """Render and validate a model profile without publishing it.
+
+        Embedding-changing profiles use this method to produce the immutable
+        staged configuration consumed by the reindex job.  Keeping rendering
+        separate from activation makes the old index and its matching config
+        usable while downloads and admission checks are still in progress.
+        """
+
+        manifest = self.workspaces.get(workspace_id)
+        if manifest.read_only:
+            raise ReadOnlyError("Read-only workspace cannot change model defaults")
+        current = self.config(workspace_id)
+        if if_match is not None and if_match.strip('"') != current.etag:
+            raise EtagConflictError("Konfiguration wurde zwischenzeitlich geaendert")
+        yaml = self._round_trip_yaml()
+        data = yaml.load(current.content) or {}
+        embeddings = data.setdefault("embeddings", {})
+        embedding_model = embeddings.setdefault("model", {})
+        embedding_model["provider"] = request.embedding_provider
+        embedding_model["name"] = request.embedding
+        embedding_model["vector_dim"] = request.vector_dim
+        reranking = data.setdefault("reranking", {})
+        rerank_model = reranking.setdefault("model", {})
+        rerank_model["provider"] = request.rerank_provider
+        rerank_model["name"] = request.rerank
+        qa = data.setdefault("qa", {})
+        qa_model = qa.setdefault("model", {})
+        qa_model["provider"] = "ollama"
+        qa_model["name"] = request.chat
+        qa_model["vision"] = bool(request.vl)
+        oracle = data.setdefault("oracle", {})
+        defaults = oracle.setdefault("model_defaults", {})
+        defaults["chat"] = request.chat
+        # Structure extraction is an explicit role, even when it shares the
+        # selected chat artifact.
+        defaults["structure"] = request.chat
+        defaults["vl"] = request.vl
+        defaults["embedding"] = request.embedding
+        defaults["rerank"] = request.rerank
+        if profile_metadata is not None:
+            oracle["model_profile"] = profile_metadata
+        output = StringIO()
+        yaml.dump(data, output)
+        content = output.getvalue()
+        self._validate_ollama_endpoint(content)
+        self.adapter.validate_config(content)
+        return ConfigDocument(
+            content=content,
+            etag=hashlib.sha256(content.encode()).hexdigest(),
+        )
+
+    def activate_model_defaults_for_reindex(
+        self,
+        workspace_id: str,
+        content: str,
+        expected_current_etag: str,
+        expected_target_etag: str,
+        generation_id: str,
+    ) -> ConfigDocument:
+        """Publish a staged config only behind an active maintenance gate.
+
+        This deliberately bypasses the normal embedding-identity guard, but is
+        fail-closed: only the latest maintenance generation may activate it.
+        Repeating the call after a crash is idempotent when the target config
+        was already atomically replaced.
+        """
+
+        manifest = self.workspaces.get(workspace_id)
+        if manifest.read_only:
+            raise ReadOnlyError("Read-only workspace cannot activate a model profile")
+        generation = self.store.index_generation(workspace_id, generation_id)
+        latest = self.store.workspace_index_generation(workspace_id)
+        if (
+            generation is None
+            or latest is None
+            or latest["generation_id"] != generation_id
+            or generation["status"] not in {"maintenance", "maintenance_failed"}
+        ):
+            raise ConflictError(
+                "A staged embedding config can only be activated by the current rebuild"
+            )
+        actual_target_etag = hashlib.sha256(content.encode()).hexdigest()
+        if actual_target_etag != expected_target_etag:
+            raise ConflictError("Staged model configuration failed its integrity check")
+        self._validate_ollama_endpoint(content)
+        current = self.config(workspace_id)
+        if current.etag == expected_target_etag:
+            return current
+        if current.etag != expected_current_etag:
+            raise EtagConflictError("Workspace configuration changed before the rebuild boundary")
+        self.adapter.validate_config(content)
+        path = Path(manifest.path) / "haiku.rag.yaml"
+        backup = path.with_suffix(".yaml.bak")
+        shutil.copy2(path, backup)
+        backup.chmod(0o600)
+        _secure_write_text(path, content)
+        self.store.clear_answer_cache(workspace_id)
+        activated = self.config(workspace_id)
+        if activated.etag != expected_target_etag:
+            raise ConflictError("Activated model configuration failed its integrity check")
+        return activated
 
     def model_defaults_preflight(
         self, workspace_id: str, request: ModelDefaultsRequest
@@ -405,51 +731,60 @@ class WorkspaceFeatureService:
         workspace_id: str,
         request: ModelDefaultsRequest,
         if_match: str | None,
+        *,
+        profile_metadata: dict[str, object] | None = None,
     ) -> ConfigDocument:
         preflight = self.model_defaults_preflight(workspace_id, request)
         if preflight.requires_reindex:
             raise ConflictError(
                 "Embedding changes on an indexed library require the dedicated rebuild workflow"
             )
-        current = self.config(workspace_id)
-        if if_match is not None and if_match.strip('"') != current.etag:
-            raise EtagConflictError("Konfiguration wurde zwischenzeitlich geaendert")
-        yaml = self._round_trip_yaml()
-        data = yaml.load(current.content) or {}
-        embeddings = data.setdefault("embeddings", {})
-        embedding_model = embeddings.setdefault("model", {})
-        embedding_model["provider"] = request.embedding_provider
-        embedding_model["name"] = request.embedding
-        embedding_model["vector_dim"] = request.vector_dim
-        reranking = data.setdefault("reranking", {})
-        rerank_model = reranking.setdefault("model", {})
-        rerank_model["provider"] = request.rerank_provider
-        rerank_model["name"] = request.rerank
-        qa = data.setdefault("qa", {})
-        qa_model = qa.setdefault("model", {})
-        qa_model["provider"] = "ollama"
-        qa_model["name"] = request.chat
-        qa_model["vision"] = bool(request.vl)
-        oracle = data.setdefault("oracle", {})
-        defaults = oracle.setdefault("model_defaults", {})
-        defaults["chat"] = request.chat
-        defaults["vl"] = request.vl
-        defaults["embedding"] = request.embedding
-        defaults["rerank"] = request.rerank
-        output = StringIO()
-        yaml.dump(data, output)
-        return self.update_config(workspace_id, output.getvalue(), if_match)
+        rendered = self.render_model_defaults(
+            workspace_id,
+            request,
+            if_match,
+            profile_metadata=profile_metadata,
+        )
+        return self.update_config(workspace_id, rendered.content, if_match)
 
     def configured_model_roles(self, workspace_id: str) -> dict[str, str | None]:
+        settings = self.configured_model_settings(workspace_id)
+        return {
+            role: settings.get(role) if isinstance(settings.get(role), str) else None
+            for role in ("chat", "structure", "vl", "embedding", "rerank")
+        }
+
+    def configured_model_settings(self, workspace_id: str) -> dict[str, object]:
+        """Return the model identity fields that are safe to expose to planners."""
+
         data = self._round_trip_yaml().load(self.config(workspace_id).content) or {}
         oracle_defaults = (data.get("oracle") or {}).get("model_defaults") or {}
         qa_model = (data.get("qa") or {}).get("model") or {}
-        chat = oracle_defaults.get("chat") or qa_model.get("name")
+        embedding_model = (data.get("embeddings") or {}).get("model") or {}
+        rerank_model = (data.get("reranking") or {}).get("model") or {}
+        # qa.model is the provider-facing generator/VL model. Oracle defaults
+        # are planner metadata and must never override the identity actually
+        # sent to Haiku/Ollama.
+        chat = qa_model.get("name") or oracle_defaults.get("chat")
         return {
             "chat": str(chat) if chat else None,
+            "chat_provider": str(qa_model.get("provider") or ""),
+            "chat_revision": str(qa_model.get("revision") or "") or None,
+            "chat_digest": str(qa_model.get("digest") or "") or None,
+            "structure": str(oracle_defaults.get("structure"))
+            if oracle_defaults.get("structure")
+            else None,
             "vl": str(oracle_defaults.get("vl") or chat) if chat else None,
-            "embedding": self._nested_model_name(data, "embeddings"),
-            "rerank": self._nested_model_name(data, "reranking"),
+            "embedding": str(embedding_model.get("name")) if embedding_model.get("name") else None,
+            "embedding_provider": str(embedding_model.get("provider") or ""),
+            "embedding_revision": str(embedding_model.get("revision") or "") or None,
+            "embedding_digest": str(embedding_model.get("digest") or "") or None,
+            "vector_dimension": int(embedding_model.get("vector_dim") or 0),
+            "rerank": str(rerank_model.get("name")) if rerank_model.get("name") else None,
+            "rerank_provider": str(rerank_model.get("provider") or ""),
+            "rerank_revision": str(rerank_model.get("revision") or "") or None,
+            "rerank_digest": str(rerank_model.get("digest") or "") or None,
+            "profile": (data.get("oracle") or {}).get("model_profile") or {},
         }
 
     @staticmethod
@@ -471,6 +806,16 @@ class WorkspaceFeatureService:
             workspace = Path(manifest.path)
             backup_id = f"backup-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:6]}"
             archive = workspace / "snapshots" / f"{backup_id}.tar.gz"
+            archive.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            archive.parent.chmod(0o700)
+            state_payload = (
+                json.dumps(
+                    self.store.export_workspace_index_snapshot(workspace_id),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
             with tarfile.open(archive, "w:gz") as bundle:
                 for item in workspace.rglob("*"):
                     relative = item.relative_to(workspace)
@@ -479,6 +824,12 @@ class WorkspaceFeatureService:
                     if ".omarag/locks" in relative.as_posix():
                         continue
                     bundle.add(item, arcname=relative, recursive=False)
+                state_info = tarfile.TarInfo(".omarag/index-state.json")
+                state_info.size = len(state_payload)
+                state_info.mode = 0o600
+                state_info.mtime = int(datetime.now(UTC).timestamp())
+                bundle.addfile(state_info, BytesIO(state_payload))
+            archive.chmod(0o600)
             digest = _sha256_file(archive)
             summary = BackupSummary(
                 id=backup_id,
@@ -490,8 +841,18 @@ class WorkspaceFeatureService:
                 verified=True,
             )
             target = workspace / "backup-manifests" / f"{backup_id}.json"
-            target.write_text(summary.model_dump_json(indent=2), encoding="utf-8")
+            _secure_write_text(target, summary.model_dump_json(indent=2) + "\n")
+            self._prune_unpinned_backups(workspace_id)
             return summary
+
+    def _prune_unpinned_backups(self, workspace_id: str, keep: int = 3) -> None:
+        workspace = Path(self.workspaces.get(workspace_id).path)
+        unpinned = [item for item in self.list_backups(workspace_id) if not item.pinned]
+        for expired in unpinned[keep:]:
+            archive = Path(expired.path)
+            if archive.parent.resolve() == (workspace / "snapshots").resolve():
+                archive.unlink(missing_ok=True)
+            (workspace / "backup-manifests" / f"{expired.id}.json").unlink(missing_ok=True)
 
     def list_backups(self, workspace_id: str) -> list[BackupSummary]:
         workspace = Path(self.workspaces.get(workspace_id).path)
@@ -508,6 +869,21 @@ class WorkspaceFeatureService:
                 verified = archive.is_file() and _sha256_file(archive) == backup.sha256
                 return backup.model_copy(update={"verified": verified})
         raise NotFoundError(f"Sicherung {backup_id} wurde nicht gefunden")
+
+    def set_backup_pinned(self, workspace_id: str, backup_id: str, pinned: bool) -> BackupSummary:
+        with self._backup_lock(workspace_id):
+            backup = next(
+                (item for item in self.list_backups(workspace_id) if item.id == backup_id),
+                None,
+            )
+            if backup is None:
+                raise NotFoundError(f"Sicherung {backup_id} wurde nicht gefunden")
+            updated = backup.model_copy(update={"pinned": pinned})
+            workspace = Path(self.workspaces.get(workspace_id).path)
+            manifest = workspace / "backup-manifests" / f"{backup_id}.json"
+            _secure_write_text(manifest, updated.model_dump_json(indent=2) + "\n")
+            self._prune_unpinned_backups(workspace_id)
+            return updated
 
     def restore_backup(
         self, workspace_id: str, backup_id: str
@@ -527,9 +903,11 @@ class WorkspaceFeatureService:
 
         workspace = Path(manifest.path)
         archive = Path(selected.path)
+        current_state = self.store.export_workspace_index_snapshot(workspace_id)
         staging = Path(tempfile.mkdtemp(prefix=f".{workspace.name}.restore-", dir=workspace.parent))
         retired = workspace.parent / f".{workspace.name}.previous-{uuid4().hex[:8]}"
         switched = False
+        state_switched = False
         try:
             with tarfile.open(archive, "r:gz") as bundle:
                 members = bundle.getmembers()
@@ -540,6 +918,15 @@ class WorkspaceFeatureService:
                 or not (staging / "haiku.rag.yaml").is_file()
             ):
                 raise ConflictError("Sicherung enthaelt keinen vollstaendigen Workspace")
+            state_path = staging / ".omarag" / "index-state.json"
+            if not state_path.is_file():
+                raise ConflictError(
+                    "Legacy backup lacks its generation catalogue and cannot be restored safely"
+                )
+            try:
+                restored_state = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise ConflictError("Backup generation catalogue is invalid") from exc
 
             safety = self.create_backup(workspace_id)
             for persistent in ("snapshots", "backup-manifests"):
@@ -550,17 +937,28 @@ class WorkspaceFeatureService:
             workspace.rename(retired)
             staging.rename(workspace)
             switched = True
-            shutil.rmtree(retired)
+            self.store.restore_workspace_index_snapshot(workspace_id, restored_state)
+            state_switched = True
+            restored_state_path = workspace / ".omarag" / "index-state.json"
+            restored_state_path.unlink(missing_ok=True)
             return selected, safety
         except Exception:
             if retired.exists() and not workspace.exists():
                 retired.rename(workspace)
+            elif switched and retired.exists() and workspace.exists():
+                failed = workspace.parent / f".{workspace.name}.failed-{uuid4().hex[:8]}"
+                workspace.rename(failed)
+                retired.rename(workspace)
+                shutil.rmtree(failed, ignore_errors=True)
+                switched = False
+            if state_switched:
+                self.store.restore_workspace_index_snapshot(workspace_id, current_state)
             raise
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
             if switched and retired.exists():
-                shutil.rmtree(retired)
+                shutil.rmtree(retired, ignore_errors=True)
 
     @staticmethod
     def _validate_archive_members(members: list[tarfile.TarInfo]) -> None:

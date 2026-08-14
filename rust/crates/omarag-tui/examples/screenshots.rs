@@ -152,6 +152,13 @@ fn demo_state() -> AppState {
         abstention: "none".into(),
         rejected_claims: 0,
         done_reason: "stop".into(),
+        retrieval_stages: Vec::new(),
+        escalation_reasons: Vec::new(),
+        calibrator_digest: None,
+        calibrator_status: "unknown".into(),
+        verifier_digest: None,
+        verifier_status: "not-run".into(),
+        typed_evidence_status: "unknown".into(),
     });
     state
 }

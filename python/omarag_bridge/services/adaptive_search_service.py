@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..adapters.base import HaikuAdapter
+from ..adapters.base import HaikuAdapter, SearchManyRequest, SearchManyResult
 from ..models.domain import (
     BookMetadata,
     EvidenceMode,
@@ -17,12 +17,23 @@ from ..models.domain import (
 )
 from ..store import StateStore
 from .query_v2 import (
-    QueryComplexity,
+    EvidenceKind,
+    ProgressiveRetrievalPolicy,
+    ProvenanceKind,
     RetrievalCandidate,
     adaptive_select,
     classify_query,
+    performance_budget,
     weighted_rrf,
 )
+from .reranker_service import DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION, _model_digest
+
+
+@dataclass(frozen=True, slots=True)
+class _FacetSearchBatch:
+    rows: dict[str, Any]
+    hydrated_chunks: list[SearchHit]
+    hydration_failed: bool = False
 
 
 @dataclass(slots=True)
@@ -40,84 +51,103 @@ class AdaptiveSearchService:
         document_filter: str | None = None,
         allowed_document_ids: set[str] | None = None,
         profile: str = "auto",
+        reranker_digest: str | None = None,
     ) -> tuple[list[SearchHit], RetrievalExplanation]:
         started = time.perf_counter()
         plan = classify_query(query)
-        cap = (
-            min(plan.budget.candidate_cap, 24)
-            if profile == "fast"
-            else min(plan.budget.candidate_cap, 40)
-            if profile == "balanced"
-            else min(72, max(plan.budget.candidate_cap, 40))
-            if profile == "deep"
-            else plan.budget.candidate_cap
+        profile_budget = performance_budget(plan.complexity, profile)
+        effective_reranker_digest = reranker_digest or _model_digest(
+            DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION
         )
-        per_facet_limit = max(8, math.ceil(cap / max(1, len(plan.facets))))
-        jobs = [
-            self.adapter.search(
-                database,
-                facet.query,
-                per_facet_limit,
-                document_filter=document_filter,
-                search_type="hybrid",
-                rerank=False,
-            )
-            for facet in plan.facets
-        ]
-        search_started = time.perf_counter()
-        rows = await asyncio.gather(*jobs, return_exceptions=True)
-        search_ms = (time.perf_counter() - search_started) * 1000
-        hit_by_chunk: dict[str, SearchHit] = {}
-        rankings: dict[str, list[RetrievalCandidate]] = {}
-        degraded_facets: list[str] = []
-        for facet, hits in zip(plan.facets, rows, strict=True):
-            if isinstance(hits, BaseException):
-                degraded_facets.append(facet.id)
-                continue
-            rankings[f"facet:{facet.id}"] = []
-            for hit in hits:
-                hit_by_chunk.setdefault(hit.chunk_id, hit)
-                rankings[f"facet:{facet.id}"].append(self._candidate(hit, facet.id))
-        fused = weighted_rrf(rankings, limit=cap)
+        cap = profile_budget.candidate_cap
+        stage_a_cap = max(12, math.ceil(cap / 2))
+        required_facets = tuple(facet for facet in plan.facets if facet.required)
+        optional_facets = tuple(facet for facet in plan.facets if not facet.required)
+        per_channel_limit = max(
+            4,
+            math.ceil(stage_a_cap / max(1, len(required_facets) * 2)),
+        )
+        routes: list[dict[str, Any]] = []
         route_notes: list[str] = []
+        workspace_id: str | None = None
         if self.store is not None:
             workspace_id = self._workspace_id(database)
             if workspace_id:
                 try:
-                    routes = self.store.route_book_knowledge(workspace_id, query, limit=cap)
-                    route_ids = [str(item["chunk_id"]) for item in routes if item.get("chunk_id")]
-                    routed_hits = {
-                        hit.chunk_id: hit
-                        for hit in await self.adapter.get_chunks(database, route_ids)
-                        if allowed_document_ids is None or hit.document_id in allowed_document_ids
-                    }
-                    route_rankings: dict[str, list[RetrievalCandidate]] = {}
-                    for route in routes:
-                        hit = routed_hits.get(str(route.get("chunk_id") or ""))
-                        if hit is None:
-                            continue
-                        path = str(route.get("retrieval_path") or "book-term")
-                        candidate = self._candidate(hit, "F1")
-                        route_rankings.setdefault(path, []).append(candidate)
-                        hit_by_chunk.setdefault(hit.chunk_id, hit)
-                    if route_rankings:
-                        rankings.update(route_rankings)
-                        fused = weighted_rrf(
-                            rankings,
-                            {path: (1.1 if path.startswith("book-") else 1.0) for path in rankings},
-                            limit=cap,
-                        )
-                        route_notes.append(f"book_router={sum(map(len, route_rankings.values()))}")
+                    routes = self.store.route_book_knowledge(
+                        workspace_id,
+                        query,
+                        limit=stage_a_cap,
+                        allowed_segment_ids=allowed_document_ids,
+                        expand_sections=True,
+                        global_query="global" in plan.reasons,
+                    )
                 except Exception:
                     route_notes.append("book_router=degraded")
+
+        search_started = time.perf_counter()
+        search_batch = await self._search_facets(
+            database,
+            required_facets,
+            per_channel_limit,
+            document_filter=document_filter,
+            hydrate_chunk_ids=[str(item["chunk_id"]) for item in routes if item.get("chunk_id")],
+        )
+        hit_by_chunk: dict[str, SearchHit] = {}
+        rankings: dict[str, list[RetrievalCandidate]] = {}
+        weights: dict[str, float] = {}
+        degraded_facets: list[str] = []
+
+        def absorb_searches(batch: _FacetSearchBatch, facets: tuple[Any, ...]) -> None:
+            for facet in facets:
+                for channel, channel_weight in (("fts", 0.85), ("vector", 1.0)):
+                    key = f"{facet.id}:{channel}"
+                    hits = batch.rows.get(key, RuntimeError(f"missing {key}"))
+                    if isinstance(hits, BaseException):
+                        degraded_facets.append(key)
+                        continue
+                    path = f"{channel}:facet:{facet.id}"
+                    weights[path] = channel_weight * (1.0 if facet.id == "F1" else 0.9)
+                    rankings[path] = []
+                    for hit in hits:
+                        hit_by_chunk.setdefault(hit.chunk_id, hit)
+                        rankings[path].append(self._candidate(hit, facet.id))
+
+        def absorb_routes(route_rows: list[dict[str, Any]], hydrated: list[SearchHit]) -> None:
+            routed_hits = {
+                hit.chunk_id: hit
+                for hit in hydrated
+                if allowed_document_ids is None or hit.document_id in allowed_document_ids
+            }
+            for route in route_rows:
+                hit = routed_hits.get(str(route.get("chunk_id") or ""))
+                if hit is None:
+                    continue
+                path = str(route.get("retrieval_path") or "book-term")
+                rankings.setdefault(path, []).append(self._candidate(hit, "F1"))
+                weights[path] = (
+                    1.1 if path in {"book-located_in", "book-defined_in", "book-section"} else 0.8
+                )
+                hit_by_chunk.setdefault(hit.chunk_id, hit)
+
+        absorb_searches(search_batch, required_facets)
+        absorb_routes(routes, search_batch.hydrated_chunks)
+        if search_batch.hydration_failed:
+            route_notes.append("book_router_hydration=degraded")
+        fused = weighted_rrf(rankings, weights, limit=stage_a_cap)
+
         rerank_started = time.perf_counter()
-        rerank_hits = [hit_by_chunk[item.candidate.chunk_id] for item in fused]
         try:
-            scores = await self.adapter.rerank(database, query, rerank_hits)
+            scores = await self.adapter.rerank(
+                database,
+                query,
+                [hit_by_chunk[item.candidate.chunk_id] for item in fused],
+            )
             if len(scores) != len(fused):
                 raise RuntimeError("reranker score count mismatch")
         except Exception:
             scores = []
+        search_ms = (time.perf_counter() - search_started) * 1000
         if not scores:
             ranked = [
                 hit_by_chunk[item.candidate.chunk_id] for item in fused[: min(requested_limit, 3)]
@@ -128,6 +158,7 @@ class AdaptiveSearchService:
                 selected=len(ranked),
                 cut="reranker_degraded_uncalibrated",
                 degraded_facets=degraded_facets,
+                stages=("stage-a",),
             )
             notes.insert(
                 1,
@@ -145,37 +176,120 @@ class AdaptiveSearchService:
                 ),
                 provider_notes=notes,
             )
-        profile_limit = (
-            5
-            if profile == "fast"
-            else min(8, plan.budget.final_max)
-            if profile == "balanced"
-            else min(14, max(8, plan.budget.final_max))
-            if profile == "deep"
-            else plan.budget.final_max
-        )
-        selection_complexity = plan.complexity
-        if profile == "deep":
-            selection_complexity = {
-                QueryComplexity.SIMPLE: QueryComplexity.STANDARD,
-                QueryComplexity.STANDARD: QueryComplexity.COMPLEX,
-                QueryComplexity.COMPLEX: QueryComplexity.COMPLEX,
-            }[plan.complexity]
-        elif profile == "balanced" and plan.complexity is QueryComplexity.COMPLEX:
-            selection_complexity = QueryComplexity.STANDARD
+
+        raw_score_by_chunk = {
+            item.candidate.chunk_id: score for item, score in zip(fused, scores, strict=True)
+        }
+        profile_limit = profile_budget.final_max
         selection = adaptive_select(
             [(item.candidate, score) for item, score in zip(fused, scores, strict=True)],
-            complexity=selection_complexity,
+            complexity=plan.complexity,
             evidence_mode=EvidenceMode.NORMAL.value,
-            required_facets=(facet.id for facet in plan.facets),
+            required_facets=(facet.id for facet in required_facets),
             max_candidates=profile_limit,
+            budget=profile_budget,
+            reranker_digest=effective_reranker_digest,
         )
+        stages = ["stage-a"]
+        escalation_reasons: list[str] = []
+        progressive = ProgressiveRetrievalPolicy()
+        top = selection.selected[0].relevance if selection.selected else None
+        second = selection.selected[1].relevance if len(selection.selected) > 1 else None
+        missing_evidence_requirements = progressive.missing_evidence_requirements(
+            query, selection.selected
+        )
+        if progressive.should_escalate(
+            selected_count=len(selection.selected),
+            missing_facets=selection.missing_facets,
+            top_relevance=top,
+            second_relevance=second,
+            optional_facets_available=cap > stage_a_cap,
+            missing_evidence_requirements=missing_evidence_requirements,
+        ):
+            stages.append("stage-b")
+            if selection.missing_facets:
+                escalation_reasons.append("missing-required-facet")
+            escalation_reasons.extend(
+                f"missing-{requirement}" for requirement in missing_evidence_requirements
+            )
+            if not selection.selected:
+                escalation_reasons.append("no-eligible-evidence")
+            elif top is not None and top < progressive.minimum_relevance:
+                escalation_reasons.append("low-top-relevance")
+            if top is not None and second is not None and top - second < progressive.minimum_margin:
+                escalation_reasons.append("uncertain-score-margin")
+
+            stage_b_facets = tuple(dict.fromkeys((*required_facets, *optional_facets)))
+            stage_b_limit = max(
+                per_channel_limit + 1,
+                math.ceil(cap / max(1, len(stage_b_facets) * 2)),
+            )
+            stage_b_routes = routes
+            if self.store is not None and workspace_id:
+                try:
+                    stage_b_routes = self.store.route_book_knowledge(
+                        workspace_id,
+                        query,
+                        limit=cap,
+                        allowed_segment_ids=allowed_document_ids,
+                        expand_sections=True,
+                        global_query="global" in plan.reasons,
+                        include_adjacency=True,
+                    )
+                except Exception:
+                    route_notes.append("book_graph_stage_b=degraded")
+            stage_b_batch = await self._search_facets(
+                database,
+                stage_b_facets,
+                stage_b_limit,
+                document_filter=document_filter,
+                hydrate_chunk_ids=[
+                    str(item["chunk_id"]) for item in stage_b_routes if item.get("chunk_id")
+                ],
+            )
+            absorb_searches(stage_b_batch, stage_b_facets)
+            for path in [path for path in rankings if path.startswith("book-")]:
+                rankings.pop(path, None)
+                weights.pop(path, None)
+            absorb_routes(stage_b_routes, stage_b_batch.hydrated_chunks)
+            if stage_b_batch.hydration_failed:
+                route_notes.append("book_router_hydration_stage_b=degraded")
+            fused = weighted_rrf(rankings, weights, limit=cap)
+            new_items = [
+                item for item in fused if item.candidate.chunk_id not in raw_score_by_chunk
+            ]
+            try:
+                new_scores = await self.adapter.rerank(
+                    database,
+                    query,
+                    [hit_by_chunk[item.candidate.chunk_id] for item in new_items],
+                )
+                if len(new_scores) != len(new_items):
+                    raise RuntimeError("reranker score count mismatch")
+                raw_score_by_chunk.update(
+                    {
+                        item.candidate.chunk_id: score
+                        for item, score in zip(new_items, new_scores, strict=True)
+                    }
+                )
+                selection = adaptive_select(
+                    [
+                        (item.candidate, raw_score_by_chunk[item.candidate.chunk_id])
+                        for item in fused
+                    ],
+                    complexity=plan.complexity,
+                    evidence_mode=EvidenceMode.NORMAL.value,
+                    required_facets=(facet.id for facet in required_facets),
+                    max_candidates=profile_limit,
+                    budget=profile_budget,
+                    reranker_digest=effective_reranker_digest,
+                )
+            except Exception:
+                route_notes.append("progressive_reranker=degraded")
+
+        search_ms = (time.perf_counter() - search_started) * 1000
         rerank_ms = (time.perf_counter() - rerank_started) * 1000
-        limit = min(
-            requested_limit,
-            max_sources or profile_limit,
-            profile_limit,
-        )
+        limit = min(requested_limit, max_sources or profile_limit, profile_limit)
         selected = list(selection.selected[:limit])
         ranked = [
             hit_by_chunk[item.candidate.chunk_id].model_copy(
@@ -206,6 +320,8 @@ class AdaptiveSearchService:
                     selected=len(ranked),
                     cut=selection.cutoff_reason,
                     degraded_facets=degraded_facets,
+                    stages=tuple(stages),
+                    escalation_reasons=tuple(escalation_reasons),
                 ),
                 *route_notes,
             ],
@@ -218,7 +334,7 @@ class AdaptiveSearchService:
         target = database.resolve()
         for workspace in self.store.list_workspaces():
             workspace_path = Path(workspace.path).resolve()
-            if target == workspace_path / "knowledge.lancedb":
+            if target == workspace_path / "database" / "knowledge.lancedb":
                 return workspace.id
         return None
 
@@ -230,6 +346,8 @@ class AdaptiveSearchService:
         selected: int,
         cut: str,
         degraded_facets: list[str],
+        stages: tuple[str, ...] = ("stage-a",),
+        escalation_reasons: tuple[str, ...] = (),
     ) -> list[str]:
         facet_summary = "|".join(f"{facet.id}:{facet.query}" for facet in plan.facets)
         return [
@@ -238,6 +356,8 @@ class AdaptiveSearchService:
             f"candidate_cap={cap}",
             f"selected={selected}",
             f"cut={cut}",
+            f"retrieval_stages={'|'.join(stages)}",
+            f"escalation_reasons={'|'.join(escalation_reasons) or 'none'}",
             f"facets={facet_summary}",
             *[f"facet_failed={facet}" for facet in degraded_facets],
         ]
@@ -250,6 +370,25 @@ class AdaptiveSearchService:
             book = BookMetadata.model_validate(document_meta.get("book_metadata"))
         except (TypeError, ValueError):
             book = None
+        raw_kind = str(metadata.get("evidence_kind") or "unknown").casefold()
+        try:
+            evidence_kind = EvidenceKind(raw_kind)
+        except ValueError:
+            labels = {str(item).casefold() for item in metadata.get("labels", [])}
+            evidence_kind = (
+                EvidenceKind.TABLE
+                if labels & {"table", "table_item"}
+                else EvidenceKind.FORMULA
+                if labels & {"formula", "equation"}
+                else EvidenceKind.FIGURE
+                if labels & {"picture", "figure", "image", "diagram", "chart"}
+                else EvidenceKind.UNKNOWN
+            )
+        raw_provenance = str(metadata.get("provenance_kind") or "unknown").casefold()
+        try:
+            provenance_kind = ProvenanceKind(raw_provenance)
+        except ValueError:
+            provenance_kind = ProvenanceKind.UNKNOWN
         return RetrievalCandidate(
             chunk_id=hit.chunk_id,
             content=hit.content,
@@ -267,4 +406,85 @@ class AdaptiveSearchService:
             element_types=tuple(str(item) for item in metadata.get("labels", [])),
             doc_item_refs=tuple(str(item) for item in metadata.get("doc_item_refs", [])),
             book=book,
+            evidence_kind=evidence_kind,
+            provenance_kind=provenance_kind,
+            quality_flags=tuple(str(item) for item in metadata.get("quality_flags", [])),
+        )
+
+    async def _search_facets(
+        self,
+        database: Path,
+        facets: tuple[Any, ...],
+        limit: int,
+        *,
+        document_filter: str | None,
+        hydrate_chunk_ids: list[str],
+    ) -> _FacetSearchBatch:
+        requests = [
+            SearchManyRequest(
+                key=f"{facet.id}:{channel}",
+                query=facet.query,
+                limit=limit,
+                document_filter=document_filter,
+                search_type=channel,
+                rerank=False,
+            )
+            for facet in facets
+            for channel in ("fts", "vector")
+        ]
+        search_many = getattr(self.adapter, "search_many", None)
+        if callable(search_many):
+            try:
+                result = await search_many(
+                    database,
+                    requests,
+                    hydrate_chunk_ids=hydrate_chunk_ids,
+                )
+                if not isinstance(result, SearchManyResult):
+                    raise TypeError("search_many must return SearchManyResult")
+                items = {item.key: item for item in result.items}
+                rows: dict[str, Any] = {}
+                for request in requests:
+                    item = items.get(request.key)
+                    if item is None:
+                        rows[request.key] = RuntimeError(
+                            f"search_many omitted request {request.key}"
+                        )
+                    elif item.failure is not None:
+                        rows[request.key] = RuntimeError(item.failure.message)
+                    else:
+                        rows[request.key] = item.hits
+                return _FacetSearchBatch(
+                    rows=rows,
+                    hydrated_chunks=result.hydrated_chunks,
+                    hydration_failed=result.hydration_failure is not None,
+                )
+            except (AttributeError, NotImplementedError):
+                pass
+        return _FacetSearchBatch(
+            rows=dict(
+                zip(
+                    (request.key for request in requests),
+                    await asyncio.gather(
+                        *(
+                            self.adapter.search(
+                                database,
+                                request.query,
+                                request.limit,
+                                document_filter=request.document_filter,
+                                search_type=request.search_type,
+                                rerank=False,
+                            )
+                            for request in requests
+                        ),
+                        return_exceptions=True,
+                    ),
+                    strict=True,
+                )
+            ),
+            hydrated_chunks=(
+                await self.adapter.get_chunks(database, hydrate_chunk_ids)
+                if hydrate_chunk_ids
+                else []
+            ),
         )

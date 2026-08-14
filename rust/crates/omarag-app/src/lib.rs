@@ -1,7 +1,8 @@
 use omarag_domain::{
     BackendMeta, BackupSummary, BookMetadata, Citation, ConfigDocument, DocumentSummary,
-    DomainEvent, EvidenceMode, JobId, JobSnapshot, QualityReport, RetrievalExplanation, RunId,
-    RunReceipt, SearchHit, SourceDefinition, WorkspaceId, WorkspaceSummary,
+    DomainEvent, EvidenceMode, JobId, JobSnapshot, ModelProfilePreflight, QualityReport,
+    RetrievalExplanation, RunId, RunReceipt, SearchHit, SourceDefinition, WorkspaceId,
+    WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -295,6 +296,8 @@ pub enum Overlay {
     Palette,
     Workspaces,
     ConfirmModelDelete,
+    AutomaticStackPreflight,
+    AutomaticStackDownloadConfirm,
     FileBrowser,
     ConfirmImport,
     DocumentDetails,
@@ -1174,6 +1177,7 @@ pub struct AppState {
     pub hardware_cursor: usize,
     pub model_cursor: usize,
     pub model_manager: ModelManagerState,
+    pub automatic_stack_preflight: Option<ModelProfilePreflight>,
     pub custom_model_input: EditorState,
     pub custom_model_file: bool,
     pub theme_index: usize,
@@ -1662,6 +1666,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.overlay = None;
             state.chat = ChatState::default();
             state.search = SearchState::default();
+            state.automatic_stack_preflight = None;
             state.documents.clear();
             state.document_cursor = 0;
             state.sources.clear();
@@ -2002,7 +2007,7 @@ mod tests {
             api_version: "1.0".into(),
             min_client_version: "1.0".into(),
             max_client_version: "1.x".into(),
-            omarag_version: "1.0.0".into(),
+            omarag_version: "1.2.0".into(),
             haiku_version: None,
             adapter: None,
             backend_id: "local".into(),

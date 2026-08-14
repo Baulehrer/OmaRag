@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import httpx2
+import pytest
 
 from omarag_bridge.models.api import IngestRequest, RunRequest
 
 
-def test_book_v2_and_adaptive_query_options_are_safe_defaults() -> None:
+def test_book_v3_and_adaptive_query_options_are_safe_defaults() -> None:
     ingest = IngestRequest.model_validate({"sources": [{"type": "file", "path": "/tmp/book.pdf"}]})
-    assert ingest.indexing.pipeline == "book-v2"
+    assert ingest.indexing.pipeline == "book-v3"
     assert ingest.indexing.enrichment == "captions"
     assert ingest.indexing.llm_fallback == "auto"
 
@@ -15,6 +16,16 @@ def test_book_v2_and_adaptive_query_options_are_safe_defaults() -> None:
     assert run.options.profile == "auto"
     assert run.options.memory == "auto"
     assert run.options.max_sources is None
+
+
+def test_v12_rejects_unverifiable_image_question_inputs() -> None:
+    with pytest.raises(ValueError, match="not source-bound"):
+        RunRequest.model_validate(
+            {
+                "question": "Was zeigt dieses Bild?",
+                "images": ["/tmp/untrusted-image.png"],
+            }
+        )
 
 
 def test_deep_deadline_is_reserved_for_analysis() -> None:
@@ -68,3 +79,10 @@ async def test_run_and_search_reject_unsafe_free_form_options(
         json={"query": "Beton", "options": {"threshold": 0.0}},
     )
     assert search.status_code == 422
+
+    verifier = await client.post(
+        f"/v1/workspaces/{workspace_id}/runs",
+        json={"question": "Beton", "options": {"verifier": "off"}},
+    )
+    assert verifier.status_code == 409
+    assert "expert workspace" in verifier.json()["error"]["message"]

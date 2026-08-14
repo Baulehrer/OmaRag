@@ -1,9 +1,11 @@
 use crate::{
-    FoundryControl, app_areas, catalog_filter_areas, centered, chat_answer_offset,
-    chat_bold_term_at, chat_selection_text, confirm_import_area, confirm_quit_area,
-    delete_model_confirm_area, file_browser_areas, foundry_catalog_areas, foundry_controls,
-    foundry_setup_areas, model_center_areas, related_image_refs, screen_areas,
+    FoundryControl, VisualInspectorState, VisualInspectorTab, app_areas, catalog_filter_areas,
+    centered, chat_answer_offset, chat_bold_term_at, chat_selection_text, confirm_import_area,
+    confirm_quit_area, delete_model_confirm_area, evidence_tiles, file_browser_areas,
+    foundry_catalog_areas, foundry_controls, foundry_setup_areas, model_center_areas,
+    performance_profile, related_image_refs, related_page_refs, screen_areas,
     sidebar_navigation_rows, source_citation_row_offset, source_inspector_areas,
+    visual_inspector_areas,
 };
 use crossterm::{
     event::{
@@ -24,7 +26,7 @@ use omarag_app::{
 };
 use omarag_domain::{
     CreateSource, CreateWorkspace, DocumentSummary, EvidenceMode, IngestRequest, JobId, JobStatus,
-    RunId, SearchRequest, UpdateConfig, WorkspaceId,
+    ModelProfileApplyRequest, PerformanceProfile, RunId, SearchRequest, UpdateConfig, WorkspaceId,
 };
 use ratatui::layout::Rect;
 use std::collections::BTreeMap;
@@ -52,6 +54,7 @@ pub enum UiCommand {
         session_id: String,
         question: String,
         evidence_mode: EvidenceMode,
+        profile: omarag_domain::PerformanceProfile,
         filters: BTreeMap<String, serde_json::Value>,
     },
     WarmupChat(WorkspaceId),
@@ -80,6 +83,14 @@ pub enum UiCommand {
         workspace: WorkspaceId,
         request: UpdateConfig,
         etag: String,
+    },
+    PreflightAutomaticStack {
+        workspace: WorkspaceId,
+        profile: PerformanceProfile,
+    },
+    ApplyAutomaticStack {
+        workspace: WorkspaceId,
+        request: ModelProfileApplyRequest,
     },
     RefreshModelCatalog {
         source: ModelSource,
@@ -278,6 +289,146 @@ pub fn handle_event(state: &mut AppState, event: Event) -> Option<UiCommand> {
         }
         Event::FocusLost | Event::FocusGained | Event::Resize(_, _) => None,
         Event::Key(_) => None,
+    }
+}
+
+/// Input adapter for the V1.1 inspector. It intentionally leaves the legacy
+/// handler available to embedders while preventing its old mixed image grid
+/// geometry from handling clicks in the new, strictly separated sections.
+pub fn handle_event_with_visuals(
+    state: &mut AppState,
+    visual: &mut VisualInspectorState,
+    event: Event,
+) -> Option<UiCommand> {
+    let (width, height) = terminal::size().unwrap_or((80, 24));
+    if let Some(command) =
+        handle_visual_inspector_event(state, visual, &event, Rect::new(0, 0, width, height))
+    {
+        return command;
+    }
+    handle_event(state, event)
+}
+
+/// `Some(None)` means consumed without a backend command; `None` delegates to
+/// the existing application input state machine.
+fn handle_visual_inspector_event(
+    state: &mut AppState,
+    visual: &mut VisualInspectorState,
+    event: &Event,
+    screen: Rect,
+) -> Option<Option<UiCommand>> {
+    if state.overlay.is_some()
+        || state.focus_pane != FocusPane::Inspector
+        || !matches!(state.view, View::Conversation | View::Retrieval)
+    {
+        return None;
+    }
+    let compact_shell = screen.width < 120 || screen.height < 34;
+    match event {
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) && compact_shell =>
+        {
+            match key.code {
+                KeyCode::Char('1') => visual.tab = VisualInspectorTab::Pages,
+                KeyCode::Char('2') => visual.tab = VisualInspectorTab::Figures,
+                KeyCode::Char('3') => visual.tab = VisualInspectorTab::Sources,
+                KeyCode::Char('[') => visual.tab = visual.tab.previous(),
+                KeyCode::Char(']') => visual.tab = visual.tab.next(),
+                KeyCode::Up | KeyCode::Left | KeyCode::Char('k') | KeyCode::Char('h')
+                    if visual.tab == VisualInspectorTab::Figures =>
+                {
+                    visual.selected_media = visual.selected_media.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('l')
+                    if visual.tab == VisualInspectorTab::Figures =>
+                {
+                    let count = visual.evidence.media.len().min(4);
+                    if count > 0 {
+                        visual.selected_media = (visual.selected_media + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Enter if visual.tab == VisualInspectorTab::Figures => {}
+                _ => return None,
+            }
+            Some(None)
+        }
+        Event::Key(key)
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                && !compact_shell
+                && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S')) =>
+        {
+            visual.sources_collapsed = !visual.sources_collapsed;
+            Some(None)
+        }
+        Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) => {
+            let [_header, body, _footer] = screen_areas(screen);
+            let inspector = app_areas(body, state.focus_pane).inspector;
+            if inspector.width == 0 || !contains(inspector, mouse) {
+                return None;
+            }
+            let inner = bordered_inner(inspector);
+            let layout = visual_inspector_areas(inner, compact_shell, visual.sources_collapsed);
+            if compact_shell && contains(layout.tabs, mouse) {
+                let relative = mouse.column.saturating_sub(layout.tabs.x);
+                let slot =
+                    (usize::from(relative) * 3 / usize::from(layout.tabs.width.max(1))).min(2);
+                visual.tab = VisualInspectorTab::ALL[slot];
+                return Some(None);
+            }
+            if !compact_shell && mouse.row == layout.sources.y {
+                visual.sources_collapsed = !visual.sources_collapsed;
+                return Some(None);
+            }
+            let active_pages = !compact_shell || visual.tab == VisualInspectorTab::Pages;
+            if active_pages && contains(layout.pages, mouse) {
+                let inner = bordered_inner(layout.pages);
+                let refs = related_page_refs(state, Some(&visual.evidence));
+                if let Some(slot) = evidence_tiles(inner, refs.len())
+                    .iter()
+                    .position(|tile| contains(*tile, mouse))
+                    && let Some((citation_index, page_index, _)) = refs.get(slot).copied()
+                {
+                    state.citation_cursor = citation_index;
+                    state.citation_page_cursor = page_index;
+                    return Some(selected_citation_command(state, true));
+                }
+                return Some(None);
+            }
+            let active_figures = !compact_shell || visual.tab == VisualInspectorTab::Figures;
+            if active_figures && contains(layout.figures, mouse) {
+                let count = visual.evidence.media.len().min(4);
+                let inner = bordered_inner(layout.figures);
+                if let Some(slot) = evidence_tiles(inner, count)
+                    .iter()
+                    .position(|tile| contains(*tile, mouse))
+                {
+                    visual.selected_media = slot;
+                }
+                return Some(None);
+            }
+            let active_sources = !compact_shell || visual.tab == VisualInspectorTab::Sources;
+            if active_sources && contains(layout.sources, mouse) {
+                if visual.sources_collapsed {
+                    return Some(None);
+                }
+                let sources_inner = bordered_inner(layout.sources);
+                let row = mouse
+                    .row
+                    .saturating_sub(sources_inner.y)
+                    .saturating_add(state.inspector_scroll);
+                let citation_start = source_citation_row_offset(state);
+                if row >= citation_start && !state.chat.citations.is_empty() {
+                    let index = (row.saturating_sub(citation_start) as usize / 2)
+                        .min(state.chat.citations.len().saturating_sub(1));
+                    state.citation_cursor = index;
+                    state.citation_page_cursor = 0;
+                    return Some(selected_citation_command(state, false));
+                }
+                return Some(None);
+            }
+            Some(None)
+        }
+        _ => None,
     }
 }
 
@@ -765,6 +916,7 @@ fn handle_overlay_mouse(
         Overlay::ConfirmModelDelete => {
             handle_delete_model_confirm_mouse(state, mouse, screen, activate)
         }
+        Overlay::AutomaticStackPreflight | Overlay::AutomaticStackDownloadConfirm => None,
         Overlay::FileBrowser => handle_file_browser_mouse(state, mouse, screen, activate),
         Overlay::ConfirmImport => handle_confirm_import_mouse(state, mouse, screen, activate),
         Overlay::DocumentDetails => {
@@ -1036,6 +1188,7 @@ fn handle_mouse_scroll(state: &mut AppState, mouse: MouseEvent, screen: Rect) {
         }
         Some(Overlay::Help) => {}
         Some(Overlay::ConfirmModelDelete) => {}
+        Some(Overlay::AutomaticStackPreflight | Overlay::AutomaticStackDownloadConfirm) => {}
         Some(Overlay::FileBrowser) => move_file_browser_cursor(state, next),
         Some(Overlay::ConfirmImport) => {}
         Some(Overlay::DocumentDetails | Overlay::ConfirmDocumentDelete) => {}
@@ -1564,6 +1717,7 @@ fn repeat_current_question(state: &mut AppState) -> Option<UiCommand> {
         session_id,
         question,
         evidence_mode: state.chat.evidence_mode,
+        profile: performance_profile(state.model_manager.profile),
         filters: chat_scope_filters(state),
     })
 }
@@ -1687,6 +1841,10 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
             }
             _ => None,
         },
+        Overlay::AutomaticStackPreflight => handle_automatic_stack_preflight(state, key),
+        Overlay::AutomaticStackDownloadConfirm => {
+            handle_automatic_stack_download_confirmation(state, key)
+        }
         Overlay::FileBrowser => handle_file_browser(state, key),
         Overlay::ConfirmImport => match key.code {
             KeyCode::Enter | KeyCode::Char('y') => confirm_file_browser_import(state),
@@ -1741,6 +1899,90 @@ fn handle_overlay(state: &mut AppState, overlay: Overlay, key: KeyEvent) -> Opti
         Overlay::DocumentTags => handle_document_tags(state, key),
         Overlay::CustomModel => handle_custom_model(state, key),
     }
+}
+
+fn cancel_automatic_stack(state: &mut AppState) {
+    state.overlay = None;
+    state.automatic_stack_preflight = None;
+    state.model_manager.busy = false;
+    state.input_mode = InputMode::Nav;
+}
+
+fn handle_automatic_stack_preflight(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+            cancel_automatic_stack(state);
+            None
+        }
+        KeyCode::Enter | KeyCode::Char('y' | 'Y') => {
+            let Some(preflight) = state.automatic_stack_preflight.as_ref() else {
+                cancel_automatic_stack(state);
+                return None;
+            };
+            if preflight.requires_reindex {
+                notify(
+                    state,
+                    NotificationLevel::Warning,
+                    "Automatic stack not applied. Run a full rebuild to change the embedding model.",
+                );
+                cancel_automatic_stack(state);
+                return None;
+            }
+            if !preflight.can_apply {
+                notify(
+                    state,
+                    NotificationLevel::Warning,
+                    "This automatic stack cannot be applied. Review the preflight warnings.",
+                );
+                cancel_automatic_stack(state);
+                return None;
+            }
+            if preflight.downloads.is_empty() {
+                automatic_stack_apply_command(state, false)
+            } else {
+                state.overlay = Some(Overlay::AutomaticStackDownloadConfirm);
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn handle_automatic_stack_download_confirmation(
+    state: &mut AppState,
+    key: KeyEvent,
+) -> Option<UiCommand> {
+    match key.code {
+        KeyCode::Char('d' | 'D') => automatic_stack_apply_command(state, true),
+        KeyCode::Esc | KeyCode::Char('n' | 'N') => {
+            cancel_automatic_stack(state);
+            None
+        }
+        _ => None,
+    }
+}
+
+fn automatic_stack_apply_command(state: &mut AppState, allow_downloads: bool) -> Option<UiCommand> {
+    let preflight = state.automatic_stack_preflight.take()?;
+    if preflight.requires_reindex || (!preflight.downloads.is_empty() && !allow_downloads) {
+        cancel_automatic_stack(state);
+        return None;
+    }
+    let Some(workspace) = state.active_workspace.clone() else {
+        cancel_automatic_stack(state);
+        return None;
+    };
+    let request =
+        ModelProfileApplyRequest::new(preflight.recommendation.recommendation_id, allow_downloads);
+    state.overlay = None;
+    state.model_manager.busy = true;
+    state.model_manager.transfer_status = if allow_downloads {
+        "Downloading and applying automatic stack".into()
+    } else {
+        "Applying automatic stack".into()
+    };
+    state.input_mode = InputMode::Nav;
+    Some(UiCommand::ApplyAutomaticStack { workspace, request })
 }
 
 fn handle_custom_model(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
@@ -2890,6 +3132,9 @@ fn handle_model_manager(state: &mut AppState, key: KeyEvent) -> Option<UiCommand
             state.model_manager.memory_policy = state.model_manager.memory_policy.next();
             None
         }
+        KeyCode::Char('g') if state.view == View::FoundryOverview => {
+            request_automatic_stack_preflight(state)
+        }
         KeyCode::Char('r') => Some(refresh_model_catalog_command(state)),
         KeyCode::Char('a') => pull_selected_package(state),
         KeyCode::Char('d') => pull_selected_model(state),
@@ -2995,6 +3240,7 @@ fn execute_foundry_control(
             };
             None
         }
+        FoundryControl::AutomaticStack => request_automatic_stack_preflight(state),
         FoundryControl::InstallStack => pull_selected_package(state),
         FoundryControl::Download => pull_selected_model(state),
         FoundryControl::Load => load_or_pull_selected_model(state),
@@ -3009,6 +3255,32 @@ fn execute_foundry_control(
         }
         FoundryControl::Refresh => Some(refresh_model_catalog_command(state)),
     }
+}
+
+fn request_automatic_stack_preflight(state: &mut AppState) -> Option<UiCommand> {
+    if state.model_manager.busy {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "Wait for the current model operation to finish.",
+        );
+        return None;
+    }
+    let Some(workspace) = state.active_workspace.clone() else {
+        notify(
+            state,
+            NotificationLevel::Warning,
+            "Open a library before applying an automatic model stack.",
+        );
+        return None;
+    };
+    state.automatic_stack_preflight = None;
+    state.model_manager.busy = true;
+    state.model_manager.transfer_status = "Checking automatic stack".into();
+    Some(UiCommand::PreflightAutomaticStack {
+        workspace,
+        profile: performance_profile(state.model_manager.profile),
+    })
 }
 
 fn refresh_model_catalog_command(state: &mut AppState) -> UiCommand {
@@ -3528,6 +3800,7 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
                 session_id,
                 question,
                 evidence_mode,
+                profile: performance_profile(state.model_manager.profile),
                 filters: chat_scope_filters(state),
             })
         }
@@ -3542,10 +3815,11 @@ fn submit_active_editor(state: &mut AppState) -> Option<UiCommand> {
                 return None;
             }
             update(state, Action::SearchStarted);
-            Some(UiCommand::Search {
-                workspace,
-                request: SearchRequest::new(query),
-            })
+            let mut request = SearchRequest::new(query);
+            request.options.profile = performance_profile(state.model_manager.profile)
+                .api_label()
+                .into();
+            Some(UiCommand::Search { workspace, request })
         }
         Route::Library => {
             let path = state.library.import_path.value.trim().to_owned();
@@ -3686,6 +3960,7 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
                     | 'q'
                     | 'c'
                     | 'f'
+                    | 'g'
                     | 'p'
                     | 'r'
                     | 'a'
@@ -4319,7 +4594,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, MouseEvent};
     use omarag_app::FileBrowserEntry;
-    use omarag_domain::{Citation, ConfigDocument, WorkspaceSummary};
+    use omarag_domain::{Citation, ConfigDocument, ModelProfilePreflight, WorkspaceSummary};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -4336,6 +4611,125 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn automatic_preflight(downloads: bool, requires_reindex: bool) -> ModelProfilePreflight {
+        let assignment = serde_json::json!({
+            "role": "chat",
+            "artifact_id": "chat-1",
+            "provider": "ollama",
+            "model": "chat:1",
+            "revision": "r1",
+            "digest": "sha256:abc",
+            "install_state": if downloads { "not-installed" } else { "installed" },
+            "download_bytes": if downloads { 1234 } else { 0 }
+        });
+        serde_json::from_value(serde_json::json!({
+            "recommendation": {
+                "recommendation_id": "rec-1",
+                "profile": "normal",
+                "stack_tier": 5,
+                "assignments": [assignment.clone()],
+                "context_tokens": 8192,
+                "total_download_bytes": if downloads { 1234 } else { 0 },
+                "warnings": []
+            },
+            "changes": {"chat": "chat:1"},
+            "downloads": if downloads { vec![assignment] } else { Vec::new() },
+            "requires_reindex": requires_reindex,
+            "requires_visual_reindex": false,
+            "can_apply": !requires_reindex,
+            "warnings": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn automatic_stack_action_only_starts_a_read_only_preflight() {
+        let mut state = AppState {
+            view: View::FoundryOverview,
+            focus_pane: FocusPane::Workspace,
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+
+        assert!(foundry_controls(&state).contains(&FoundryControl::AutomaticStack));
+        let command = handle_event(&mut state, key(KeyCode::Char('g')));
+
+        assert!(matches!(
+            command,
+            Some(UiCommand::PreflightAutomaticStack {
+                workspace,
+                profile: PerformanceProfile::Normal,
+            }) if workspace == "library-1"
+        ));
+        assert!(state.model_manager.busy);
+        assert!(state.automatic_stack_preflight.is_none());
+        assert!(state.overlay.is_none());
+    }
+
+    #[test]
+    fn automatic_stack_downloads_need_a_distinct_second_confirmation() {
+        let mut state = AppState {
+            active_workspace: Some("library-1".into()),
+            automatic_stack_preflight: Some(automatic_preflight(true, false)),
+            overlay: Some(Overlay::AutomaticStackPreflight),
+            ..AppState::default()
+        };
+
+        assert_eq!(handle_event(&mut state, key(KeyCode::Enter)), None);
+        assert_eq!(state.overlay, Some(Overlay::AutomaticStackDownloadConfirm));
+        assert_eq!(handle_event(&mut state, key(KeyCode::Enter)), None);
+        assert_eq!(state.overlay, Some(Overlay::AutomaticStackDownloadConfirm));
+
+        let command = handle_event(&mut state, key(KeyCode::Char('D')));
+        let Some(UiCommand::ApplyAutomaticStack { workspace, request }) = command else {
+            panic!("expected an explicitly confirmed automatic stack apply");
+        };
+        assert_eq!(workspace, "library-1");
+        let payload = serde_json::to_value(request).unwrap();
+        assert_eq!(payload["confirm"], "APPLY");
+        assert_eq!(payload["download_consent"], "DOWNLOAD_MODELS");
+        assert!(payload.get("reindex_consent").is_none());
+    }
+
+    #[test]
+    fn automatic_stack_reindex_requirement_can_never_emit_apply() {
+        let mut state = AppState {
+            active_workspace: Some("library-1".into()),
+            automatic_stack_preflight: Some(automatic_preflight(false, true)),
+            overlay: Some(Overlay::AutomaticStackPreflight),
+            ..AppState::default()
+        };
+
+        assert_eq!(handle_event(&mut state, key(KeyCode::Enter)), None);
+        assert!(state.automatic_stack_preflight.is_none());
+        assert!(state.overlay.is_none());
+        assert!(
+            state
+                .notifications
+                .iter()
+                .any(|notification| notification.message.contains("full rebuild"))
+        );
+    }
+
+    #[test]
+    fn installed_automatic_stack_applies_without_download_consent() {
+        let mut state = AppState {
+            active_workspace: Some("library-1".into()),
+            automatic_stack_preflight: Some(automatic_preflight(false, false)),
+            overlay: Some(Overlay::AutomaticStackPreflight),
+            ..AppState::default()
+        };
+
+        let Some(UiCommand::ApplyAutomaticStack { request, .. }) =
+            handle_event(&mut state, key(KeyCode::Enter))
+        else {
+            panic!("expected apply for an already installed stack");
+        };
+        let payload = serde_json::to_value(request).unwrap();
+        assert!(payload.get("download_consent").is_none());
+        assert!(payload.get("reindex_consent").is_none());
     }
 
     #[test]
@@ -4452,6 +4846,39 @@ mod tests {
     }
 
     #[test]
+    fn visual_inspector_tabs_and_source_collapse_are_explicit_ui_state() {
+        let mut state = AppState {
+            view: View::Conversation,
+            focus_pane: FocusPane::Inspector,
+            ..AppState::default()
+        };
+        let mut visual = VisualInspectorState::default();
+        let next_tab = key(KeyCode::Char(']'));
+        assert!(
+            handle_visual_inspector_event(
+                &mut state,
+                &mut visual,
+                &next_tab,
+                Rect::new(0, 0, 110, 32),
+            )
+            .is_some()
+        );
+        assert_eq!(visual.tab, VisualInspectorTab::Figures);
+
+        let collapse = key(KeyCode::Char('s'));
+        assert!(
+            handle_visual_inspector_event(
+                &mut state,
+                &mut visual,
+                &collapse,
+                Rect::new(0, 0, 160, 40),
+            )
+            .is_some()
+        );
+        assert!(visual.sources_collapsed);
+    }
+
+    #[test]
     fn text_editor_supports_cursor_delete_and_paste() {
         let mut state = AppState {
             input_mode: InputMode::Text,
@@ -4472,22 +4899,46 @@ mod tests {
             active_workspace: Some("library-1".into()),
             ..AppState::default()
         };
+        state.model_manager.profile = HardwareProfile::Quality;
         state.chat.question.set("Was ist Beton?");
         state.chat.scope_document_id = Some("book-beton".into());
 
         let command = handle_event(&mut state, key(KeyCode::Enter));
 
         let Some(UiCommand::StartRun {
-            question, filters, ..
+            question,
+            profile,
+            filters,
+            ..
         }) = command
         else {
             panic!("chat submission did not start a run");
         };
         assert_eq!(question, "Was ist Beton?");
+        assert_eq!(profile, omarag_domain::PerformanceProfile::Quality);
         assert_eq!(filters["logical_document_id"], "book-beton");
         assert!(state.chat.question.value.is_empty());
         assert_eq!(state.chat.question.cursor, 0);
         assert_eq!(state.chat.submitted_question, "Was ist Beton?");
+    }
+
+    #[test]
+    fn selected_performance_profile_is_sent_with_direct_search() {
+        let mut state = AppState {
+            route: Route::Search,
+            view: View::Retrieval,
+            input_mode: InputMode::Text,
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        state.model_manager.profile = HardwareProfile::Eco;
+        state.search.query.set("Beton Expositionsklasse");
+
+        let command = handle_event(&mut state, key(KeyCode::Enter));
+        assert!(matches!(
+            command,
+            Some(UiCommand::Search { request, .. }) if request.options.profile == "fast"
+        ));
     }
 
     #[test]

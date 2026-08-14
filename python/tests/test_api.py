@@ -54,6 +54,40 @@ async def test_search_and_ingest_policies_reject_unknown_values(
     assert invalid_profile.status_code == 422
 
 
+async def test_private_v2_goldset_can_be_imported_without_source_text_leaving_workspace(
+    client: httpx2.AsyncClient, workspace: dict[str, object]
+) -> None:
+    workspace_id = str(workspace["id"])
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/evaluations/import",
+        json={
+            "id": "eval-private-v2",
+            "cases": [
+                {
+                    "id": "gold-1",
+                    "question": "Wo steht der Grenzwert?",
+                    "category": "exact-value",
+                    "expected_chunk_id": "ev-stable",
+                    "expected_document_id": "book-1",
+                    "expected_pages": [7],
+                    "origin": "gold",
+                    "reviewed": True,
+                    "split": "calibration",
+                    "book_group": "book-a",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["schema_version"] == 2
+    assert len(payload["dataset_digest"]) == 64
+    loaded = await client.get(f"/v1/workspaces/{workspace_id}/evaluations/eval-private-v2")
+    assert loaded.status_code == 200
+    assert loaded.json()["dataset_digest"] == payload["dataset_digest"]
+
+
 async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
     client: httpx2.AsyncClient,
 ) -> None:
@@ -273,7 +307,9 @@ async def test_workspace_lifecycle_etag_clone_and_physical_delete(
     assert "chunking_use_markdown_tables: true" in config
     assert "split_pages: 25" in config
     assert "mmarco-mMiniLMv2-L12-H384-v1" in config
-    assert "qwen3.5:4b-q4_K_M" in config
+    # The bootstrap model must also fit the lowest supported consumer tier.
+    # The confirmed hardware profile replaces it with the recommended stack.
+    assert "qwen3.5:2b-q4_K_M" in config
     assert "vision: true" in config
 
     fetched = await client.get(f"/v1/workspaces/{workspace_id}")
@@ -308,12 +344,22 @@ async def test_workspace_lifecycle_etag_clone_and_physical_delete(
 
 
 async def test_ingest_is_idempotent_and_events_replay(
-    client: httpx2.AsyncClient, app: FastAPI, workspace: dict[str, object]
+    client: httpx2.AsyncClient,
+    app: FastAPI,
+    workspace: dict[str, object],
+    tmp_path: Path,
 ) -> None:
     workspace_id = str(workspace["id"])
+    source = tmp_path / "beton.pdf"
+    source.write_bytes(b"%PDF-1.4\n% deterministic API fixture\n")
     payload = {
-        "sources": [{"type": "file", "path": "/tmp/beton.pdf"}],
+        "sources": [{"type": "file", "path": str(source)}],
         "tags": ["Beton"],
+        "indexing": {
+            "pipeline": "book-v2",
+            "enrichment": "vlm",
+            "llm_fallback": "auto",
+        },
     }
     headers = {"Idempotency-Key": "ingest-beton-1"}
     first = await client.post(
@@ -346,26 +392,38 @@ async def test_ingest_is_idempotent_and_events_replay(
         await asyncio.sleep(0.01)
     assert job["status"] == "completed"
     assert job["progress"] == 1.0
+    pinned_job = await client.put(f"/v1/jobs/{job_id}/pin", json={"pinned": True})
+    assert pinned_job.status_code == 200
+    assert pinned_job.json()["pinned"] is True
+    assert app.state.services.adapter.ingest_options[-1]["llm_url"] == (
+        app.state.services.workspaces.ollama_url
+    )
+    assert app.state.services.adapter.ingest_options[-1]["indexing_options"]["enrichment"] == (
+        "vlm"
+    )
 
     store = app.state.services.store
     events = store.events_after(0, job_id=job_id)
-    assert [event.type for event in events] == [
-        "job.queued",
-        "job.started",
-        "job.progress",
-        "job.completed",
-    ]
+    event_types = [event.type for event in events]
+    assert event_types[:2] == ["job.queued", "job.started"]
+    assert event_types[-1] == "job.completed"
+    assert set(event_types[2:-1]) == {"job.progress"}
     replay = store.events_after(events[1].event_id, job_id=job_id)
-    assert [event.event_id for event in replay] == [
-        events[2].event_id,
-        events[3].event_id,
-    ]
+    assert [event.event_id for event in replay] == [event.event_id for event in events[2:]]
 
 
 async def test_search_and_run_have_stable_domain_models(
-    client: httpx2.AsyncClient, workspace: dict[str, object]
+    client: httpx2.AsyncClient, workspace: dict[str, object], app: FastAPI
 ) -> None:
     workspace_id = str(workspace["id"])
+    verify_retrieval = app.state.services.runs.verify_retrieval_identity
+    retrieval_pin_checks: list[bool] = []
+
+    async def tracked_retrieval_identity(workspace_id: str, **options: object):
+        retrieval_pin_checks.append(bool(options.get("force_inventory_refresh")))
+        return await verify_retrieval(workspace_id, **options)
+
+    app.state.services.runs.verify_retrieval_identity = tracked_retrieval_identity
     search = await client.post(
         f"/v1/workspaces/{workspace_id}/search",
         json={"query": "XC4", "limit": 5},
@@ -379,6 +437,7 @@ async def test_search_and_run_have_stable_domain_models(
     )
     assert explanation.status_code == 200
     assert explanation.json()["ranked"][0]["chunk_id"] == "chunk-1"
+    assert retrieval_pin_checks == [False, True, False, True]
 
     response = await client.post(
         f"/v1/workspaces/{workspace_id}/runs",
@@ -395,6 +454,9 @@ async def test_search_and_run_have_stable_domain_models(
     assert run["citations"][0]["pages"] == [1]
     assert run["receipt"]["retrieval_mode"] == "hybrid"
     assert run["receipt"]["phase_timings_ms"]["warming"] >= 0
+    pinned_run = await client.put(f"/v1/runs/{run_id}/pin", json={"pinned": True})
+    assert pinned_run.status_code == 200
+    assert pinned_run.json()["pinned"] is True
 
     analysis_response = await client.post(
         f"/v1/workspaces/{workspace_id}/runs",
@@ -415,6 +477,18 @@ async def test_exact_answers_are_cached_per_generation_and_sessions_get_receipts
 ) -> None:
     workspace_id = str(workspace["id"])
     adapter = app.state.services.adapter
+    assert app.state.services.runs._adaptive_retrieval_enabled(
+        {"mode": "analysis", "images": []}
+    ) is bool(adapter.capabilities.adaptive_retrieval)
+    resolver = app.state.services.runs.runtime_identity_resolver
+    assert resolver is not None
+    inventory_checks: list[bool] = []
+
+    async def tracked_runtime_identity(workspace_id: str, **options: object):
+        inventory_checks.append(bool(options.get("force_inventory_refresh")))
+        return await resolver(workspace_id, **options)
+
+    app.state.services.runs.runtime_identity_resolver = tracked_runtime_identity
 
     async def run_question() -> dict[str, object]:
         response = await client.post(
@@ -435,6 +509,7 @@ async def test_exact_answers_are_cached_per_generation_and_sessions_get_receipts
         pytest.fail("run did not complete")
 
     first = await run_question()
+    checks_after_first = len(inventory_checks)
     second = await run_question()
 
     assert adapter.ask_calls == 1
@@ -446,6 +521,7 @@ async def test_exact_answers_are_cached_per_generation_and_sessions_get_receipts
     assert second["receipt"]["cache_status"] == "hit"
     assert second["receipt"]["reused_source_count"] == 1
     assert second["receipt"]["new_source_count"] == 0
+    assert inventory_checks[checks_after_first:] == [False, True]
 
     events = app.state.services.store.events_after(0, run_id=str(second["id"]))
     completed = next(event for event in events if event.type == "run.completed")
@@ -517,15 +593,35 @@ async def test_workspace_feature_vertical_slices(
         json={"content": updated_content},
     )
     assert updated.status_code == 200
+    managed = Path(str(workspace["path"]))
+    for private_file in (
+        managed / "sources.yaml",
+        managed / "haiku.rag.yaml",
+        managed / "haiku.rag.yaml.bak",
+        managed / ".oracle-hidden-documents.json",
+        managed / ".oracle-restored-documents.json",
+    ):
+        assert private_file.stat().st_mode & 0o777 == 0o600
     assert "temperature: 0.3" in updated.json()["content"]
 
     backup = await client.post(f"/v1/workspaces/{workspace_id}/backups")
     assert backup.status_code == 201
     assert backup.json()["verified"] is True
+    assert Path(str(backup.json()["path"])).stat().st_mode & 0o777 == 0o600
+    backup_manifest = (
+        Path(str(workspace["path"])) / "backup-manifests" / f"{backup.json()['id']}.json"
+    )
+    assert backup_manifest.stat().st_mode & 0o777 == 0o600
     verified = await client.post(
         f"/v1/workspaces/{workspace_id}/backups/{backup.json()['id']}/verify"
     )
     assert verified.json()["verified"] is True
+    pinned = await client.put(
+        f"/v1/workspaces/{workspace_id}/backups/{backup.json()['id']}/pin",
+        json={"pinned": True},
+    )
+    assert pinned.status_code == 200
+    assert pinned.json()["pinned"] is True
 
     workspace_path = Path(str(workspace["path"]))
     marker = workspace_path / "after-backup.txt"
@@ -538,6 +634,12 @@ async def test_workspace_feature_vertical_slices(
     assert restored.json()["id"] == backup.json()["id"]
     assert not marker.exists()
     assert len((await client.get(f"/v1/workspaces/{workspace_id}/backups")).json()) == 2
+
+    for _ in range(3):
+        assert (await client.post(f"/v1/workspaces/{workspace_id}/backups")).status_code == 201
+    retained = (await client.get(f"/v1/workspaces/{workspace_id}/backups")).json()
+    assert sum(not item["pinned"] for item in retained) == 3
+    assert any(item["id"] == backup.json()["id"] and item["pinned"] for item in retained)
 
 
 async def test_duplicate_replace_rebuilds_the_existing_document(

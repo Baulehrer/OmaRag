@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import re
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -25,12 +26,13 @@ from ..models.domain import (
     RunSnapshot,
     SourceCheck,
 )
-from ..models.errors import OmaRagError
+from ..models.errors import ConflictError, OmaRagError
 from ..store import StateStore, request_hash
 from .event_service import EventService
 from .ollama_stream import OllamaModelIdentity, OllamaStreamClient
 from .query_orchestrator import OrchestratedAnswer, QueryOrchestrator
-from .query_v2 import classify_query
+from .query_v2 import classify_query, performance_budget
+from .reranker_service import DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION, _model_digest
 from .resource_coordinator import ResourceCoordinator
 from .workspace_service import WorkspaceService
 
@@ -74,9 +76,13 @@ class RunService:
         events: EventService,
         adapter: HaikuAdapter,
         resources: ResourceCoordinator,
-        answer_cache_max_entries: int = 256,
+        answer_cache_max_entries: int = 64,
+        answer_cache_max_bytes: int = 128 * 1024**2,
         ollama_url: str = "http://127.0.0.1:11434",
         model_roles: Callable[[str], dict[str, str | None]] | None = None,
+        model_settings: Callable[[str], dict[str, object]] | None = None,
+        workspace_profile: Callable[[str], str | None] | None = None,
+        workspace_context_tokens: Callable[[str], int | None] | None = None,
     ) -> None:
         self.store = store
         self.workspaces = workspaces
@@ -84,11 +90,44 @@ class RunService:
         self.adapter = adapter
         self.resources = resources
         self.answer_cache_max_entries = answer_cache_max_entries
+        self.answer_cache_max_bytes = answer_cache_max_bytes
         self.ollama_url = ollama_url
         self.model_roles = model_roles
+        self.model_settings = model_settings
+        self.workspace_profile = workspace_profile
+        self.workspace_context_tokens = workspace_context_tokens
         self.query = QueryOrchestrator(store, adapter, ollama_url)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self.index_gate: Callable[[str], None] | None = None
+        self.visual_evidence_builder: Callable[[str], object] | None = None
+        self.content_egress_guard: Callable[[str, str], None] | None = None
+        self.runtime_identity_resolver: (
+            Callable[..., Awaitable[tuple[OllamaModelIdentity | None, dict[str, Any]]]] | None
+        ) = None
+
+    def _effective_request(self, workspace_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        resolved = dict(request)
+        options = dict(resolved.get("options", {}))
+        profile_resolver = getattr(self, "workspace_profile", None)
+        if str(options.get("profile") or "auto") == "auto" and profile_resolver:
+            configured = profile_resolver(workspace_id)
+            if configured in {"fast", "normal", "quality"}:
+                options["profile"] = configured
+        context_resolver = getattr(self, "workspace_context_tokens", None)
+        if context_resolver:
+            context_tokens = context_resolver(workspace_id)
+            if context_tokens and context_tokens >= 4096:
+                options["_model_context_tokens"] = context_tokens
+        resolved["options"] = options
+        return resolved
+
+    def _adaptive_retrieval_enabled(self, request: dict[str, Any]) -> bool:
+        """Use the source-bound V3 path for every supported answer mode."""
+
+        return bool(
+            not request.get("images")
+            and getattr(self.adapter.capabilities, "adaptive_retrieval", False)
+        )
 
     @property
     def active(self) -> bool:
@@ -100,8 +139,19 @@ class RunService:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
+    def invalidate_model_inventory(self) -> None:
+        """Make the next model identity check hit Ollama after a mutation."""
+
+        invalidate = getattr(OllamaStreamClient, "invalidate_inventory", None)
+        if callable(invalidate):
+            invalidate(self.ollama_url)
+
     async def start(self, workspace_id: str, request: RunRequest) -> RunSnapshot:
         self.workspaces.get(workspace_id)
+        if request.options.verifier == "off" and not self._expert_mode(workspace_id):
+            raise ConflictError(
+                "verifier=off is restricted to an explicitly configured expert workspace"
+            )
         run_id = f"run-{uuid4().hex[:12]}"
         payload = request.model_dump(mode="json", exclude_none=True)
         payload["session_id"] = request.session_id or f"session-{uuid4().hex}"
@@ -115,11 +165,7 @@ class RunService:
             correlation_id=run_id,
             workspace_id=workspace_id,
             run_id=run_id,
-            payload={
-                "question": request.question,
-                "evidence_mode": request.evidence_mode,
-                "session_id": payload["session_id"],
-            },
+            payload={"status": JobStatus.RUNNING.value},
         )
         task = asyncio.create_task(self._execute(run_id), name=run_id)
         self._tasks[run_id] = task
@@ -128,17 +174,16 @@ class RunService:
 
     async def _execute(self, run_id: str) -> None:
         deadline_started_at = asyncio.get_running_loop().time()
-        request = self.store.get_run_request(run_id)
         run = self.store.get_run(run_id)
+        request = self._effective_request(
+            run.workspace_id,
+            self.store.get_run_request(run_id),
+        )
         options = dict(request.get("options", {}))
         deadline_question = request["question"]
         deadline_session_reference = False
         deadline_register_entities = 0
-        adaptive_request = (
-            request.get("mode") == "rag"
-            and not request.get("images")
-            and getattr(self.adapter.capabilities, "adaptive_retrieval", False)
-        )
+        adaptive_request = self._adaptive_retrieval_enabled(request)
         if adaptive_request:
             deadline_question, deadline_session_reference = self.query.standalone_question(
                 run.workspace_id,
@@ -162,13 +207,9 @@ class RunService:
             has_session_reference=deadline_session_reference,
             register_entity_count=deadline_register_entities,
         )
-        plan_deadline_ms = deadline_plan.budget.deadline_ms
-        if options.get("profile") == "fast":
-            plan_deadline_ms = min(plan_deadline_ms, 15_000)
-        elif options.get("profile") == "balanced":
-            plan_deadline_ms = min(plan_deadline_ms, 25_000)
-        elif options.get("profile") == "deep":
-            plan_deadline_ms = min(35_000, max(plan_deadline_ms, 25_000))
+        plan_deadline_ms = performance_budget(
+            deadline_plan.complexity, str(options.get("profile") or "auto")
+        ).deadline_ms
         timeout_ms = int(
             options.get("deadline_ms")
             or (15_000 if options.get("profile") == "fast" else 0)
@@ -196,7 +237,10 @@ class RunService:
 
     async def _execute_inner(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
-        request = self.store.get_run_request(run_id)
+        request = self._effective_request(
+            run.workspace_id,
+            self.store.get_run_request(run_id),
+        )
         started = time.perf_counter()
         phase_started = started
         current_phase: str | None = None
@@ -233,22 +277,20 @@ class RunService:
                 payload={"session_id": run.session_id, "turn": turn},
             )
             evidence_mode = EvidenceMode(request.get("evidence_mode", EvidenceMode.STRICT))
-            adaptive = bool(
-                request.get("mode") == "rag"
-                and not request.get("images")
-                and getattr(self.adapter.capabilities, "adaptive_retrieval", False)
-            )
+            adaptive = self._adaptive_retrieval_enabled(request)
             await phase("waiting", "Waiting")
             cache_status = AnswerCacheStatus.BYPASS
             index_fingerprint = self.store.workspace_index_fingerprint(run.workspace_id)
             config_fingerprint = self._config_fingerprint(run.workspace_id)
             runtime_metadata: dict[str, Any] = {}
             model_identity: OllamaModelIdentity | None = None
-            if adaptive:
-                await phase("readiness", "Checking pinned local models")
-                model_identity, runtime_metadata = await self._query_runtime_identity(
-                    run.workspace_id
-                )
+            uses_images = bool(request.get("images"))
+            await phase("readiness", "Checking pinned local models")
+            model_identity, runtime_metadata = await self._resolve_query_runtime_identity(
+                run.workspace_id,
+                require_vl=uses_images,
+                allow_uncalibrated_reranker=adaptive,
+            )
 
             cache_request = {key: value for key, value in request.items() if key != "session_id"}
             if adaptive:
@@ -273,6 +315,7 @@ class RunService:
                     "index_fingerprint": index_fingerprint,
                     "config_fingerprint": config_fingerprint,
                     "model_digests": runtime_metadata.get("model_digests", {}),
+                    "model_identities": runtime_metadata.get("model_identities", {}),
                     "request": cache_request,
                 }
             )
@@ -331,12 +374,28 @@ class RunService:
                 )
 
             if cached is not None:
-                if self.index_gate is not None:
-                    self.index_gate(run.workspace_id)
-                current_fingerprint = self.store.workspace_index_fingerprint(run.workspace_id)
-                if current_fingerprint != index_fingerprint:
-                    cached = None
-                    cache_status = AnswerCacheStatus.MISS
+                # Cache acceptance is a model/index read as well: take the
+                # foreground lease, bypass the two-second inventory cache and
+                # reject a result if any request-local pin drifted.
+                async with self.resources.chat():
+                    if self.index_gate is not None:
+                        self.index_gate(run.workspace_id)
+                    _, confirmed_runtime = await self._resolve_query_runtime_identity(
+                        run.workspace_id,
+                        require_vl=uses_images,
+                        allow_uncalibrated_reranker=adaptive,
+                        force_inventory_refresh=True,
+                        check_residency=False,
+                    )
+                    self._assert_runtime_pins_unchanged(runtime_metadata, confirmed_runtime)
+                    current_fingerprint = self.store.workspace_index_fingerprint(run.workspace_id)
+                    current_config_fingerprint = self._config_fingerprint(run.workspace_id)
+                    if (
+                        current_fingerprint != index_fingerprint
+                        or current_config_fingerprint != config_fingerprint
+                    ):
+                        cached = None
+                        cache_status = AnswerCacheStatus.MISS
             if cached is not None:
                 await phase("checking_sources", "Checking cached evidence")
                 answer = str(cached["answer"])
@@ -344,21 +403,52 @@ class RunService:
                 claims = [AnswerClaim.model_validate(item) for item in cached.get("claims", [])]
                 query_metadata = dict(cached.get("metadata", {}))
             else:
-                segment_ids = self.store.resolve_segment_ids(
-                    run.workspace_id,
-                    request.get("filters", {}),
-                    request.get("document_policy", "current-only"),
-                )
+                if self.content_egress_guard is not None:
+                    self.content_egress_guard(run.workspace_id, self.ollama_url)
                 database = self.workspaces.database_path(run.workspace_id)
                 async with self.resources.chat():
                     if self.index_gate is not None:
                         self.index_gate(run.workspace_id)
+                    # The inventory used for the cache key was read before
+                    # resource admission. Re-pin inside the model/index reader
+                    # lease so a consented publish or mutation cannot win the
+                    # gap. Segment IDs are deliberately resolved only now.
+                    (
+                        confirmed_identity,
+                        confirmed_runtime,
+                    ) = await self._resolve_query_runtime_identity(
+                        run.workspace_id,
+                        require_vl=uses_images,
+                        allow_uncalibrated_reranker=adaptive,
+                        force_inventory_refresh=True,
+                    )
+                    self._assert_runtime_pins_unchanged(runtime_metadata, confirmed_runtime)
+                    if (
+                        self.store.workspace_index_fingerprint(run.workspace_id)
+                        != index_fingerprint
+                        or self._config_fingerprint(run.workspace_id) != config_fingerprint
+                    ):
+                        raise RuntimeError(
+                            "The workspace index generation changed while the request was waiting"
+                        )
+                    model_identity = confirmed_identity
+                    runtime_metadata = confirmed_runtime
+                    segment_ids = self.store.resolve_segment_ids(
+                        run.workspace_id,
+                        request.get("filters", {}),
+                        request.get("document_policy", "current-only"),
+                    )
                     options = dict(request.get("options", {}))
-                    await phase("warming", "Warming retrieval models")
-                    await self.adapter.warm(database)
+                    await phase("warming", "Preparing retrieval")
+                    # Adaptive retrieval opens and hydrates the isolated worker
+                    # in its batched search_many RPC. A separate warm RPC adds
+                    # one process transition without improving readiness.
+                    if not adaptive:
+                        await self.adapter.warm(database)
                     if adaptive:
                         assert model_identity is not None
                         self.query.adapter = self.adapter
+                        residency_seconds = self.resources.residency_seconds()
                         await phase("retrieving_and_answering", "Retrieving evidence")
                         result = await self.query.answer(
                             workspace_id=run.workspace_id,
@@ -378,7 +468,13 @@ class RunService:
                             allowed_document_ids=(
                                 set(segment_ids) if segment_ids is not None else None
                             ),
-                            keep_alive=(f"{max(1, round(self.resources.residency_seconds()))}s"),
+                            keep_alive=(
+                                0 if residency_seconds <= 0 else f"{round(residency_seconds)}s"
+                            ),
+                            reranker_digest=str(
+                                runtime_metadata.get("model_digests", {}).get("reranker") or ""
+                            )
+                            or None,
                         )
                         answer = result.answer
                         citations = list(result.citations)
@@ -416,6 +512,14 @@ class RunService:
                             }
                         except Exception:
                             legacy_hits = {}
+                    _, confirmed_runtime = await self._resolve_query_runtime_identity(
+                        run.workspace_id,
+                        require_vl=uses_images,
+                        allow_uncalibrated_reranker=adaptive,
+                        force_inventory_refresh=True,
+                        check_residency=False,
+                    )
+                    self._assert_runtime_pins_unchanged(runtime_metadata, confirmed_runtime)
                 await phase("checking_sources", "Checking sources")
                 if not adaptive:
                     enriched: list[Citation] = []
@@ -430,6 +534,8 @@ class RunService:
                                 update={
                                     "evidence_id": str(metadata.get("evidence_id") or prompt_id),
                                     "prompt_evidence_id": prompt_id,
+                                    "generation_id": str(metadata.get("generation_id") or "")
+                                    or None,
                                     "logical_document_id": str(
                                         metadata.get("logical_document_id")
                                         or citation.logical_document_id
@@ -464,12 +570,14 @@ class RunService:
                     citations = enriched
                     for index in range(len(citations), 0, -1):
                         answer = re.sub(rf"\[{index}\]", f"[E{index}]", answer)
-                    if evidence_mode is EvidenceMode.STRICT and (
-                        not _strictly_supported(answer, citations)
-                    ):
+                    if not _strictly_supported(answer, citations):
                         answer = STRICT_REFUSAL
                         citations = []
 
+                query_metadata.setdefault("model_digests", {}).update(
+                    runtime_metadata.get("model_digests", {})
+                )
+                query_metadata["model_identities"] = runtime_metadata.get("model_identities", {})
                 citation_data = [item.model_dump(mode="json") for item in citations]
                 claim_data = [item.model_dump(mode="json") for item in claims]
                 degraded = (
@@ -488,6 +596,7 @@ class RunService:
                         claims=claim_data,
                         metadata=query_metadata,
                         max_entries=self.answer_cache_max_entries,
+                        max_bytes=self.answer_cache_max_bytes,
                     )
 
             previous = self.store.previous_completed_session_run(
@@ -555,6 +664,13 @@ class RunService:
                 abstention=str(query_metadata.get("abstention", "none")),
                 rejected_claims=int(query_metadata.get("rejected_claims", 0)),
                 done_reason=str(query_metadata.get("done_reason", "stop")),
+                retrieval_stages=list(query_metadata.get("retrieval_stages", [])),
+                escalation_reasons=list(query_metadata.get("escalation_reasons", [])),
+                calibrator_digest=query_metadata.get("calibrator_digest"),
+                calibrator_status=str(query_metadata.get("calibrator_status", "unknown")),
+                verifier_digest=query_metadata.get("verifier_digest"),
+                verifier_status=str(query_metadata.get("verifier_status", "not-run")),
+                typed_evidence_status=str(query_metadata.get("typed_evidence_status", "unknown")),
             )
             citation_data = [item.model_dump(mode="json") for item in citations]
             claim_data = [item.model_dump(mode="json") for item in claims]
@@ -598,12 +714,21 @@ class RunService:
                 workspace_id=run.workspace_id,
                 run_id=run_id,
                 payload={
-                    "answer": answer,
-                    "claims": claim_data,
-                    "citations": citation_data,
+                    "status": JobStatus.COMPLETED.value,
                     "receipt": receipt.model_dump(mode="json"),
                 },
             )
+            # Publish the completed text answer before doing optional crop I/O.
+            # The follow-up chat lease excludes reindexing during selection;
+            # VisualEvidenceService additionally compares the exact citation
+            # and document-generation pins before it persists the cache.
+            visual_builder = getattr(self, "visual_evidence_builder", None)
+            if visual_builder is not None:
+                with suppress(Exception):
+                    async with self.resources.chat():
+                        if self.index_gate is not None:
+                            self.index_gate(run.workspace_id)
+                        await asyncio.to_thread(visual_builder, run_id)
         except asyncio.CancelledError:
             raise
         except TimeoutError:
@@ -622,24 +747,138 @@ class RunService:
         workspace = Path(self.workspaces.get(workspace_id).path)
         return hashlib.sha256((workspace / "haiku.rag.yaml").read_bytes()).hexdigest()
 
+    def _expert_mode(self, workspace_id: str) -> bool:
+        if self.model_settings is None:
+            return False
+        settings = self.model_settings(workspace_id)
+        profile = settings.get("profile")
+        return isinstance(profile, dict) and profile.get("expert_mode") is True
+
+    async def _resolve_query_runtime_identity(
+        self, workspace_id: str, **options: Any
+    ) -> tuple[OllamaModelIdentity | None, dict[str, Any]]:
+        """Resolve runtime pins, with an explicit seam for isolated test providers."""
+
+        if self.runtime_identity_resolver is not None:
+            return await self.runtime_identity_resolver(workspace_id, **options)
+        return await self._query_runtime_identity(workspace_id, **options)
+
     async def _query_runtime_identity(
-        self, workspace_id: str
-    ) -> tuple[OllamaModelIdentity, dict[str, Any]]:
+        self,
+        workspace_id: str,
+        *,
+        require_generator: bool = True,
+        require_vl: bool = False,
+        allow_uncalibrated_reranker: bool = True,
+        force_inventory_refresh: bool = False,
+        check_residency: bool = True,
+    ) -> tuple[OllamaModelIdentity | None, dict[str, Any]]:
         if self.model_roles is None:
             raise RuntimeError("Query model roles are not configured")
         roles = self.model_roles(workspace_id)
         chat = roles.get("chat")
+        vl = roles.get("vl")
         embedding = roles.get("embedding")
-        if not chat or not embedding:
-            raise RuntimeError("Generator and embedding models must both be configured")
+        reranker = roles.get("rerank")
+        if not embedding or (require_generator and not chat):
+            raise RuntimeError(
+                "The embedding model and every requested generator must be configured"
+            )
 
         def normalize(value: str) -> str:
-            return value.removesuffix(":latest")
+            return value.strip().casefold().removesuffix(":latest")
 
-        async with OllamaStreamClient(self.ollama_url) as ollama:
-            installed, residents = await asyncio.gather(
-                ollama.list_models(), ollama.running_models()
+        configured_settings = (
+            self.model_settings(workspace_id) if self.model_settings is not None else {}
+        )
+        embedding_provider = str(
+            configured_settings.get("embedding_provider") or "ollama"
+        ).casefold()
+        chat_provider = str(configured_settings.get("chat_provider") or "ollama").casefold()
+        reranker_provider = str(
+            configured_settings.get("rerank_provider") or "cross-encoder"
+        ).casefold()
+        profile = configured_settings.get("profile")
+        profile_artifacts = (
+            profile.get("artifacts")
+            if isinstance(profile, dict) and profile.get("expert_mode") is False
+            else None
+        )
+        auto_profile = isinstance(profile_artifacts, dict)
+        if not auto_profile:
+            profile_artifacts = {}
+
+        def pinned_artifact(role: str) -> dict[str, Any] | None:
+            value = profile_artifacts.get(role)
+            return value if isinstance(value, dict) else None
+
+        def pin_ollama(
+            role: str, configured_model: str, identity: OllamaModelIdentity
+        ) -> dict[str, str | None]:
+            pinned = pinned_artifact(role)
+            settings_role = "chat" if role in {"chat", "vl"} else role
+            revision = (
+                str(configured_settings.get(f"{settings_role}_revision") or "")
+                or configured_model.partition(":")[2]
+                or None
             )
+            if pinned is not None:
+                if str(pinned.get("provider") or "").casefold() != "ollama":
+                    raise RuntimeError(f"Pinned {role} provider no longer matches workspace config")
+                if normalize(str(pinned.get("model") or "")) != normalize(configured_model):
+                    raise RuntimeError(f"Pinned {role} model no longer matches workspace config")
+                expected = str(pinned.get("digest") or "").removeprefix("sha256:")
+                actual = identity.digest.removeprefix("sha256:")
+                if not expected or not hmac.compare_digest(expected.casefold(), actual.casefold()):
+                    raise RuntimeError(
+                        f"Installed {role} model digest differs from the applied model catalog"
+                    )
+                revision = str(pinned.get("revision") or "") or revision
+            elif auto_profile:
+                raise RuntimeError(f"Applied model profile has no pinned {role} artifact")
+            else:
+                configured_digest = str(
+                    configured_settings.get(f"{settings_role}_digest") or ""
+                ).removeprefix("sha256:")
+                actual_digest = identity.digest.removeprefix("sha256:")
+                if configured_digest and not hmac.compare_digest(
+                    configured_digest.casefold(), actual_digest.casefold()
+                ):
+                    raise RuntimeError(
+                        f"Installed {role} model digest differs from workspace config"
+                    )
+            return {
+                "provider": "ollama",
+                "model": identity.name,
+                "revision": revision or f"digest:{identity.digest}",
+                "digest": identity.digest,
+                "status": "pinned",
+            }
+
+        if embedding_provider != "ollama":
+            raise RuntimeError("The configured embedding provider has no request-local digest pin")
+        if require_generator and chat_provider != "ollama":
+            raise RuntimeError("The configured generator provider has no request-local digest pin")
+        if reranker and reranker_provider != "cross-encoder":
+            raise RuntimeError("The configured reranker provider cannot be pinned locally")
+        if require_vl and (not chat or not vl or normalize(vl) != normalize(chat)):
+            # The public Haiku image call currently sends images to qa.model.
+            # Refuse a misleading separate VL selection until that provider
+            # exposes a role-specific, digest-bound request.
+            raise RuntimeError(
+                "The configured VL role is not the digest-pinned QA model used for images"
+            )
+
+        if force_inventory_refresh:
+            self.invalidate_model_inventory()
+        async with OllamaStreamClient(self.ollama_url) as ollama:
+            if check_residency:
+                installed, residents = await asyncio.gather(
+                    ollama.list_models(), ollama.running_models()
+                )
+            else:
+                installed = await ollama.list_models()
+                residents = ()
 
         def identity(model: str) -> OllamaModelIdentity:
             matches = [item for item in installed if normalize(item.name) == normalize(model)]
@@ -648,10 +887,79 @@ class RunService:
                 raise RuntimeError(f"Configured Ollama model is {state}: {model}")
             return matches[0]
 
-        chat_identity = identity(chat)
+        chat_identity = identity(chat) if require_generator and chat else None
+        model_identities: dict[str, dict[str, str | None]] = {}
+        if chat_identity is not None and chat is not None:
+            model_identities["generator"] = pin_ollama("chat", chat, chat_identity)
+            if require_vl:
+                # Validate both catalog assignments even though one Ollama
+                # artifact deliberately serves both roles on consumer hardware.
+                model_identities["vl"] = pin_ollama("vl", chat, chat_identity)
         embedding_identity = identity(embedding)
+        if embedding_identity is not None:
+            model_identities["embedding"] = pin_ollama("embedding", embedding, embedding_identity)
+        pinned_reranker = pinned_artifact("rerank")
+        reranker_revision: str | None = None
+        reranker_artifact_digest: str | None = None
+        if reranker:
+            if pinned_reranker is not None:
+                if str(pinned_reranker.get("provider") or "").casefold() not in {
+                    "hugging-face",
+                    "cross-encoder",
+                }:
+                    raise RuntimeError(
+                        "Pinned reranker provider no longer matches the query runtime"
+                    )
+                if normalize(str(pinned_reranker.get("model") or "")) != normalize(reranker):
+                    raise RuntimeError("Pinned reranker model no longer matches the query runtime")
+                reranker_revision = str(pinned_reranker.get("revision") or "") or None
+                reranker_artifact_digest = str(pinned_reranker.get("digest") or "") or None
+            elif auto_profile:
+                raise RuntimeError("Applied model profile has no pinned reranker artifact")
+            else:
+                reranker_revision = (
+                    str(configured_settings.get("rerank_revision") or "")
+                    or (DEFAULT_RERANKER_REVISION if reranker == DEFAULT_RERANKER else "")
+                    or None
+                )
+                reranker_artifact_digest = (
+                    str(configured_settings.get("rerank_digest") or "") or reranker_revision
+                ) or None
+            if reranker_revision and reranker_artifact_digest:
+                from .model_service import ModelService
+
+                if not hmac.compare_digest(
+                    reranker_artifact_digest.removeprefix("sha256:").casefold(),
+                    reranker_revision.removeprefix("sha256:").casefold(),
+                ):
+                    raise RuntimeError(
+                        "The configured reranker digest cannot be verified from its revision"
+                    )
+                if not ModelService._hugging_face_revision_present(reranker, reranker_revision):
+                    raise RuntimeError(
+                        "The exact pinned reranker revision is not present in the local cache"
+                    )
+                model_identities["reranker"] = {
+                    "provider": "cross-encoder",
+                    "model": reranker,
+                    "revision": reranker_revision,
+                    "digest": reranker_revision,
+                    "status": "pinned",
+                }
+            else:
+                model_identities["reranker"] = {
+                    "provider": "cross-encoder",
+                    "model": reranker,
+                    "revision": None,
+                    "digest": None,
+                    "status": "uncalibrated",
+                }
+                if not allow_uncalibrated_reranker:
+                    raise RuntimeError(
+                        "The configured reranker has no immutable local revision pin"
+                    )
         resident_by_name = {normalize(item.name): item for item in residents}
-        required = (chat_identity, embedding_identity)
+        required = tuple(item for item in (chat_identity, embedding_identity) if item is not None)
         mismatched = [
             item.name
             for item in required
@@ -660,7 +968,13 @@ class RunService:
         ]
         missing = [item.name for item in required if normalize(item.name) not in resident_by_name]
         readiness = (
-            "resident_digest_mismatch" if mismatched else "latency_degraded" if missing else "ready"
+            "identity_pinned"
+            if not check_residency
+            else "resident_digest_mismatch"
+            if mismatched
+            else "latency_degraded"
+            if missing
+            else "ready"
         )
         if mismatched:
             raise RuntimeError(
@@ -670,17 +984,91 @@ class RunService:
         generation = self.store.workspace_index_generation(workspace_id)
         generation_config = dict(generation.get("config") or {}) if generation is not None else {}
         indexed_embedding_digest = generation_config.get("embedding_digest")
-        if indexed_embedding_digest and indexed_embedding_digest != embedding_identity.digest:
+        if (
+            indexed_embedding_digest
+            and embedding_identity is not None
+            and not hmac.compare_digest(
+                str(indexed_embedding_digest).removeprefix("sha256:").casefold(),
+                embedding_identity.digest.removeprefix("sha256:").casefold(),
+            )
+        ):
             raise RuntimeError("The embedding model digest differs from the READY index generation")
+        published_locks = self.store.workspace_index_runtime_locks(workspace_id)
+        for lock in published_locks:
+            if str(
+                lock.get("embedding_provider") or ""
+            ).casefold() != embedding_provider or normalize(
+                str(lock.get("embedding_model") or "")
+            ) != normalize(embedding):
+                raise RuntimeError(
+                    "The configured embedding identity differs from a published document"
+                )
+        published_digests = {
+            str(lock.get("embedding_digest") or "").removeprefix("sha256:").casefold()
+            for lock in published_locks
+            if lock.get("embedding_digest")
+        }
+        if len(published_digests) > 1:
+            raise RuntimeError("Published documents contain mixed embedding model digests")
+        if embedding_identity is not None and published_digests:
+            actual = embedding_identity.digest.removeprefix("sha256:").casefold()
+            if not hmac.compare_digest(next(iter(published_digests)), actual):
+                raise RuntimeError(
+                    "The embedding model digest differs from the published document index"
+                )
+        reranker_calibration_digest = (
+            _model_digest(reranker, reranker_revision) if reranker else None
+        )
         return chat_identity, {
             "readiness_status": readiness,
             "missing_resident_models": missing,
             "mismatched_resident_models": mismatched,
+            "model_identities": model_identities,
             "model_digests": {
-                "generator": chat_identity.digest,
-                "embedding": embedding_identity.digest,
+                **({"generator": chat_identity.digest} if chat_identity is not None else {}),
+                **(
+                    {"embedding": embedding_identity.digest}
+                    if embedding_identity is not None
+                    else {}
+                ),
+                **(
+                    {"reranker": reranker_calibration_digest} if reranker_calibration_digest else {}
+                ),
+                **(
+                    {"vl": chat_identity.digest} if require_vl and chat_identity is not None else {}
+                ),
             },
         }
+
+    @staticmethod
+    def _assert_runtime_pins_unchanged(before: dict[str, Any], after: dict[str, Any]) -> None:
+        """Reject a result if any used provider identity changed mid-request."""
+
+        if before.get("model_identities") != after.get("model_identities"):
+            raise RuntimeError("A model provider identity changed while the request was running")
+
+    async def verify_retrieval_identity(
+        self,
+        workspace_id: str,
+        *,
+        force_inventory_refresh: bool = False,
+        check_residency: bool = True,
+    ) -> dict[str, Any]:
+        """Fail closed when direct search would use a drifted embedding space."""
+
+        try:
+            _, metadata = await self._query_runtime_identity(
+                workspace_id,
+                require_generator=False,
+                force_inventory_refresh=force_inventory_refresh,
+                check_residency=check_residency,
+            )
+        except RuntimeError as exc:
+            raise ConflictError(
+                "Retrieval model integrity check failed",
+                details={"reason": str(exc)},
+            ) from exc
+        return metadata
 
     @staticmethod
     def _orchestration_metadata(result: OrchestratedAnswer) -> dict[str, Any]:
@@ -702,6 +1090,13 @@ class RunService:
             "rejected_claims": result.rejected_claims,
             "abstention": result.abstention,
             "done_reason": result.done_reason,
+            "retrieval_stages": list(result.retrieval_stages),
+            "escalation_reasons": list(result.escalation_reasons),
+            "calibrator_digest": result.calibrator_digest,
+            "calibrator_status": result.calibrator_status,
+            "verifier_digest": result.verifier_digest,
+            "verifier_status": result.verifier_status,
+            "typed_evidence_status": result.typed_evidence_status,
         }
 
     def _reranker_configured(self, workspace_id: str) -> bool:

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from functools import partial
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, Protocol
 
 from ..models.domain import BookMetadata
 
@@ -19,6 +19,26 @@ class QueryComplexity(StrEnum):
     SIMPLE = "simple"
     STANDARD = "standard"
     COMPLEX = "complex"
+
+
+class EvidenceKind(StrEnum):
+    """Typed evidence classes used by retrieval and answer selection."""
+
+    PROSE = "prose"
+    TABLE = "table"
+    FORMULA = "formula"
+    FIGURE = "figure"
+    OCR = "ocr"
+    NAVIGATION = "navigation"
+    UNKNOWN = "unknown"
+
+
+class ProvenanceKind(StrEnum):
+    ELEMENT = "element"
+    PAGE_FALLBACK = "page-fallback"
+    SYNTHETIC = "synthetic"
+    LEGACY = "legacy"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +59,79 @@ QUERY_BUDGETS: Mapping[QueryComplexity, QueryBudget] = MappingProxyType(
         QueryComplexity.COMPLEX: QueryBudget(72, 4, 14, 4, 2_400, 512, 35_000),
     }
 )
+
+RETRIEVAL_POLICY_DIGEST = "retrieval-v3-sparse-dense-book-2026.08.1"
+
+# User-facing performance profiles deliberately keep query complexity adaptive.
+# They change bounded work, not the semantic classification of the question and
+# never imply a model or embedding swap.
+PROFILE_QUERY_BUDGETS: Mapping[str, Mapping[QueryComplexity, QueryBudget]] = MappingProxyType(
+    {
+        "fast": MappingProxyType(
+            {
+                QueryComplexity.SIMPLE: QueryBudget(16, 1, 4, 1, 320, 256, 15_000),
+                QueryComplexity.STANDARD: QueryBudget(28, 2, 6, 2, 800, 320, 15_000),
+                QueryComplexity.COMPLEX: QueryBudget(48, 3, 10, 4, 1_600, 448, 15_000),
+            }
+        ),
+        "normal": MappingProxyType(
+            {
+                QueryComplexity.SIMPLE: QueryBudget(24, 1, 5, 1, 420, 256, 15_000),
+                QueryComplexity.STANDARD: QueryBudget(40, 2, 8, 2, 1_400, 384, 25_000),
+                QueryComplexity.COMPLEX: QueryBudget(72, 4, 14, 4, 2_800, 512, 35_000),
+            }
+        ),
+        "quality": MappingProxyType(
+            {
+                QueryComplexity.SIMPLE: QueryBudget(32, 2, 6, 1, 640, 320, 20_000),
+                QueryComplexity.STANDARD: QueryBudget(56, 3, 10, 2, 2_200, 512, 30_000),
+                QueryComplexity.COMPLEX: QueryBudget(96, 5, 18, 4, 4_500, 768, 35_000),
+            }
+        ),
+    }
+)
+
+
+def canonical_performance_profile(value: str | None) -> str:
+    """Map the v1.0 wire names onto the three v1.1 user-facing profiles."""
+
+    normalized = (value or "normal").strip().casefold()
+    return {
+        "auto": "normal",
+        "balanced": "normal",
+        "deep": "quality",
+        "fast": "fast",
+        "normal": "normal",
+        "quality": "quality",
+    }.get(normalized, "normal")
+
+
+def performance_budget(complexity: QueryComplexity, profile: str | None) -> QueryBudget:
+    return PROFILE_QUERY_BUDGETS[canonical_performance_profile(profile)][complexity]
+
+
+def performance_context_tokens(complexity: QueryComplexity, profile: str | None) -> int:
+    """Adaptive generator context target, independent of model capacity ceiling."""
+
+    targets = {
+        "fast": {
+            QueryComplexity.SIMPLE: 4096,
+            QueryComplexity.STANDARD: 6144,
+            QueryComplexity.COMPLEX: 8192,
+        },
+        "normal": {
+            QueryComplexity.SIMPLE: 6144,
+            QueryComplexity.STANDARD: 8192,
+            QueryComplexity.COMPLEX: 12288,
+        },
+        "quality": {
+            QueryComplexity.SIMPLE: 8192,
+            QueryComplexity.STANDARD: 16384,
+            QueryComplexity.COMPLEX: 24576,
+        },
+    }
+    return targets[canonical_performance_profile(profile)][complexity]
+
 
 DEFAULT_RRF_WEIGHTS: Mapping[str, float] = MappingProxyType(
     {
@@ -205,7 +298,16 @@ def _deterministic_facets(
             seen.add(key)
         if len(unique) == max_facets:
             break
-    return tuple(QueryFacet(f"F{index}", query) for index, query in enumerate(unique, 1))
+    return tuple(
+        QueryFacet(
+            f"F{index}",
+            query,
+            required=not (
+                complexity is QueryComplexity.COMPLEX and query.casefold() == question.casefold()
+            ),
+        )
+        for index, query in enumerate(unique, 1)
+    )
 
 
 def _clean_facet(value: str) -> str:
@@ -222,6 +324,7 @@ def _clean_facet(value: str) -> str:
 class RetrievalCandidate:
     chunk_id: str
     content: str
+    generation_id: str | None = None
     document_id: str | None = None
     document_title: str | None = None
     source_uri: str | None = None
@@ -235,6 +338,9 @@ class RetrievalCandidate:
     element_types: tuple[str, ...] = ()
     doc_item_refs: tuple[str, ...] = ()
     book: BookMetadata | None = None
+    evidence_kind: EvidenceKind = EvidenceKind.UNKNOWN
+    provenance_kind: ProvenanceKind = ProvenanceKind.UNKNOWN
+    quality_flags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.chunk_id:
@@ -314,24 +420,132 @@ def weighted_rrf(
 
 @dataclass(frozen=True, slots=True)
 class PlattCalibrator:
-    scale: float = 1.0
-    bias: float = 0.0
-    digest: str = "identity-logit-v1"
+    """Digest-bound logistic calibration for one reranker score convention.
+
+    ``scale=1,bias=0`` was used by early query-v2 builds as a convenient
+    placeholder.  It is intentionally no longer the default: production
+    callers must use a profile fitted from labelled pairs and bound to both
+    model and calibration-set digests.  The legacy constructor remains valid
+    for callers that explicitly provide a digest (including old tests and
+    compatibility integrations).
+    """
+
+    scale: float
+    bias: float
+    digest: str
+    model_digest: str | None = None
+    dataset_digest: str | None = None
+    policy_digest: str | None = None
+    version: str = "platt-v2"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.scale) or not math.isfinite(self.bias):
             raise ValueError("calibrator parameters must be finite")
         if not self.digest:
             raise ValueError("calibrator digest must not be empty")
+        if not self.version:
+            raise ValueError("calibrator version must not be empty")
+
+    @classmethod
+    def fit(
+        cls,
+        *,
+        model_digest: str,
+        dataset_digest: str,
+        policy_digest: str,
+        scores: Sequence[float],
+        labels: Sequence[int | bool],
+        iterations: int = 250,
+    ) -> PlattCalibrator:
+        """Fit a deterministic Platt model from labelled reranker pairs.
+
+        The small gradient solver avoids adding a numerical dependency to the
+        query worker.  Both classes are required and all values are checked;
+        a profile cannot accidentally be emitted as an unbound identity map.
+        """
+
+        if not model_digest or not dataset_digest or not policy_digest:
+            raise ValueError("model, dataset and retrieval-policy digests are required")
+        if len(scores) != len(labels) or len(scores) < 4:
+            raise ValueError("calibration requires at least four score/label pairs")
+        if not {int(label) for label in labels} >= {0, 1}:
+            raise ValueError("calibration labels must contain both classes")
+        if iterations < 1 or iterations > 10_000:
+            raise ValueError("iterations must be between 1 and 10000")
+        values = [float(score) for score in scores]
+        targets = [int(label) for label in labels]
+        if not all(math.isfinite(score) for score in values):
+            raise ValueError("calibration scores must be finite")
+
+        scale, bias = 1.0, 0.0
+        # A conservative learning rate plus mild L2 regularization keeps the
+        # fit stable for tiny per-workspace gold sets.
+        learning_rate = 0.08 / max(1.0, math.sqrt(len(values)))
+        for _ in range(iterations):
+            gradient_scale = 0.0
+            gradient_bias = 0.0
+            for score, target in zip(values, targets, strict=True):
+                probability = _sigmoid(scale * score + bias)
+                error = probability - target
+                gradient_scale += error * score
+                gradient_bias += error
+            gradient_scale = gradient_scale / len(values) + 0.01 * scale
+            gradient_bias /= len(values)
+            scale -= learning_rate * gradient_scale
+            bias -= learning_rate * gradient_bias
+            scale = max(0.01, min(scale, 100.0))
+            bias = max(-100.0, min(bias, 100.0))
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "version": "platt-v2",
+                    "model_digest": model_digest,
+                    "dataset_digest": dataset_digest,
+                    "policy_digest": policy_digest,
+                    "scale": round(scale, 12),
+                    "bias": round(bias, 12),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return cls(
+            scale=scale,
+            bias=bias,
+            digest=digest,
+            model_digest=model_digest,
+            dataset_digest=dataset_digest,
+            policy_digest=policy_digest,
+        )
+
+    @property
+    def bound(self) -> bool:
+        return bool(self.model_digest and self.dataset_digest and self.policy_digest)
 
     def probability(self, score: float) -> float:
         if not math.isfinite(score):
             raise ValueError("reranker score must be finite")
-        value = self.scale * float(score) + self.bias
-        if value >= 0:
-            return 1.0 / (1.0 + math.exp(-min(value, 709.0)))
-        exp_value = math.exp(max(value, -709.0))
-        return exp_value / (1.0 + exp_value)
+        return _sigmoid(self.scale * float(score) + self.bias)
+
+
+def _sigmoid(value: float) -> float:
+    if value >= 0:
+        return 1.0 / (1.0 + math.exp(-min(value, 709.0)))
+    exp_value = math.exp(max(value, -709.0))
+    return exp_value / (1.0 + exp_value)
+
+
+# This bootstrap profile keeps V1.1 workspaces usable until the owner imports a
+# reviewed private gold set. It is deliberately labelled as bootstrap in every
+# receipt and is not a V1.2 release-quality calibration claim.
+DEFAULT_RERANKER_CALIBRATOR = PlattCalibrator(
+    scale=1.35,
+    bias=-0.55,
+    digest="bundled-bootstrap-platt-v2-mmarco-2026.08.1",
+    model_digest="e99c92466f2a65f1d63e4529027613cdb62ca8f69071b278e0aa542134e204d5",
+    dataset_digest="bootstrap-silver-v1-not-release-gold",
+    policy_digest=RETRIEVAL_POLICY_DIGEST,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,8 +605,10 @@ def adaptive_select(
     evidence_mode: Literal["strict", "normal", "explore"] = "strict",
     required_facets: Iterable[str] = (),
     calibrator: PlattCalibrator | None = None,
+    reranker_digest: str | None = None,
     policy: SelectionPolicy | None = None,
     max_candidates: int | None = None,
+    budget: QueryBudget | None = None,
 ) -> SelectionResult:
     """Calibrate, threshold, score-gap cut and diversify reranker raw scores.
 
@@ -400,9 +616,25 @@ def adaptive_select(
     calibrator. It must not be a provider score from hybrid/vector/FTS retrieval.
     """
 
-    calibrator = calibrator or PlattCalibrator()
+    calibrator = calibrator or DEFAULT_RERANKER_CALIBRATOR
+    if reranker_digest is not None and calibrator.model_digest != reranker_digest:
+        return SelectionResult(
+            (),
+            tuple(dict.fromkeys(required_facets)),
+            "calibration_mismatch",
+            None,
+            0,
+        )
+    if reranker_digest is not None and calibrator.policy_digest != RETRIEVAL_POLICY_DIGEST:
+        return SelectionResult(
+            (),
+            tuple(dict.fromkeys(required_facets)),
+            "calibration_mismatch",
+            None,
+            0,
+        )
     policy = policy or SelectionPolicy()
-    budget = QUERY_BUDGETS[complexity]
+    budget = budget or QUERY_BUDGETS[complexity]
     if max_candidates is not None:
         if max_candidates < 1:
             raise ValueError("max_candidates must be positive")
@@ -720,6 +952,9 @@ class EvidenceWindow:
     pages: tuple[int, ...] = ()
     headings: tuple[str, ...] = ()
     facet_ids: tuple[str, ...] = ()
+    evidence_kind: EvidenceKind = EvidenceKind.UNKNOWN
+    provenance_kind: ProvenanceKind = ProvenanceKind.UNKNOWN
+    quality_flags: tuple[str, ...] = ()
 
     @property
     def estimated_tokens(self) -> int:
@@ -751,8 +986,15 @@ def extract_evidence_window(
     terms = _search_terms(question)
 
     table = _best_table_span(content, terms, max_chars)
+    formula = _best_formula_span(content, terms, max_chars)
     prose = _best_prose_span(content, terms, max_chars)
-    span = table if table is not None and table.score >= prose.score else prose
+    if candidate.evidence_kind is EvidenceKind.TABLE and table is not None:
+        span = table
+    elif candidate.evidence_kind is EvidenceKind.FORMULA and formula is not None:
+        span = formula
+    else:
+        alternatives = [prose, *(item for item in (table, formula) if item is not None)]
+        span = max(alternatives, key=lambda item: item.score)
     start, end = _trim_span(content, span.start, span.end, max_chars, terms)
     return EvidenceWindow(
         evidence_id=evidence_id,
@@ -764,6 +1006,9 @@ def extract_evidence_window(
         pages=candidate.pages,
         headings=candidate.headings,
         facet_ids=candidate.facet_ids,
+        evidence_kind=candidate.evidence_kind,
+        provenance_kind=candidate.provenance_kind,
+        quality_flags=candidate.quality_flags,
     )
 
 
@@ -781,13 +1026,27 @@ def pack_evidence_windows(
     windows: list[EvidenceWindow] = []
     remaining = total_token_budget
     for candidate in candidates:
+        # Navigation chunks are routing aids, never answer evidence. Unknown
+        # is retained for V1.1 indexes and upgraded after a full reindex.
+        if (
+            candidate.evidence_kind is EvidenceKind.NAVIGATION
+            or candidate.provenance_kind is ProvenanceKind.SYNTHETIC
+        ):
+            continue
         if remaining < 8:
             break
+        kind_multiplier = (
+            1.5
+            if candidate.evidence_kind is EvidenceKind.TABLE
+            else 1.25
+            if candidate.evidence_kind is EvidenceKind.FORMULA
+            else 1.0
+        )
         window = extract_evidence_window(
             candidate,
             question,
             evidence_id=f"E{len(windows) + 1}",
-            max_tokens=min(per_window_tokens, remaining),
+            max_tokens=min(max(8, round(per_window_tokens * kind_multiplier)), remaining),
         )
         if window.estimated_tokens > remaining:
             continue
@@ -849,10 +1108,53 @@ def _best_table_span(content: str, terms: set[str], max_chars: int) -> _Span | N
             start_index += 1
             if start_index >= end_index:
                 break
-        span = _Span(group[start_index][0], group[end_index][1], row_score + 0.25)
+        start = group[start_index][0]
+        if start_index == 0:
+            group_line = next(
+                (index for index, line in enumerate(lines) if line[0] == group[0][0]),
+                None,
+            )
+            if group_line is not None and group_line > 0:
+                caption_start, _caption_end, caption = lines[group_line - 1]
+                if caption.strip() and group[end_index][1] - caption_start <= max_chars:
+                    start = caption_start
+        span = _Span(start, group[end_index][1], row_score + 0.25)
         if best is None or span.score > best.score:
             best = span
     return best
+
+
+def _best_formula_span(content: str, terms: set[str], max_chars: int) -> _Span | None:
+    lines = _line_spans(content)
+    candidates = [
+        (index, line)
+        for index, line in enumerate(lines)
+        if re.search(r"(?:=|≤|≥|≈|∑|√|[α-ωΑ-Ω])", line[2])
+    ]
+    if not candidates:
+        return None
+    best_index, best_line = max(
+        candidates,
+        key=lambda item: (
+            _overlap_score(item[1][2], terms),
+            len(extract_technical_literals(item[1][2])),
+            -item[0],
+        ),
+    )
+    start_index = max(0, best_index - 2)
+    end_index = min(len(lines) - 1, best_index + 2)
+    while lines[end_index][1] - lines[start_index][0] > max_chars:
+        if best_index - start_index >= end_index - best_index and start_index < best_index:
+            start_index += 1
+        elif end_index > best_index:
+            end_index -= 1
+        else:
+            break
+    return _Span(
+        lines[start_index][0],
+        lines[end_index][1],
+        _overlap_score(best_line[2], terms) + 0.2,
+    )
 
 
 def _sentence_spans(content: str) -> list[_Span]:
@@ -1045,10 +1347,161 @@ def _parse_claim_json(raw: str) -> ClaimBlock:
 
 
 @dataclass(frozen=True, slots=True)
+class SupportSpan:
+    evidence_id: str
+    start: int
+    end: int
+    kind: str = "literal"
+
+
+@dataclass(frozen=True, slots=True)
 class ClaimValidation:
     valid: bool
     errors: tuple[str, ...]
     technical_literals: tuple[str, ...]
+    support_spans: tuple[SupportSpan, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimVerification:
+    verdict: Literal["entailed", "contradicted", "unknown"]
+    reason: str = ""
+    score: float | None = None
+
+
+class ClaimVerifier(Protocol):
+    async def verify(
+        self, claim: ClaimBlock, evidence: Sequence[EvidenceWindow]
+    ) -> ClaimVerification: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SelectiveVerifierPolicy:
+    """Trigger policy for a local verifier; never broadens evidence access."""
+
+    max_claims: int = 2
+    evidence_kinds: tuple[EvidenceKind, ...] = (
+        EvidenceKind.TABLE,
+        EvidenceKind.FORMULA,
+    )
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.max_claims <= 8:
+            raise ValueError("max_claims must be between 1 and 8")
+
+    def should_verify(self, claim: ClaimBlock, evidence: Sequence[EvidenceWindow]) -> bool:
+        if claim.status != "supported":
+            return False
+        if set(self.evidence_kinds) & {item.evidence_kind for item in evidence}:
+            return True
+        if extract_technical_literals(claim.text) or len(evidence) > 1:
+            return True
+        terms = _search_terms(claim.text)
+        if terms & _NEGATION_TERMS:
+            return True
+        return bool(
+            _COMPARISON_SIGNAL.search(claim.text)
+            or _MULTIHOP_SIGNAL.search(claim.text)
+            or re.search(
+                r"(?i)\b(?:mindestens|höchstens|weniger als|mehr als|über|unter|"
+                r"at least|at most|less than|more than|above|below)\b",
+                claim.text,
+            )
+        )
+
+    @staticmethod
+    def fail_closed(verifier: ClaimVerifier | None) -> ClaimVerification:
+        if verifier is None:
+            return ClaimVerification("unknown", "verifier-unavailable")
+        return ClaimVerification("unknown", "verifier-error")
+
+
+@dataclass(frozen=True, slots=True)
+class ProgressiveRetrievalPolicy:
+    minimum_relevance: float = 0.62
+    minimum_margin: float = 0.08
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.minimum_relevance <= 1.0:
+            raise ValueError("minimum_relevance must be between 0 and 1")
+        if not 0.0 <= self.minimum_margin <= 1.0:
+            raise ValueError("minimum_margin must be between 0 and 1")
+
+    def should_escalate(
+        self,
+        *,
+        selected_count: int,
+        missing_facets: Sequence[str],
+        top_relevance: float | None,
+        second_relevance: float | None,
+        optional_facets_available: bool,
+        missing_evidence_requirements: Sequence[str] = (),
+    ) -> bool:
+        if not optional_facets_available:
+            return False
+        if (
+            missing_facets
+            or missing_evidence_requirements
+            or selected_count < 1
+            or top_relevance is None
+        ):
+            return True
+        if top_relevance < self.minimum_relevance:
+            return True
+        return second_relevance is not None and (
+            top_relevance - second_relevance < self.minimum_margin
+        )
+
+    @staticmethod
+    def missing_evidence_requirements(
+        query: str,
+        selected: Sequence[RerankedCandidate],
+    ) -> tuple[str, ...]:
+        """Detect query-explicit evidence kinds absent from Stage A."""
+
+        query_terms = _search_terms(query)
+        wants_table = bool(
+            query_terms
+            & {
+                "tabelle",
+                "tabellarisch",
+                "zeile",
+                "spalte",
+                "matrix",
+                "table",
+                "row",
+                "column",
+            }
+        )
+        wants_formula = bool(
+            query_terms
+            & {
+                "formel",
+                "gleichung",
+                "variable",
+                "symbol",
+                "berechne",
+                "formula",
+                "equation",
+                "calculate",
+            }
+        )
+        wants_negation = bool(query_terms & _NEGATION_TERMS)
+        kinds = {item.candidate.evidence_kind for item in selected}
+        contents = "\n".join(item.candidate.content for item in selected)
+        content_terms = _search_terms(contents)
+        has_table = EvidenceKind.TABLE in kinds or _best_table_span(contents, query_terms, 512)
+        has_formula = EvidenceKind.FORMULA in kinds or _best_formula_span(
+            contents, query_terms, 512
+        )
+        missing: list[str] = []
+        if wants_table and not has_table:
+            missing.append("table-evidence")
+        if wants_formula and not has_formula:
+            missing.append("formula-evidence")
+        if wants_negation and not (content_terms & _NEGATION_TERMS):
+            missing.append("negation-evidence")
+        return tuple(missing)
 
 
 def validate_claim(
@@ -1068,6 +1521,7 @@ def validate_claim(
         errors.append("unknown_evidence_id")
 
     literals = extract_technical_literals(claim.text)
+    support_spans: list[SupportSpan] = []
     if claim.status == "supported":
         if not claim.evidence_ids:
             errors.append("missing_evidence")
@@ -1077,6 +1531,25 @@ def validate_claim(
         supported = extract_technical_literals(cited_text)
         if not literals <= supported:
             errors.append("unsupported_technical_literal")
+        for evidence_id in claim.evidence_ids:
+            window = evidence.get(evidence_id)
+            if window is None:
+                continue
+            for literal in literals:
+                match = next(
+                    (
+                        item
+                        for item in _TECHNICAL_LITERAL.finditer(window.text)
+                        if _normalize_literal(item.group(0)) == literal
+                    ),
+                    None,
+                )
+                if match is not None:
+                    support_spans.append(SupportSpan(evidence_id, match.start(), match.end()))
+        if not support_spans:
+            lexical = _best_claim_support_span(claim.text, evidence, claim.evidence_ids)
+            if lexical is not None:
+                support_spans.append(lexical)
         if not unknown:
             if _semantic_contradiction(claim.text, cited_text):
                 errors.append("semantic_contradiction")
@@ -1093,4 +1566,39 @@ def validate_claim(
     elif literals:
         errors.append("insufficient_claim_has_technical_literal")
 
-    return ClaimValidation(not errors, tuple(dict.fromkeys(errors)), tuple(sorted(literals)))
+    return ClaimValidation(
+        not errors,
+        tuple(dict.fromkeys(errors)),
+        tuple(sorted(literals)),
+        tuple(support_spans),
+    )
+
+
+def _best_claim_support_span(
+    claim_text: str,
+    evidence: Mapping[str, EvidenceWindow],
+    evidence_ids: Sequence[str],
+) -> SupportSpan | None:
+    """Return the strongest exact sentence span without manufacturing text."""
+
+    claim_terms = _search_terms(claim_text)
+    if not claim_terms:
+        return None
+    best: tuple[int, float, str, int, int] | None = None
+    for evidence_id in evidence_ids:
+        window = evidence.get(evidence_id)
+        if window is None:
+            continue
+        for span in _sentence_spans(window.text) or [_Span(0, len(window.text))]:
+            terms = _search_terms(window.text[span.start : span.end])
+            overlap = len(claim_terms & terms)
+            ratio = overlap / len(claim_terms)
+            candidate = (overlap, ratio, evidence_id, span.start, span.end)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+    if best is None:
+        return None
+    overlap, _ratio, evidence_id, start, end = best
+    if overlap < min(2, len(claim_terms)):
+        return None
+    return SupportSpan(evidence_id, start, end, "semantic")

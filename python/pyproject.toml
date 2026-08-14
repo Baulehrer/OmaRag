@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omarag-bridge"
-version = "1.0.0"
+version = "1.2.0"
 description = "OmaRag API-first bridge daemon — Oracle of Metis & Aletheia"
 license = "MIT"
 requires-python = ">=3.12"

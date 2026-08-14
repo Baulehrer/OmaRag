@@ -11,7 +11,8 @@
     },
     "PrivacyMode": {
       "enum": [
-        "local",
+        "device-only",
+        "trusted-endpoint",
         "cloud-allowed"
       ],
       "title": "PrivacyMode",
@@ -94,7 +95,7 @@
     },
     "privacy_mode": {
       "$ref": "#/$defs/PrivacyMode",
-      "default": "local"
+      "default": "device-only"
     },
     "processing_profile": {
       "default": "default",

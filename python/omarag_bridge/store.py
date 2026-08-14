@@ -5,13 +5,25 @@ import json
 import re
 import sqlite3
 import threading
-from datetime import UTC, datetime
+import time
+from collections.abc import Collection
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from .models.book import BookKnowledgeSnapshot
-from .models.domain import JobSnapshot, JobStatus, RunSnapshot, WorkspaceManifest
-from .models.errors import IdempotencyConflictError, NotFoundError
+from .models.domain import (
+    JobSnapshot,
+    JobStatus,
+    RetentionCategory,
+    RetentionCleanupAction,
+    RetentionCleanupPlan,
+    RetentionPolicy,
+    RetentionPurgeResult,
+    RunSnapshot,
+    WorkspaceManifest,
+)
+from .models.errors import ConflictError, IdempotencyConflictError, NotFoundError
 from .models.events import DomainEvent
 
 DOCUMENT_FILTER_KEYS = frozenset(
@@ -34,6 +46,45 @@ DOCUMENT_FILTER_KEYS = frozenset(
     }
 )
 DOCUMENT_POLICIES = frozenset({"current-only", "all-editions"})
+TERMINAL_RETENTION_STATUSES = (
+    JobStatus.COMPLETED.value,
+    JobStatus.CANCELLED.value,
+    JobStatus.FAILED.value,
+)
+RETENTION_PLAN_TTL = timedelta(minutes=15)
+RETENTION_CONFIRMATION = "PURGE_EXPIRED"
+_PURGED_VALUE = object()
+_DOCUMENT_REFERENCE_SCALAR_KEYS = frozenset(
+    {
+        "logical_document_id",
+        "document_id",
+        "segment_document_id",
+        "chunk_id",
+        "evidence_id",
+        "media_id",
+        "fingerprint",
+        "original_source",
+        "managed_source",
+        "source",
+        "source_path",
+        "source_uri",
+        "path",
+    }
+)
+_DOCUMENT_REFERENCE_LIST_KEYS = frozenset(
+    {
+        "logical_document_ids",
+        "document_ids",
+        "segment_document_ids",
+        "chunk_ids",
+        "evidence_ids",
+        "media_ids",
+        "picture_refs",
+    }
+)
+_HEAVY_DOCUMENT_RESULT_FIELDS = frozenset(
+    {"book_knowledge_snapshot", "book_structure", "chunk_manifest", "segments"}
+)
 
 
 def now_iso() -> str:
@@ -45,6 +96,155 @@ def request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _retention_now(value: datetime | None) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("retention timestamps must include a timezone")
+    return value.astimezone(UTC)
+
+
+def _retention_plan_id(plan: RetentionCleanupPlan) -> str:
+    payload = plan.model_dump(mode="json", exclude={"plan_id"})
+    return f"sha256:{request_hash(payload)[:24]}"
+
+
+def _retention_selection_digest(values: list[str]) -> str:
+    encoded = json.dumps(sorted(values), separators=(",", ":")).encode()
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _stored_json(value: str | None, *, label: str) -> Any:
+    if value is None:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise ConflictError(
+            f"Stored {label} cannot be safely inspected; document purge aborted"
+        ) from exc
+
+
+def _reference_strings(value: Any) -> set[str]:
+    """Collect stable document references, never arbitrary evidence text."""
+
+    references: set[str] = set()
+
+    def visit(item: Any, key: str | None = None) -> None:
+        if isinstance(item, dict):
+            for child_key, child in item.items():
+                visit(child, str(child_key))
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child, key)
+            return
+        if not isinstance(item, str) or not item:
+            return
+        if key in _DOCUMENT_REFERENCE_SCALAR_KEYS or key in _DOCUMENT_REFERENCE_LIST_KEYS:
+            references.add(item)
+
+    visit(value)
+    return references
+
+
+def _record_references_document(value: Any, references: set[str]) -> bool:
+    if not isinstance(value, dict):
+        return False
+    for key in _DOCUMENT_REFERENCE_SCALAR_KEYS:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate in references:
+            return True
+    return False
+
+
+def _grow_document_references(value: Any, references: set[str]) -> bool:
+    """Learn historical IDs/paths only from records already tied to the target."""
+
+    changed = False
+    if isinstance(value, dict):
+        if _record_references_document(value, references):
+            discovered = _reference_strings(value) - references
+            if discovered:
+                references.update(discovered)
+                changed = True
+        for child in value.values():
+            changed = _grow_document_references(child, references) or changed
+    elif isinstance(value, list):
+        for child in value:
+            changed = _grow_document_references(child, references) or changed
+    return changed
+
+
+def _contains_document_reference(value: Any, references: set[str]) -> bool:
+    if isinstance(value, dict):
+        return _record_references_document(value, references) or any(
+            _contains_document_reference(child, references) for child in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_document_reference(child, references) for child in value)
+    if not isinstance(value, str):
+        return False
+    return any(reference in value for reference in references if len(reference) >= 6)
+
+
+def _scrub_document_references(value: Any, references: set[str]) -> Any:
+    """Remove target records and redact scalar remnants while retaining siblings."""
+
+    if isinstance(value, dict):
+        if _record_references_document(value, references):
+            return _PURGED_VALUE
+        scrubbed: dict[str, Any] = {}
+        for key, child in value.items():
+            cleaned = _scrub_document_references(child, references)
+            if cleaned is not _PURGED_VALUE:
+                scrubbed[key] = cleaned
+        return scrubbed
+    if isinstance(value, list):
+        return [
+            cleaned
+            for child in value
+            if not (isinstance(child, str) and child in references)
+            if (cleaned := _scrub_document_references(child, references)) is not _PURGED_VALUE
+        ]
+    if isinstance(value, str):
+        cleaned = value
+        for reference in sorted(references, key=len, reverse=True):
+            if len(reference) >= 6:
+                cleaned = cleaned.replace(reference, "[purged-document]")
+        return cleaned
+    return value
+
+
+def _compact_document_result(value: Any) -> Any:
+    """Keep resumable/UI metadata while dropping duplicated index bodies."""
+
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in _HEAVY_DOCUMENT_RESULT_FIELDS}
+
+
+def _compact_job_result(value: Any) -> Any:
+    if not isinstance(value, dict) or not isinstance(value.get("documents"), list):
+        return value
+    return {
+        **value,
+        "documents": [_compact_document_result(item) for item in value["documents"]],
+    }
+
+
+def _replace_exact_string(value: Any, expected: str, replacement: str) -> Any:
+    """Replace an exact secret-bearing reference without rewriting free text."""
+
+    if isinstance(value, dict):
+        return {
+            key: _replace_exact_string(item, expected, replacement) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_replace_exact_string(item, expected, replacement) for item in value]
+    return replacement if isinstance(value, str) and value == expected else value
+
+
 class StateStore:
     """Small synchronous SQLite store guarded for FastAPI's worker threads.
 
@@ -54,14 +254,21 @@ class StateStore:
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
         self.path = path
         self._lock = threading.RLock()
+        self._event_compaction_at: dict[str, float] = {}
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        path.chmod(0o600)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._migrate()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{path}{suffix}")
+            if sidecar.exists():
+                sidecar.chmod(0o600)
 
     def close(self) -> None:
         with self._lock:
@@ -79,6 +286,11 @@ class StateStore:
                     id TEXT PRIMARY KEY,
                     manifest_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workspace_retention_policies (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+                    policy_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -219,6 +431,12 @@ class StateStore:
                 );
                 CREATE INDEX IF NOT EXISTS book_records_work_idx
                     ON book_records(workspace_id, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS hidden_documents (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    logical_document_id TEXT NOT NULL,
+                    hidden_at TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, logical_document_id)
+                );
                 CREATE TABLE IF NOT EXISTS document_segments (
                     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
                     logical_document_id TEXT NOT NULL,
@@ -375,6 +593,53 @@ class StateStore:
                     canonical,
                     aliases
                 );
+                CREATE TABLE IF NOT EXISTS book_media_assets (
+                    workspace_id TEXT NOT NULL,
+                    logical_document_id TEXT NOT NULL,
+                    media_id TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    page_no INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    section_node_id TEXT NOT NULL,
+                    pixel_sha256 TEXT,
+                    perceptual_hash TEXT,
+                    asset_json TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, logical_document_id, media_id),
+                    FOREIGN KEY(workspace_id, logical_document_id)
+                        REFERENCES book_structures(workspace_id, logical_document_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS book_media_page_idx
+                    ON book_media_assets(
+                        workspace_id, logical_document_id, page_no, media_id
+                    );
+                CREATE INDEX IF NOT EXISTS book_media_pixel_idx
+                    ON book_media_assets(workspace_id, pixel_sha256)
+                    WHERE pixel_sha256 IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS book_media_links (
+                    workspace_id TEXT NOT NULL,
+                    logical_document_id TEXT NOT NULL,
+                    link_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    target_id TEXT NOT NULL,
+                    relation TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    link_json TEXT NOT NULL,
+                    PRIMARY KEY(workspace_id, logical_document_id, link_id),
+                    FOREIGN KEY(workspace_id, logical_document_id)
+                        REFERENCES book_structures(workspace_id, logical_document_id)
+                        ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS book_media_links_source_idx
+                    ON book_media_links(workspace_id, source_id, relation);
+                CREATE INDEX IF NOT EXISTS book_media_links_target_idx
+                    ON book_media_links(workspace_id, target_id, relation);
+                CREATE VIRTUAL TABLE IF NOT EXISTS book_media_router USING fts5(
+                    workspace_id UNINDEXED,
+                    logical_document_id UNINDEXED,
+                    media_id UNINDEXED,
+                    content
+                );
                 CREATE TABLE IF NOT EXISTS book_knowledge_snapshots (
                     workspace_id TEXT NOT NULL,
                     logical_document_id TEXT NOT NULL,
@@ -400,13 +665,29 @@ class StateStore:
                     VALUES (5, datetime('now'));
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
                     VALUES (6, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (7, datetime('now'));
+                INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+                    VALUES (8, datetime('now'));
                 """
+            )
+            # Workspaces that predate the retention table retain the V1.1
+            # indefinite-history behavior until the user explicitly opts in.
+            legacy_policy = RetentionPolicy(profile="legacy", legacy_opt_in=True).model_dump_json()
+            self._db.execute(
+                """INSERT OR IGNORE INTO workspace_retention_policies(
+                       workspace_id, policy_json, updated_at
+                   )
+                   SELECT id, ?, ? FROM workspaces""",
+                (legacy_policy, now_iso()),
             )
             job_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(jobs)").fetchall()
             }
             if "progress_detail_json" not in job_columns:
                 self._db.execute("ALTER TABLE jobs ADD COLUMN progress_detail_json TEXT")
+            if "pinned" not in job_columns:
+                self._db.execute("ALTER TABLE jobs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             run_columns = {
                 row["name"] for row in self._db.execute("PRAGMA table_info(runs)").fetchall()
             }
@@ -419,6 +700,10 @@ class StateStore:
                 self._db.execute(
                     "ALTER TABLE runs ADD COLUMN claims_json TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "visual_evidence_json" not in run_columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN visual_evidence_json TEXT")
+            if "pinned" not in run_columns:
+                self._db.execute("ALTER TABLE runs ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
             self._ensure_columns(
                 "answer_cache",
                 {
@@ -493,15 +778,28 @@ class StateStore:
     def add_workspace(self, manifest: WorkspaceManifest) -> None:
         raw = manifest.model_dump_json()
         with self._lock:
-            self._db.execute(
-                "INSERT INTO workspaces VALUES (?, ?, ?, ?)",
-                (
-                    manifest.id,
-                    raw,
-                    manifest.created_at.isoformat(),
-                    manifest.updated_at.isoformat(),
-                ),
-            )
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "INSERT INTO workspaces VALUES (?, ?, ?, ?)",
+                    (
+                        manifest.id,
+                        raw,
+                        manifest.created_at.isoformat(),
+                        manifest.updated_at.isoformat(),
+                    ),
+                )
+                self._db.execute(
+                    """INSERT INTO workspace_retention_policies(
+                           workspace_id, policy_json, updated_at
+                       ) VALUES (?, ?, ?)""",
+                    (manifest.id, RetentionPolicy().model_dump_json(), now_iso()),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
 
     def update_workspace(self, manifest: WorkspaceManifest) -> None:
         with self._lock:
@@ -527,6 +825,525 @@ class StateStore:
                 "SELECT manifest_json FROM workspaces ORDER BY updated_at DESC"
             ).fetchall()
         return [WorkspaceManifest.model_validate_json(row["manifest_json"]) for row in rows]
+
+    def get_retention_policy(self, workspace_id: str) -> RetentionPolicy:
+        with self._lock:
+            row = self._db.execute(
+                """SELECT policy_json FROM workspaces
+                   LEFT JOIN workspace_retention_policies
+                     ON workspace_retention_policies.workspace_id = workspaces.id
+                   WHERE workspaces.id = ?""",
+                (workspace_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Workspace {workspace_id} wurde nicht gefunden")
+        if row["policy_json"] is None:
+            return RetentionPolicy(profile="legacy", legacy_opt_in=True)
+        return RetentionPolicy.model_validate_json(row["policy_json"])
+
+    def set_retention_policy(self, workspace_id: str, policy: RetentionPolicy) -> RetentionPolicy:
+        value = RetentionPolicy.model_validate(policy)
+        self.get_workspace(workspace_id)
+        with self._lock:
+            self._db.execute(
+                """INSERT INTO workspace_retention_policies(
+                       workspace_id, policy_json, updated_at
+                   ) VALUES (?, ?, ?)
+                   ON CONFLICT(workspace_id) DO UPDATE SET
+                       policy_json=excluded.policy_json, updated_at=excluded.updated_at""",
+                (workspace_id, value.model_dump_json(), now_iso()),
+            )
+        return value
+
+    def plan_retention_cleanup(
+        self,
+        workspace_id: str,
+        policy: RetentionPolicy | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> RetentionCleanupPlan:
+        effective_policy = policy or self.get_retention_policy(workspace_id)
+        effective_policy = RetentionPolicy.model_validate(effective_policy)
+        reference = _retention_now(now)
+        terminal = TERMINAL_RETENTION_STATUSES
+
+        def count(sql: str, params: tuple[Any, ...]) -> int:
+            row = self._db.execute(sql, params).fetchone()
+            return int(row["count"])
+
+        def selection_digest(sql: str, params: tuple[Any, ...], *, prefix: str) -> str:
+            rows = self._db.execute(sql, params).fetchall()
+            return _retention_selection_digest([f"{prefix}:{row['record_id']}" for row in rows])
+
+        def cutoff_days(value: int | None) -> datetime | None:
+            return reference - timedelta(days=value) if value is not None else None
+
+        empty_digest = _retention_selection_digest([])
+        actions: list[RetentionCleanupAction] = []
+        with self._lock:
+            # This also prevents a plan from being created for a missing workspace.
+            self.get_workspace(workspace_id)
+
+            answer_cutoff = cutoff_days(effective_policy.answer_cache_days)
+            answer_count = 0
+            answer_digest = empty_digest
+            if answer_cutoff is not None:
+                answer_params = (workspace_id, answer_cutoff.isoformat())
+                answer_count = count(
+                    """SELECT COUNT(*) AS count FROM answer_cache
+                       WHERE workspace_id = ? AND last_used_at < ?""",
+                    answer_params,
+                )
+                answer_digest = selection_digest(
+                    """SELECT cache_key AS record_id FROM answer_cache
+                       WHERE workspace_id = ? AND last_used_at < ?""",
+                    answer_params,
+                    prefix="answer-cache",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.ANSWER_CACHE,
+                    cutoff_at=answer_cutoff,
+                    eligible_records=answer_count,
+                    selection_digest=answer_digest,
+                )
+            )
+
+            event_cutoff = (
+                reference - timedelta(hours=effective_policy.event_hours)
+                if effective_policy.event_hours is not None
+                else None
+            )
+            event_count = 0
+            event_digest = empty_digest
+            if event_cutoff is not None:
+                event_params = (workspace_id, event_cutoff.isoformat())
+                event_count = count(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE workspace_id = ? AND timestamp < ?""",
+                    event_params,
+                )
+                event_digest = selection_digest(
+                    """SELECT event_id AS record_id FROM events
+                       WHERE workspace_id = ? AND timestamp < ?""",
+                    event_params,
+                    prefix="event",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.EVENTS,
+                    cutoff_at=event_cutoff,
+                    eligible_records=event_count,
+                    selection_digest=event_digest,
+                )
+            )
+
+            run_cutoff = cutoff_days(effective_policy.terminal_run_days)
+            run_count = run_protected = run_dependents = 0
+            run_digest = run_dependent_digest = empty_digest
+            if run_cutoff is not None:
+                run_params = (workspace_id, run_cutoff.isoformat(), *terminal)
+                run_count = count(
+                    """SELECT COUNT(*) AS count FROM runs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND status IN (?, ?, ?) AND pinned = 0""",
+                    run_params,
+                )
+                run_protected = count(
+                    """SELECT COUNT(*) AS count FROM runs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND (status NOT IN (?, ?, ?) OR pinned != 0)""",
+                    run_params,
+                )
+                run_dependents = count(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE workspace_id = ? AND timestamp >= ? AND run_id IN (
+                           SELECT id FROM runs WHERE workspace_id = ? AND updated_at < ?
+                             AND status IN (?, ?, ?) AND pinned = 0
+                       )""",
+                    (workspace_id, event_cutoff.isoformat(), *run_params),
+                )
+                run_digest = selection_digest(
+                    """SELECT id AS record_id FROM runs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND status IN (?, ?, ?) AND pinned = 0""",
+                    run_params,
+                    prefix="run",
+                )
+                run_dependent_digest = selection_digest(
+                    """SELECT event_id AS record_id FROM events
+                       WHERE workspace_id = ? AND timestamp >= ? AND run_id IN (
+                           SELECT id FROM runs WHERE workspace_id = ? AND updated_at < ?
+                             AND status IN (?, ?, ?) AND pinned = 0
+                       )""",
+                    (workspace_id, event_cutoff.isoformat(), *run_params),
+                    prefix="run-event",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.RUNS,
+                    cutoff_at=run_cutoff,
+                    eligible_records=run_count,
+                    protected_records=run_protected,
+                    dependent_records=run_dependents,
+                    selection_digest=run_digest,
+                    dependent_digest=run_dependent_digest,
+                )
+            )
+
+            job_cutoff = cutoff_days(effective_policy.terminal_job_days)
+            job_count = job_protected = job_dependents = 0
+            job_digest = job_dependent_digest = empty_digest
+            if job_cutoff is not None:
+                job_params = (workspace_id, job_cutoff.isoformat(), *terminal)
+                job_count = count(
+                    """SELECT COUNT(*) AS count FROM jobs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND status IN (?, ?, ?) AND pinned = 0""",
+                    job_params,
+                )
+                job_protected = count(
+                    """SELECT COUNT(*) AS count FROM jobs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND (status NOT IN (?, ?, ?) OR pinned != 0)""",
+                    job_params,
+                )
+                child_params = (workspace_id, job_cutoff.isoformat(), *terminal)
+                dependency_digests: list[str] = []
+                job_dependents += count(
+                    """SELECT COUNT(*) AS count FROM events
+                       WHERE workspace_id = ? AND timestamp >= ? AND job_id IN (
+                           SELECT id FROM jobs WHERE workspace_id = ? AND updated_at < ?
+                             AND status IN (?, ?, ?) AND pinned = 0
+                       )""",
+                    (workspace_id, event_cutoff.isoformat(), *child_params),
+                )
+                dependency_digests.append(
+                    selection_digest(
+                        """SELECT event_id AS record_id FROM events
+                           WHERE workspace_id = ? AND timestamp >= ? AND job_id IN (
+                               SELECT id FROM jobs WHERE workspace_id = ? AND updated_at < ?
+                                 AND status IN (?, ?, ?) AND pinned = 0
+                           )""",
+                        (workspace_id, event_cutoff.isoformat(), *child_params),
+                        prefix="job-event",
+                    )
+                )
+                for table in ("job_checkpoints", "ingest_segments"):
+                    job_dependents += count(
+                        f"""SELECT COUNT(*) AS count FROM {table}
+                            WHERE job_id IN (
+                                SELECT id FROM jobs WHERE workspace_id = ? AND updated_at < ?
+                                  AND status IN (?, ?, ?) AND pinned = 0
+                            )""",  # noqa: S608
+                        child_params,
+                    )
+                    dependency_digests.append(
+                        selection_digest(
+                            f"""SELECT rowid AS record_id FROM {table}
+                                WHERE job_id IN (
+                                    SELECT id FROM jobs
+                                    WHERE workspace_id = ? AND updated_at < ?
+                                      AND status IN (?, ?, ?) AND pinned = 0
+                                )""",  # noqa: S608
+                            child_params,
+                            prefix=table,
+                        )
+                    )
+                job_digest = selection_digest(
+                    """SELECT id AS record_id FROM jobs
+                       WHERE workspace_id = ? AND updated_at < ?
+                         AND status IN (?, ?, ?) AND pinned = 0""",
+                    job_params,
+                    prefix="job",
+                )
+                job_dependent_digest = _retention_selection_digest(dependency_digests)
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.JOBS,
+                    cutoff_at=job_cutoff,
+                    eligible_records=job_count,
+                    protected_records=job_protected,
+                    dependent_records=job_dependents,
+                    selection_digest=job_digest,
+                    dependent_digest=job_dependent_digest,
+                )
+            )
+
+            idempotency_cutoff = cutoff_days(effective_policy.idempotency_days)
+            idempotency_count = idempotency_protected = 0
+            idempotency_digest = empty_digest
+            if idempotency_cutoff is not None:
+                prefix = f"job:{workspace_id}:"
+                idempotency_params = (
+                    idempotency_cutoff.isoformat(),
+                    prefix,
+                    prefix,
+                    *terminal,
+                )
+                idempotency_count = count(
+                    """SELECT COUNT(*) AS count FROM idempotency_keys
+                       WHERE created_at < ? AND substr(scope, 1, length(?)) = ?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM jobs WHERE jobs.id = idempotency_keys.result_id
+                               AND (jobs.status NOT IN (?, ?, ?) OR jobs.pinned != 0)
+                         )""",
+                    idempotency_params,
+                )
+                idempotency_protected = count(
+                    """SELECT COUNT(*) AS count FROM idempotency_keys
+                       WHERE created_at < ? AND substr(scope, 1, length(?)) = ?
+                         AND EXISTS (
+                             SELECT 1 FROM jobs WHERE jobs.id = idempotency_keys.result_id
+                               AND (jobs.status NOT IN (?, ?, ?) OR jobs.pinned != 0)
+                         )""",
+                    idempotency_params,
+                )
+                idempotency_digest = selection_digest(
+                    """SELECT scope || char(0) || key AS record_id FROM idempotency_keys
+                       WHERE created_at < ? AND substr(scope, 1, length(?)) = ?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM jobs WHERE jobs.id = idempotency_keys.result_id
+                               AND (jobs.status NOT IN (?, ?, ?) OR jobs.pinned != 0)
+                         )""",
+                    idempotency_params,
+                    prefix="idempotency",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.IDEMPOTENCY_KEYS,
+                    cutoff_at=idempotency_cutoff,
+                    eligible_records=idempotency_count,
+                    protected_records=idempotency_protected,
+                    selection_digest=idempotency_digest,
+                )
+            )
+
+            evaluation_count = 0
+            evaluation_digest = empty_digest
+            if effective_policy.evaluation_limit is not None:
+                evaluation_params = (
+                    workspace_id,
+                    workspace_id,
+                    effective_policy.evaluation_limit,
+                )
+                evaluation_count = count(
+                    """SELECT COUNT(*) AS count FROM evaluations
+                       WHERE workspace_id = ? AND id NOT IN (
+                           SELECT id FROM evaluations WHERE workspace_id = ?
+                           ORDER BY created_at DESC, id DESC LIMIT ?
+                       )""",
+                    evaluation_params,
+                )
+                evaluation_digest = selection_digest(
+                    """SELECT id AS record_id FROM evaluations
+                       WHERE workspace_id = ? AND id NOT IN (
+                           SELECT id FROM evaluations WHERE workspace_id = ?
+                           ORDER BY created_at DESC, id DESC LIMIT ?
+                       )""",
+                    evaluation_params,
+                    prefix="evaluation",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.EVALUATIONS,
+                    eligible_records=evaluation_count,
+                    selection_digest=evaluation_digest,
+                )
+            )
+
+            preflight_cutoff = (
+                reference - timedelta(hours=effective_policy.import_preflight_hours)
+                if effective_policy.import_preflight_hours is not None
+                else None
+            )
+            preflight_count = 0
+            preflight_digest = empty_digest
+            if preflight_cutoff is not None:
+                preflight_params = (workspace_id, preflight_cutoff.isoformat())
+                preflight_count = count(
+                    """SELECT COUNT(*) AS count FROM import_preflights
+                       WHERE workspace_id = ? AND created_at < ?""",
+                    preflight_params,
+                )
+                preflight_digest = selection_digest(
+                    """SELECT id AS record_id FROM import_preflights
+                       WHERE workspace_id = ? AND created_at < ?""",
+                    preflight_params,
+                    prefix="import-preflight",
+                )
+            actions.append(
+                RetentionCleanupAction(
+                    category=RetentionCategory.IMPORT_PREFLIGHTS,
+                    cutoff_at=preflight_cutoff,
+                    eligible_records=preflight_count,
+                    selection_digest=preflight_digest,
+                )
+            )
+
+        unsigned = RetentionCleanupPlan(
+            plan_id=f"sha256:{'0' * 24}",
+            workspace_id=workspace_id,
+            generated_at=reference,
+            expires_at=reference + RETENTION_PLAN_TTL,
+            policy=effective_policy,
+            actions=actions,
+            eligible_records=sum(action.eligible_records for action in actions),
+        )
+        return unsigned.model_copy(update={"plan_id": _retention_plan_id(unsigned)})
+
+    def purge_retention_cleanup(
+        self,
+        plan: RetentionCleanupPlan,
+        *,
+        confirmation: str,
+        now: datetime | None = None,
+    ) -> RetentionPurgeResult:
+        value = RetentionCleanupPlan.model_validate(plan)
+        reference = _retention_now(now)
+        if confirmation != RETENTION_CONFIRMATION:
+            raise ValueError(f"confirmation must equal {RETENTION_CONFIRMATION}")
+        if not value.dry_run or _retention_plan_id(value) != value.plan_id:
+            raise ConflictError("Retention cleanup plan is invalid; create a new plan")
+        if reference >= value.expires_at or reference < value.generated_at - timedelta(minutes=1):
+            raise ConflictError("Retention cleanup plan has expired; create a new plan")
+
+        actions = {action.category: action for action in value.actions}
+        if set(actions) != set(RetentionCategory):
+            raise ConflictError("Retention cleanup plan is incomplete; create a new plan")
+
+        def cutoff(category: RetentionCategory) -> str | None:
+            timestamp = actions[category].cutoff_at
+            return timestamp.isoformat() if timestamp is not None else None
+
+        def deleted(sql: str, params: tuple[Any, ...]) -> int:
+            cursor = self._db.execute(sql, params)
+            return max(0, int(cursor.rowcount))
+
+        terminal = TERMINAL_RETENTION_STATUSES
+        purged = {category: 0 for category in RetentionCategory}
+        dependent_records = 0
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                current_policy = self.get_retention_policy(value.workspace_id)
+                if current_policy != value.policy:
+                    raise ConflictError(
+                        "Retention policy changed after planning; create a new plan"
+                    )
+                refreshed = self.plan_retention_cleanup(
+                    value.workspace_id,
+                    value.policy,
+                    now=value.generated_at,
+                )
+                if refreshed.plan_id != value.plan_id:
+                    raise ConflictError("Retention data changed after planning; create a new plan")
+
+                answer_cutoff = cutoff(RetentionCategory.ANSWER_CACHE)
+                if answer_cutoff is not None:
+                    purged[RetentionCategory.ANSWER_CACHE] = deleted(
+                        """DELETE FROM answer_cache
+                           WHERE workspace_id = ? AND last_used_at < ?""",
+                        (value.workspace_id, answer_cutoff),
+                    )
+
+                event_cutoff = cutoff(RetentionCategory.EVENTS)
+                run_cutoff = cutoff(RetentionCategory.RUNS)
+                if run_cutoff is not None:
+                    run_params = (value.workspace_id, run_cutoff, *terminal)
+                    dependent_records += deleted(
+                        """DELETE FROM events
+                           WHERE workspace_id = ? AND timestamp >= ? AND run_id IN (
+                               SELECT id FROM runs WHERE workspace_id = ? AND updated_at < ?
+                                 AND status IN (?, ?, ?) AND pinned = 0
+                           )""",
+                        (value.workspace_id, event_cutoff, *run_params),
+                    )
+                    purged[RetentionCategory.RUNS] = deleted(
+                        """DELETE FROM runs WHERE workspace_id = ? AND updated_at < ?
+                           AND status IN (?, ?, ?) AND pinned = 0""",
+                        run_params,
+                    )
+
+                job_cutoff = cutoff(RetentionCategory.JOBS)
+                if job_cutoff is not None:
+                    job_params = (value.workspace_id, job_cutoff, *terminal)
+                    dependent_records += deleted(
+                        """DELETE FROM events
+                           WHERE workspace_id = ? AND timestamp >= ? AND job_id IN (
+                               SELECT id FROM jobs WHERE workspace_id = ? AND updated_at < ?
+                                 AND status IN (?, ?, ?) AND pinned = 0
+                           )""",
+                        (value.workspace_id, event_cutoff, *job_params),
+                    )
+                    for table in ("job_checkpoints", "ingest_segments"):
+                        dependent_records += deleted(
+                            f"""DELETE FROM {table} WHERE job_id IN (
+                                    SELECT id FROM jobs
+                                    WHERE workspace_id = ? AND updated_at < ?
+                                      AND status IN (?, ?, ?) AND pinned = 0
+                                )""",  # noqa: S608
+                            job_params,
+                        )
+                    purged[RetentionCategory.JOBS] = deleted(
+                        """DELETE FROM jobs WHERE workspace_id = ? AND updated_at < ?
+                           AND status IN (?, ?, ?) AND pinned = 0""",
+                        job_params,
+                    )
+
+                idempotency_cutoff = cutoff(RetentionCategory.IDEMPOTENCY_KEYS)
+                if idempotency_cutoff is not None:
+                    prefix = f"job:{value.workspace_id}:"
+                    purged[RetentionCategory.IDEMPOTENCY_KEYS] = deleted(
+                        """DELETE FROM idempotency_keys
+                           WHERE created_at < ? AND substr(scope, 1, length(?)) = ?
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM jobs WHERE jobs.id = idempotency_keys.result_id
+                                   AND (jobs.status NOT IN (?, ?, ?) OR jobs.pinned != 0)
+                             )""",
+                        (idempotency_cutoff, prefix, prefix, *terminal),
+                    )
+
+                if event_cutoff is not None:
+                    purged[RetentionCategory.EVENTS] = deleted(
+                        "DELETE FROM events WHERE workspace_id = ? AND timestamp < ?",
+                        (value.workspace_id, event_cutoff),
+                    )
+
+                if value.policy.evaluation_limit is not None:
+                    purged[RetentionCategory.EVALUATIONS] = deleted(
+                        """DELETE FROM evaluations WHERE workspace_id = ? AND id NOT IN (
+                               SELECT id FROM evaluations WHERE workspace_id = ?
+                               ORDER BY created_at DESC, id DESC LIMIT ?
+                           )""",
+                        (
+                            value.workspace_id,
+                            value.workspace_id,
+                            value.policy.evaluation_limit,
+                        ),
+                    )
+
+                preflight_cutoff = cutoff(RetentionCategory.IMPORT_PREFLIGHTS)
+                if preflight_cutoff is not None:
+                    purged[RetentionCategory.IMPORT_PREFLIGHTS] = deleted(
+                        """DELETE FROM import_preflights
+                           WHERE workspace_id = ? AND created_at < ?""",
+                        (value.workspace_id, preflight_cutoff),
+                    )
+
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+        return RetentionPurgeResult(
+            plan_id=value.plan_id,
+            workspace_id=value.workspace_id,
+            completed_at=reference,
+            purged_records=purged,
+            dependent_records=dependent_records,
+        )
 
     def remove_workspace(self, workspace_id: str) -> None:
         with self._lock:
@@ -568,6 +1385,9 @@ class StateStore:
                 self._db.execute(
                     "DELETE FROM document_index WHERE workspace_id = ?", (workspace_id,)
                 )
+                self._db.execute(
+                    "DELETE FROM hidden_documents WHERE workspace_id = ?", (workspace_id,)
+                )
                 self._db.execute("DELETE FROM evaluations WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute(
                     "DELETE FROM chunk_manifest WHERE workspace_id = ?", (workspace_id,)
@@ -578,6 +1398,9 @@ class StateStore:
                 self._db.execute("DELETE FROM book_records WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute(
                     "DELETE FROM book_term_router WHERE workspace_id = ?", (workspace_id,)
+                )
+                self._db.execute(
+                    "DELETE FROM book_media_router WHERE workspace_id = ?", (workspace_id,)
                 )
                 self._db.execute(
                     "DELETE FROM book_structures WHERE workspace_id = ?", (workspace_id,)
@@ -691,6 +1514,7 @@ class StateStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_event_id=row["last_event_id"],
+            pinned=bool(row["pinned"]),
         )
 
     def update_job(self, job_id: str, **changes: Any) -> JobSnapshot:
@@ -703,6 +1527,7 @@ class StateStore:
             "checkpoint",
             "last_event_id",
             "progress_detail",
+            "pinned",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -711,6 +1536,8 @@ class StateStore:
         values: list[Any] = []
         for key, value in changes.items():
             column = f"{key}_json" if key in {"result", "error", "progress_detail"} else key
+            if key == "result" and value is not None:
+                value = _compact_job_result(value)
             if key in {"result", "error", "progress_detail"} and value is not None:
                 if hasattr(value, "model_dump"):
                     value = value.model_dump(mode="json")
@@ -731,6 +1558,9 @@ class StateStore:
 
     def create_run(self, run_id: str, workspace_id: str, request: dict[str, Any]) -> RunSnapshot:
         timestamp = now_iso()
+        stored_request = dict(request)
+        for canonical_field in ("question", "session_id", "evidence_mode"):
+            stored_request.pop(canonical_field, None)
         with self._lock:
             self._db.execute(
                 """INSERT INTO runs(
@@ -744,7 +1574,7 @@ class StateStore:
                     JobStatus.QUEUED,
                     request["question"],
                     request["evidence_mode"],
-                    json.dumps(request),
+                    json.dumps(stored_request),
                     timestamp,
                     timestamp,
                 ),
@@ -754,11 +1584,17 @@ class StateStore:
     def get_run_request(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             row = self._db.execute(
-                "SELECT request_json FROM runs WHERE id = ?", (run_id,)
+                """SELECT request_json, question, session_id, evidence_mode
+                   FROM runs WHERE id = ?""",
+                (run_id,),
             ).fetchone()
         if row is None:
             raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
-        return json.loads(row["request_json"])
+        request = json.loads(row["request_json"])
+        request.setdefault("question", row["question"])
+        request.setdefault("session_id", row["session_id"])
+        request.setdefault("evidence_mode", row["evidence_mode"])
+        return request
 
     def get_run(self, run_id: str) -> RunSnapshot:
         with self._lock:
@@ -776,6 +1612,7 @@ class StateStore:
             "receipt",
             "error",
             "last_event_id",
+            "pinned",
         }
         unknown = set(changes) - allowed
         if unknown:
@@ -805,6 +1642,63 @@ class StateStore:
             if cursor.rowcount != 1:
                 raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
         return self.get_run(run_id)
+
+    def save_run_visual_evidence(self, run_id: str, response: Any) -> dict[str, Any]:
+        """Persist the versioned page/media selection independently from citations."""
+
+        from .models.media import VisualEvidenceResponse
+
+        value = (
+            response
+            if isinstance(response, VisualEvidenceResponse)
+            else VisualEvidenceResponse.model_validate(response)
+        )
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE runs SET visual_evidence_json = ?, updated_at = ? WHERE id = ?",
+                (value.model_dump_json(), now_iso(), run_id),
+            )
+        if cursor.rowcount != 1:
+            raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
+        return value.model_dump(mode="json")
+
+    def get_run_visual_evidence(self, run_id: str) -> dict[str, Any] | None:
+        from .models.media import VisualEvidenceResponse
+
+        with self._lock:
+            row = self._db.execute(
+                "SELECT visual_evidence_json FROM runs WHERE id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Run {run_id} wurde nicht gefunden")
+        if row["visual_evidence_json"] is None:
+            return None
+        value = VisualEvidenceResponse.model_validate_json(row["visual_evidence_json"])
+        return value.model_dump(mode="json")
+
+    def run_visual_evidence(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Return every live, persisted visual selection for safe blob marking.
+
+        Retention cleanup calls this only after expired Runs were removed.  A
+        malformed surviving payload deliberately raises instead of being
+        skipped: an incomplete mark set must never authorize file deletion.
+        """
+
+        from .models.media import VisualEvidenceResponse
+
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT visual_evidence_json FROM runs
+                   WHERE workspace_id = ? AND visual_evidence_json IS NOT NULL
+                   ORDER BY id""",
+                (workspace_id,),
+            ).fetchall()
+        return [
+            VisualEvidenceResponse.model_validate_json(row["visual_evidence_json"]).model_dump(
+                mode="json"
+            )
+            for row in rows
+        ]
 
     def session_turn(self, workspace_id: str, session_id: str) -> int:
         with self._lock:
@@ -871,18 +1765,77 @@ class StateStore:
         ]
         return request_hash({"documents": material})
 
+    def workspace_has_corpus(self, workspace_id: str) -> bool:
+        """Conservatively detect published, legacy, or in-flight indexed content."""
+
+        with self._lock:
+            published = self._db.execute(
+                "SELECT 1 FROM document_index WHERE workspace_id = ? LIMIT 1",
+                (workspace_id,),
+            ).fetchone()
+            staged = self._db.execute(
+                """SELECT 1 FROM ingest_segments AS s
+                   JOIN jobs AS j ON j.id = s.job_id
+                   WHERE j.workspace_id = ? LIMIT 1""",
+                (workspace_id,),
+            ).fetchone()
+            active = self._db.execute(
+                """SELECT 1 FROM jobs
+                   WHERE workspace_id = ? AND kind IN ('ingest', 'reindex')
+                     AND status IN (?, ?, ?, ?) LIMIT 1""",
+                (
+                    workspace_id,
+                    JobStatus.QUEUED,
+                    JobStatus.RUNNING,
+                    JobStatus.PAUSE_REQUESTED,
+                    JobStatus.PAUSED,
+                ),
+            ).fetchone()
+        return published is not None or staged is not None or active is not None
+
+    def workspace_index_runtime_locks(self, workspace_id: str) -> list[dict[str, str]]:
+        """Return immutable model identities recorded by published index documents."""
+
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT result_json FROM document_index WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+        locks: list[dict[str, str]] = []
+        for row in rows:
+            try:
+                value = json.loads(row["result_json"]).get("runtime_lock")
+            except (AttributeError, TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                locks.append({str(key): str(item) for key, item in value.items()})
+        return locks
+
     def cached_answer(self, cache_key: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._db.execute(
-                """SELECT answer, citations_json, claims_json, metadata_json
+                """SELECT workspace_id, last_used_at, answer, citations_json,
+                          claims_json, metadata_json
                    FROM answer_cache WHERE cache_key = ?""",
                 (cache_key,),
             ).fetchone()
             if row is not None:
-                self._db.execute(
-                    "UPDATE answer_cache SET hits = hits + 1, last_used_at = ? WHERE cache_key = ?",
-                    (now_iso(), cache_key),
-                )
+                policy = self.get_retention_policy(str(row["workspace_id"]))
+                expired = False
+                if policy.answer_cache_days is not None:
+                    cutoff = (
+                        datetime.now(UTC) - timedelta(days=policy.answer_cache_days)
+                    ).isoformat()
+                    expired = str(row["last_used_at"]) < cutoff
+                if expired:
+                    self._db.execute("DELETE FROM answer_cache WHERE cache_key = ?", (cache_key,))
+                    row = None
+                else:
+                    self._db.execute(
+                        """UPDATE answer_cache SET hits = hits + 1, last_used_at = ?
+                           WHERE cache_key = ?""",
+                        (now_iso(), cache_key),
+                    )
         if row is None:
             return None
         return {
@@ -905,8 +1858,27 @@ class StateStore:
         claims: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
         max_entries: int,
+        max_bytes: int = 128 * 1024**2,
     ) -> None:
+        if max_bytes < 1024**2:
+            raise ValueError("answer cache byte limit must be at least 1 MiB")
+        request_json = json.dumps(request, sort_keys=True)
+        citations_json = json.dumps(citations)
+        claims_json = json.dumps(claims or [])
+        metadata_json = json.dumps(metadata or {})
+        payload_bytes = sum(
+            len(value.encode("utf-8"))
+            for value in (request_json, answer, citations_json, claims_json, metadata_json)
+        )
+        if payload_bytes > max_bytes:
+            return
         timestamp = now_iso()
+        retention = self.get_retention_policy(workspace_id)
+        retention_cutoff = (
+            (datetime.now(UTC) - timedelta(days=retention.answer_cache_days)).isoformat()
+            if retention.answer_cache_days is not None
+            else None
+        )
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -926,11 +1898,11 @@ class StateStore:
                         workspace_id,
                         index_fingerprint,
                         config_fingerprint,
-                        json.dumps(request, sort_keys=True),
+                        request_json,
                         answer,
-                        json.dumps(citations),
-                        json.dumps(claims or []),
-                        json.dumps(metadata or {}),
+                        citations_json,
+                        claims_json,
+                        metadata_json,
                         timestamp,
                         timestamp,
                     ),
@@ -943,6 +1915,36 @@ class StateStore:
                        )""",
                     (workspace_id, workspace_id, max_entries),
                 )
+                if retention_cutoff is not None:
+                    self._db.execute(
+                        """DELETE FROM answer_cache
+                           WHERE workspace_id = ? AND last_used_at < ?""",
+                        (workspace_id, retention_cutoff),
+                    )
+                rows = self._db.execute(
+                    """SELECT cache_key,
+                              LENGTH(CAST(request_json AS BLOB))
+                              + LENGTH(CAST(answer AS BLOB))
+                              + LENGTH(CAST(citations_json AS BLOB))
+                              + LENGTH(CAST(claims_json AS BLOB))
+                              + LENGTH(CAST(metadata_json AS BLOB)) AS payload_bytes
+                       FROM answer_cache WHERE workspace_id = ?
+                       ORDER BY last_used_at DESC, cache_key""",
+                    (workspace_id,),
+                ).fetchall()
+                retained_bytes = 0
+                overflow: list[str] = []
+                for row in rows:
+                    row_bytes = int(row["payload_bytes"] or 0)
+                    if retained_bytes + row_bytes <= max_bytes:
+                        retained_bytes += row_bytes
+                    else:
+                        overflow.append(str(row["cache_key"]))
+                if overflow:
+                    self._db.executemany(
+                        "DELETE FROM answer_cache WHERE cache_key = ?",
+                        [(cache_key,) for cache_key in overflow],
+                    )
                 self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
@@ -978,6 +1980,7 @@ class StateStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_event_id=row["last_event_id"],
+            pinned=bool(row["pinned"]),
         )
 
     def append_event(
@@ -990,7 +1993,21 @@ class StateStore:
         job_id: str | None = None,
         run_id: str | None = None,
     ) -> DomainEvent:
+        if event_type == "job.completed" and isinstance(payload.get("documents"), list):
+            documents = payload["documents"]
+            payload = {
+                "status": "completed",
+                "document_count": len(documents),
+                "document_ids": [
+                    str(item.get("logical_document_id") or item.get("document_id"))
+                    for item in documents
+                    if isinstance(item, dict)
+                    and (item.get("logical_document_id") or item.get("document_id"))
+                ],
+            }
         with self._lock:
+            if workspace_id is not None:
+                self.compact_expired_event_payloads(workspace_id)
             row = self._db.execute(
                 """SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM events
                    WHERE (job_id = ? AND ? IS NOT NULL) OR (run_id = ? AND ? IS NOT NULL)
@@ -1036,6 +2053,54 @@ class StateStore:
             payload=payload,
         )
 
+    def compact_expired_event_payloads(
+        self,
+        workspace_id: str,
+        *,
+        now: datetime | None = None,
+        force: bool = False,
+    ) -> int:
+        """Remove duplicated content from expired SSE rows, retaining the envelope.
+
+        New minimal-retention workspaces opt into this at creation. Legacy
+        workspaces have no event cutoff and are untouched. Active Run/Job
+        streams remain replayable even if they exceed the usual window.
+        """
+
+        monotonic_now = time.monotonic()
+        if not force and monotonic_now - self._event_compaction_at.get(workspace_id, 0.0) < 900:
+            return 0
+        policy = self.get_retention_policy(workspace_id)
+        self._event_compaction_at[workspace_id] = monotonic_now
+        if policy.event_hours is None:
+            return 0
+        reference = _retention_now(now)
+        cutoff = (reference - timedelta(hours=policy.event_hours)).isoformat()
+        expired_payload = json.dumps({"retention": "content-expired"}, separators=(",", ":"))
+        active = (
+            JobStatus.QUEUED,
+            JobStatus.RUNNING,
+            JobStatus.PAUSE_REQUESTED,
+            JobStatus.PAUSED,
+        )
+        with self._lock:
+            cursor = self._db.execute(
+                """UPDATE events SET payload_json = ?
+                   WHERE workspace_id = ? AND timestamp < ? AND payload_json != ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM runs AS active_run
+                         WHERE active_run.id = events.run_id
+                           AND active_run.status IN (?, ?, ?, ?)
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM jobs AS active_job
+                         WHERE active_job.id = events.job_id
+                           AND active_job.status IN (?, ?, ?, ?)
+                     )""",
+                (expired_payload, workspace_id, cutoff, expired_payload, *active, *active),
+            )
+        return max(0, int(cursor.rowcount))
+
     def events_after(
         self,
         after_id: int,
@@ -1080,6 +2145,8 @@ class StateStore:
         )
 
     def checkpoint(self, job_id: str, name: str, data: dict[str, Any]) -> None:
+        if name.startswith(("source-result-", "source-published-", "book-")):
+            data = _compact_document_result(data)
         with self._lock:
             self._db.execute(
                 """INSERT INTO job_checkpoints VALUES (?, ?, ?, ?)
@@ -1095,6 +2162,90 @@ class StateStore:
                 (job_id, name),
             ).fetchone()
         return json.loads(row["data_json"]) if row else None
+
+    def promote_url_source_to_managed(
+        self,
+        job_id: str,
+        source_index: int,
+        *,
+        raw_reference: str,
+        opaque_reference: str,
+        managed_source: str,
+        fingerprint: str,
+    ) -> None:
+        """Drop a fetched URL from durable public job/preflight payloads.
+
+        The private managed path lives only in a recovery checkpoint.  The job
+        payload retains the opaque, content-addressed provenance reference so
+        UI/history never stores query strings or credentials after archiving.
+        """
+
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT workspace_id, payload_json FROM jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError(f"Job {job_id} wurde nicht gefunden")
+                payload = _stored_json(row["payload_json"], label=f"job {job_id} payload")
+                sources = payload.get("sources") if isinstance(payload, dict) else None
+                if not isinstance(sources, list) or not 0 <= source_index < len(sources):
+                    raise ConflictError("URL source recovery state is inconsistent")
+                current = sources[source_index]
+                if not isinstance(current, dict):
+                    raise ConflictError("URL source recovery state is inconsistent")
+                current_path = str(current.get("path") or "")
+                if current_path not in {raw_reference, opaque_reference}:
+                    raise ConflictError("URL source changed before private promotion")
+                sources[source_index] = {
+                    **current,
+                    "type": "file",
+                    "path": opaque_reference,
+                    "fingerprint": fingerprint,
+                }
+                payload["sources"] = sources
+                self._db.execute(
+                    "UPDATE jobs SET payload_json = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(payload), now_iso(), job_id),
+                )
+                self._db.execute(
+                    """INSERT INTO job_checkpoints VALUES (?, ?, ?, ?)
+                       ON CONFLICT(job_id, name) DO UPDATE SET
+                         data_json=excluded.data_json, created_at=excluded.created_at""",
+                    (
+                        job_id,
+                        f"url-source-{source_index}",
+                        json.dumps(
+                            {
+                                "managed_source": managed_source,
+                                "original_source": opaque_reference,
+                                "fingerprint": fingerprint,
+                            }
+                        ),
+                        now_iso(),
+                    ),
+                )
+                preflights = self._db.execute(
+                    "SELECT id, payload_json FROM import_preflights WHERE workspace_id = ?",
+                    (row["workspace_id"],),
+                ).fetchall()
+                for preflight in preflights:
+                    value = _stored_json(
+                        preflight["payload_json"],
+                        label=f"import preflight {preflight['id']}",
+                    )
+                    redacted = _replace_exact_string(value, raw_reference, opaque_reference)
+                    if redacted != value:
+                        self._db.execute(
+                            "UPDATE import_preflights SET payload_json = ? WHERE id = ?",
+                            (json.dumps(redacted), preflight["id"]),
+                        )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
 
     def record_segment(self, job_id: str, source_index: int, segment: dict[str, Any]) -> None:
         with self._lock:
@@ -1181,11 +2332,18 @@ class StateStore:
         }
 
     def upsert_document(
-        self, workspace_id: str, source_path: str, fingerprint: str, result: dict[str, Any]
+        self,
+        workspace_id: str,
+        source_path: str,
+        fingerprint: str,
+        result: dict[str, Any],
+        *,
+        publication_checkpoint: tuple[str, int] | None = None,
     ) -> None:
         logical_id = str(result.get("logical_document_id") or result.get("document_id"))
         generation_id = str(result.get("generation_id", ""))
         knowledge_snapshot = result.get("book_knowledge_snapshot")
+        compact_result = _compact_document_result(result)
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -1205,7 +2363,7 @@ class StateStore:
                         source_path,
                         fingerprint,
                         generation_id,
-                        json.dumps(result),
+                        json.dumps(compact_result),
                         now_iso(),
                     ),
                 )
@@ -1318,6 +2476,26 @@ class StateStore:
                     self._write_book_knowledge_snapshot(
                         workspace_id, knowledge_snapshot, transactional=False
                     )
+                if publication_checkpoint is not None:
+                    job_id, source_index = publication_checkpoint
+                    self._db.execute(
+                        """INSERT INTO job_checkpoints VALUES (?, ?, ?, ?)
+                           ON CONFLICT(job_id, name) DO UPDATE SET
+                             data_json=excluded.data_json,
+                             created_at=excluded.created_at""",
+                        (
+                            job_id,
+                            f"source-published-{source_index}",
+                            json.dumps(
+                                {
+                                    "logical_document_id": logical_id,
+                                    "generation_id": generation_id,
+                                    "fingerprint": fingerprint,
+                                }
+                            ),
+                            now_iso(),
+                        ),
+                    )
                 self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
                 self._db.execute("COMMIT")
             except Exception:
@@ -1373,6 +2551,441 @@ class StateStore:
             if record["logical_document_id"] == logical_document_id:
                 return record
         raise NotFoundError(f"Document {logical_document_id} was not found")
+
+    def document_purge_state(self, workspace_id: str, logical_document_id: str) -> dict[str, Any]:
+        """Return the exact live identity and blockers for a destructive preflight."""
+
+        with self._lock:
+            record = self._db.execute(
+                """SELECT * FROM book_records
+                   WHERE workspace_id = ? AND logical_document_id = ?""",
+                (workspace_id, logical_document_id),
+            ).fetchone()
+            if record is None:
+                raise NotFoundError(f"Document {logical_document_id} was not found")
+            segments = self._db.execute(
+                """SELECT segment_document_id FROM document_segments
+                   WHERE workspace_id = ? AND logical_document_id = ?
+                   ORDER BY page_start, segment_document_id""",
+                (workspace_id, logical_document_id),
+            ).fetchall()
+            media = self._db.execute(
+                """SELECT media_id, pixel_sha256 FROM book_media_assets
+                   WHERE workspace_id = ? AND logical_document_id = ?""",
+                (workspace_id, logical_document_id),
+            ).fetchall()
+            chunks = self._db.execute(
+                """SELECT chunk_id, evidence_id FROM chunk_manifest
+                   WHERE workspace_id = ? AND logical_document_id = ?""",
+                (workspace_id, logical_document_id),
+            ).fetchall()
+            pinned_rows = self._db.execute(
+                """SELECT * FROM runs
+                   WHERE workspace_id = ? AND pinned = 1""",
+                (workspace_id,),
+            ).fetchall()
+        segment_ids = [str(item["segment_document_id"]) for item in segments]
+        reference_ids = {
+            logical_document_id,
+            str(record["fingerprint"] or ""),
+            str(record["original_source"] or ""),
+            str(record["managed_source"] or ""),
+            *segment_ids,
+            *(str(item["chunk_id"] or "") for item in chunks),
+            *(str(item["evidence_id"] or "") for item in chunks),
+            *(str(item["media_id"] or "") for item in media),
+        }
+        reference_ids.discard("")
+        pinned_run_ids: list[str] = []
+        for run in pinned_rows:
+            try:
+                run_material = {
+                    "question": str(run["question"] or ""),
+                    "answer": str(run["answer"] or ""),
+                    "citations": json.loads(run["citations_json"] or "[]"),
+                    "claims": json.loads(run["claims_json"] or "[]"),
+                    "receipt": json.loads(run["receipt_json"] or "null"),
+                    "request": json.loads(run["request_json"] or "{}"),
+                    "visual_evidence": json.loads(run["visual_evidence_json"] or "null"),
+                    "error": json.loads(run["error_json"] or "null"),
+                }
+            except (TypeError, ValueError):
+                # Invalid pinned provenance must block deletion rather than be
+                # silently treated as unrelated.
+                pinned_run_ids.append(str(run["id"]))
+                continue
+            if _contains_document_reference(run_material, reference_ids):
+                pinned_run_ids.append(str(run["id"]))
+        return {
+            **dict(record),
+            "metadata": json.loads(record["metadata_json"] or "{}"),
+            "quality": json.loads(record["quality_json"] or "{}"),
+            "segment_document_ids": segment_ids,
+            "media_assets": len(media),
+            "media_digests": sorted(
+                {str(item["pixel_sha256"]) for item in media if item["pixel_sha256"]}
+            ),
+            "reference_ids": sorted(reference_ids),
+            "pinned_run_ids": sorted(pinned_run_ids),
+        }
+
+    def purge_document_state(
+        self,
+        workspace_id: str,
+        logical_document_id: str,
+        *,
+        expected_generation_id: str,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        """Delete one document's derived state behind exact generation pins."""
+
+        state = self.document_purge_state(workspace_id, logical_document_id)
+        if (
+            state["generation_id"] != expected_generation_id
+            or state["fingerprint"] != expected_fingerprint
+        ):
+            raise ConflictError("Document changed after purge preflight")
+        if state["pinned_run_ids"]:
+            raise ConflictError(
+                "Pinned runs still reference this document",
+                details={"run_ids": state["pinned_run_ids"]},
+            )
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._db.execute(
+                    """SELECT generation_id, fingerprint FROM book_records
+                       WHERE workspace_id = ? AND logical_document_id = ?""",
+                    (workspace_id, logical_document_id),
+                ).fetchone()
+                if current is None:
+                    raise NotFoundError(f"Document {logical_document_id} was not found")
+                if (
+                    current["generation_id"] != expected_generation_id
+                    or current["fingerprint"] != expected_fingerprint
+                ):
+                    raise ConflictError("Document changed after purge preflight")
+                references = set(state["reference_ids"])
+                job_rows = self._db.execute(
+                    "SELECT * FROM jobs WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchall()
+                checkpoint_rows = self._db.execute(
+                    """SELECT c.* FROM job_checkpoints AS c
+                       JOIN jobs AS j ON j.id = c.job_id
+                       WHERE j.workspace_id = ?""",
+                    (workspace_id,),
+                ).fetchall()
+                parsed_jobs: list[tuple[sqlite3.Row, Any, Any, Any, Any]] = []
+                parsed_checkpoints: list[tuple[sqlite3.Row, Any]] = []
+                for row in job_rows:
+                    payload = _stored_json(row["payload_json"], label=f"job {row['id']} payload")
+                    result = _stored_json(row["result_json"], label=f"job {row['id']} result")
+                    error = _stored_json(row["error_json"], label=f"job {row['id']} error")
+                    progress = _stored_json(
+                        row["progress_detail_json"],
+                        label=f"job {row['id']} progress detail",
+                    )
+                    parsed_jobs.append((row, payload, result, error, progress))
+                for row in checkpoint_rows:
+                    data = _stored_json(row["data_json"], label=f"job {row['job_id']} checkpoint")
+                    parsed_checkpoints.append((row, data))
+                # Learn old generations' source/segment IDs from records that
+                # still carry the stable logical ID before removing them.
+                while any(
+                    _grow_document_references(value, references)
+                    for _row, payload, result, error, progress in parsed_jobs
+                    for value in (payload, result, error, progress)
+                ) or any(
+                    _grow_document_references(data, references) for _row, data in parsed_checkpoints
+                ):
+                    pass
+
+                target_indexes: dict[str, set[int]] = {}
+                affected_jobs: set[str] = set()
+                for row, payload, result, error, progress in parsed_jobs:
+                    job_id = str(row["id"])
+                    sources = payload.get("sources", []) if isinstance(payload, dict) else []
+                    documents = result.get("documents", []) if isinstance(result, dict) else []
+                    indexes = {
+                        index
+                        for index, value in enumerate(sources)
+                        if _contains_document_reference(value, references)
+                    } | {
+                        index
+                        for index, value in enumerate(documents)
+                        if _contains_document_reference(value, references)
+                    }
+                    target_indexes[job_id] = indexes
+                    if isinstance(payload, dict) and isinstance(sources, list):
+                        payload = {
+                            **payload,
+                            "sources": [
+                                value for index, value in enumerate(sources) if index not in indexes
+                            ],
+                        }
+                    if isinstance(result, dict) and isinstance(documents, list):
+                        result = {
+                            **result,
+                            "documents": [
+                                value
+                                for index, value in enumerate(documents)
+                                if index not in indexes
+                            ],
+                        }
+                    payload = _scrub_document_references(payload, references)
+                    result = _scrub_document_references(result, references)
+                    if indexes:
+                        # Provider errors/progress may echo arbitrary source
+                        # text without stable IDs.  Once this job is known to
+                        # contain the purged source, discard those transient
+                        # diagnostics instead of attempting partial redaction.
+                        error = None
+                        progress = None
+                        checkpoint = "document-purged"
+                    else:
+                        error = _scrub_document_references(error, references)
+                        progress = _scrub_document_references(progress, references)
+                        checkpoint = _scrub_document_references(row["checkpoint"], references)
+                    if (
+                        indexes
+                        or payload is _PURGED_VALUE
+                        or result is _PURGED_VALUE
+                        or error is _PURGED_VALUE
+                        or progress is _PURGED_VALUE
+                    ):
+                        affected_jobs.add(job_id)
+                    self._db.execute(
+                        """UPDATE jobs SET payload_json = ?, result_json = ?, error_json = ?,
+                           progress_detail_json = ?, checkpoint = ? WHERE id = ?""",
+                        (
+                            json.dumps({} if payload is _PURGED_VALUE else payload),
+                            (
+                                None
+                                if result is None
+                                else json.dumps({} if result is _PURGED_VALUE else result)
+                            ),
+                            (
+                                None
+                                if error is None
+                                else json.dumps({} if error is _PURGED_VALUE else error)
+                            ),
+                            (
+                                None
+                                if progress is None
+                                else json.dumps({} if progress is _PURGED_VALUE else progress)
+                            ),
+                            "document-purged" if checkpoint is _PURGED_VALUE else checkpoint,
+                            job_id,
+                        ),
+                    )
+
+                for row, data in parsed_checkpoints:
+                    job_id = str(row["job_id"])
+                    match = re.search(r"(?:source|book)(?:-[a-z]+)?-(\d+)", str(row["name"]))
+                    indexed_target = bool(
+                        match and int(match.group(1)) in target_indexes.get(job_id, set())
+                    )
+                    cleaned = _scrub_document_references(data, references)
+                    if indexed_target or cleaned is _PURGED_VALUE or cleaned in ({}, []):
+                        self._db.execute(
+                            "DELETE FROM job_checkpoints WHERE job_id = ? AND name = ?",
+                            (job_id, row["name"]),
+                        )
+                    else:
+                        self._db.execute(
+                            """UPDATE job_checkpoints SET data_json = ?
+                               WHERE job_id = ? AND name = ?""",
+                            (json.dumps(cleaned), job_id, row["name"]),
+                        )
+                for job_id, indexes in target_indexes.items():
+                    for source_index in indexes:
+                        self._db.execute(
+                            "DELETE FROM ingest_segments WHERE job_id = ? AND source_index = ?",
+                            (job_id, source_index),
+                        )
+                if affected_jobs:
+                    placeholders = ", ".join("?" for _ in affected_jobs)
+                    self._db.execute(
+                        f"DELETE FROM idempotency_keys WHERE result_id IN ({placeholders})",  # noqa: S608
+                        tuple(sorted(affected_jobs)),
+                    )
+
+                target_run_ids: list[str] = []
+                run_rows = self._db.execute(
+                    "SELECT * FROM runs WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchall()
+                for row in run_rows:
+                    material = {
+                        "question": row["question"],
+                        "answer": row["answer"],
+                        "citations": _stored_json(
+                            row["citations_json"], label=f"run {row['id']} citations"
+                        ),
+                        "claims": _stored_json(row["claims_json"], label=f"run {row['id']} claims"),
+                        "request": _stored_json(
+                            row["request_json"], label=f"run {row['id']} request"
+                        ),
+                        "receipt": _stored_json(
+                            row["receipt_json"], label=f"run {row['id']} receipt"
+                        ),
+                        "error": _stored_json(row["error_json"], label=f"run {row['id']} error"),
+                        "visual": _stored_json(
+                            row["visual_evidence_json"], label=f"run {row['id']} visual evidence"
+                        ),
+                    }
+                    if _contains_document_reference(material, references):
+                        if row["pinned"]:
+                            raise ConflictError(
+                                "Pinned runs still reference this document",
+                                details={"run_ids": [str(row["id"])]},
+                            )
+                        target_run_ids.append(str(row["id"]))
+                for run_id in target_run_ids:
+                    self._db.execute("DELETE FROM events WHERE run_id = ?", (run_id,))
+                    self._db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+
+                event_rows = self._db.execute(
+                    """SELECT event_id, payload_json, correlation_id FROM events
+                       WHERE workspace_id = ?""",
+                    (workspace_id,),
+                ).fetchall()
+                for row in event_rows:
+                    payload = _stored_json(
+                        row["payload_json"], label=f"event {row['event_id']} payload"
+                    )
+                    cleaned = _scrub_document_references(payload, references)
+                    correlation = _scrub_document_references(row["correlation_id"], references)
+                    self._db.execute(
+                        "UPDATE events SET payload_json = ?, correlation_id = ? WHERE event_id = ?",
+                        (
+                            json.dumps(
+                                {"retention": "document-purged"}
+                                if cleaned is _PURGED_VALUE
+                                else cleaned
+                            ),
+                            correlation,
+                            row["event_id"],
+                        ),
+                    )
+                preflight_rows = self._db.execute(
+                    "SELECT id, payload_json FROM import_preflights WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchall()
+                for row in preflight_rows:
+                    payload = _stored_json(
+                        row["payload_json"], label=f"import preflight {row['id']}"
+                    )
+                    cleaned = _scrub_document_references(payload, references)
+                    if cleaned is _PURGED_VALUE or cleaned in ({}, []):
+                        self._db.execute("DELETE FROM import_preflights WHERE id = ?", (row["id"],))
+                    elif cleaned != payload:
+                        self._db.execute(
+                            "UPDATE import_preflights SET payload_json = ? WHERE id = ?",
+                            (json.dumps(cleaned), row["id"]),
+                        )
+                parameters = (workspace_id, logical_document_id)
+                for table in ("book_term_router", "book_media_router"):
+                    self._db.execute(
+                        f"DELETE FROM {table} WHERE workspace_id = ? "  # noqa: S608
+                        "AND logical_document_id = ?",
+                        parameters,
+                    )
+                for table in (
+                    "book_media_links",
+                    "book_media_assets",
+                    "book_graph_edges",
+                    "book_term_targets",
+                    "book_term_aliases",
+                    "book_terms",
+                    "book_knowledge_snapshots",
+                    "book_structure_nodes",
+                    "book_structures",
+                    "chunk_manifest",
+                    "document_segments",
+                    "document_index",
+                    "book_records",
+                    "hidden_documents",
+                ):
+                    self._db.execute(
+                        f"DELETE FROM {table} WHERE workspace_id = ? "  # noqa: S608
+                        "AND logical_document_id = ?",
+                        parameters,
+                    )
+                # These payloads can indirectly retain the purged evidence and
+                # are cheap, derived workspace state.
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute("DELETE FROM evaluations WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute(
+                    "UPDATE runs SET visual_evidence_json = NULL WHERE workspace_id = ?",
+                    (workspace_id,),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+        return state
+
+    def replace_hidden_documents(self, workspace_id: str, document_ids: set[str]) -> None:
+        """Publish the fail-closed logical deletion set used by every query filter."""
+
+        self.get_workspace(workspace_id)
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "DELETE FROM hidden_documents WHERE workspace_id = ?",
+                    (workspace_id,),
+                )
+                timestamp = now_iso()
+                self._db.executemany(
+                    "INSERT INTO hidden_documents VALUES (?, ?, ?)",
+                    (
+                        (workspace_id, document_id, timestamp)
+                        for document_id in sorted(document_ids)
+                    ),
+                )
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    def hidden_document_ids(self, workspace_id: str) -> set[str]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT logical_document_id FROM hidden_documents WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+        return {str(row["logical_document_id"]) for row in rows}
+
+    def hidden_document_rebuilt(
+        self,
+        workspace_id: str,
+        logical_document_id: str,
+        generation_id: str,
+    ) -> bool:
+        """Return true only when a ready generation completed after hiding."""
+
+        with self._lock:
+            row = self._db.execute(
+                """SELECT h.hidden_at, g.completed_at, g.status
+                   FROM hidden_documents AS h
+                   JOIN workspace_index_generations AS g
+                     ON g.workspace_id = h.workspace_id
+                    AND g.generation_id = ?
+                   WHERE h.workspace_id = ? AND h.logical_document_id = ?""",
+                (generation_id, workspace_id, logical_document_id),
+            ).fetchone()
+        return bool(
+            row
+            and row["status"] == "ready"
+            and row["completed_at"]
+            and str(row["completed_at"]) > str(row["hidden_at"])
+        )
 
     def begin_index_generation(
         self,
@@ -1497,12 +3110,111 @@ class StateStore:
                     "DELETE FROM book_term_router WHERE workspace_id = ?", (workspace_id,)
                 )
                 self._db.execute(
+                    "DELETE FROM book_media_router WHERE workspace_id = ?", (workspace_id,)
+                )
+                self._db.execute(
                     "DELETE FROM book_structures WHERE workspace_id = ?", (workspace_id,)
                 )
                 if not preserve_books:
                     self._db.execute(
                         "DELETE FROM book_records WHERE workspace_id = ?", (workspace_id,)
                     )
+                self._db.execute("COMMIT")
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
+
+    _WORKSPACE_INDEX_SNAPSHOT_TABLES = (
+        "workspace_index_generations",
+        "document_index",
+        "book_records",
+        "hidden_documents",
+        "document_segments",
+        "chunk_manifest",
+        "book_structures",
+        "book_structure_nodes",
+        "book_terms",
+        "book_term_aliases",
+        "book_term_targets",
+        "book_graph_edges",
+        "book_term_router",
+        "book_media_assets",
+        "book_media_links",
+        "book_media_router",
+        "book_knowledge_snapshots",
+    )
+
+    def export_workspace_index_snapshot(self, workspace_id: str) -> dict[str, Any]:
+        """Export only one workspace's generation catalogue for file backups."""
+
+        self.get_workspace(workspace_id)
+        tables: dict[str, list[dict[str, Any]]] = {}
+        with self._lock:
+            for table in self._WORKSPACE_INDEX_SNAPSHOT_TABLES:
+                rows = self._db.execute(
+                    f"SELECT * FROM {table} WHERE workspace_id = ?",  # noqa: S608
+                    (workspace_id,),
+                ).fetchall()
+                tables[table] = [dict(row) for row in rows]
+        return {
+            "schema_version": 1,
+            "workspace_id": workspace_id,
+            "tables": tables,
+        }
+
+    def restore_workspace_index_snapshot(self, workspace_id: str, snapshot: dict[str, Any]) -> None:
+        """Atomically restore the catalogue paired with a workspace file backup."""
+
+        if snapshot.get("schema_version") != 1 or snapshot.get("workspace_id") != workspace_id:
+            raise ConflictError("Backup index-state identity does not match the workspace")
+        tables = snapshot.get("tables")
+        if not isinstance(tables, dict) or set(tables) != set(
+            self._WORKSPACE_INDEX_SNAPSHOT_TABLES
+        ):
+            raise ConflictError("Backup index-state schema is incomplete")
+        normalized: dict[str, list[dict[str, Any]]] = {}
+        for table in self._WORKSPACE_INDEX_SNAPSHOT_TABLES:
+            rows = tables.get(table)
+            if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+                raise ConflictError("Backup index-state rows are invalid")
+            if any(str(row.get("workspace_id") or "") != workspace_id for row in rows):
+                raise ConflictError("Backup index-state contains another workspace")
+            normalized[table] = rows
+
+        delete_order = tuple(reversed(self._WORKSPACE_INDEX_SNAPSHOT_TABLES))
+        with self._lock:
+            allowed_columns = {
+                table: {
+                    str(row["name"])
+                    for row in self._db.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                for table in self._WORKSPACE_INDEX_SNAPSHOT_TABLES
+            }
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                for table in delete_order:
+                    self._db.execute(
+                        f"DELETE FROM {table} WHERE workspace_id = ?",  # noqa: S608
+                        (workspace_id,),
+                    )
+                for table in self._WORKSPACE_INDEX_SNAPSHOT_TABLES:
+                    for row in normalized[table]:
+                        columns = list(row)
+                        if not columns or not set(columns) <= allowed_columns[table]:
+                            raise ConflictError("Backup index-state columns are invalid")
+                        placeholders = ",".join("?" for _ in columns)
+                        names = ",".join(columns)
+                        self._db.execute(
+                            f"INSERT INTO {table} ({names}) VALUES ({placeholders})",  # noqa: S608
+                            [row[name] for name in columns],
+                        )
+                self._db.execute("DELETE FROM answer_cache WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute("DELETE FROM evaluations WHERE workspace_id = ?", (workspace_id,))
+                self._db.execute(
+                    "UPDATE runs SET visual_evidence_json = NULL WHERE workspace_id = ?",
+                    (workspace_id,),
+                )
                 self._db.execute("COMMIT")
             except Exception:
                 if self._db.in_transaction:
@@ -1536,6 +3248,11 @@ class StateStore:
         try:
             self._db.execute(
                 """DELETE FROM book_term_router
+                       WHERE workspace_id = ? AND logical_document_id = ?""",
+                (workspace_id, logical_id),
+            )
+            self._db.execute(
+                """DELETE FROM book_media_router
                        WHERE workspace_id = ? AND logical_document_id = ?""",
                 (workspace_id, logical_id),
             )
@@ -1660,6 +3377,54 @@ class StateStore:
                         json.dumps(edge.evidence_ids),
                     ),
                 )
+            for asset in value.media.assets:
+                asset_json = asset.model_dump_json()
+                self._db.execute(
+                    """INSERT INTO book_media_assets(
+                           workspace_id, logical_document_id, media_id, generation_id,
+                           page_no, kind, section_node_id, pixel_sha256, perceptual_hash,
+                           asset_json
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        workspace_id,
+                        logical_id,
+                        asset.media_id,
+                        asset.generation_id,
+                        asset.page_no,
+                        asset.kind,
+                        asset.section_node_id,
+                        asset.pixel_sha256,
+                        asset.perceptual_hash,
+                        asset_json,
+                    ),
+                )
+                routing_text = asset.routing_text(include_model_derived=True)
+                if routing_text:
+                    self._db.execute(
+                        "INSERT INTO book_media_router VALUES (?, ?, ?, ?)",
+                        (workspace_id, logical_id, asset.media_id, routing_text),
+                    )
+            for link in value.media.links:
+                self._db.execute(
+                    """INSERT INTO book_media_links(
+                           workspace_id, logical_document_id, link_id, source_id,
+                           target_id, relation, origin, link_json
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        workspace_id,
+                        logical_id,
+                        link.link_id,
+                        link.source_id,
+                        link.target_id,
+                        link.relation,
+                        link.origin,
+                        link.model_dump_json(),
+                    ),
+                )
+            persisted_snapshot = value.model_dump(mode="json")
+            for evidence in persisted_snapshot.get("evidence", []):
+                if isinstance(evidence, dict):
+                    evidence["raw_content"] = ""
             self._db.execute(
                 "INSERT INTO book_knowledge_snapshots VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -1668,7 +3433,7 @@ class StateStore:
                     value.generation_id,
                     value.schema_version,
                     value.content_hash,
-                    value.model_dump_json(),
+                    json.dumps(persisted_snapshot),
                     now_iso(),
                 ),
             )
@@ -1723,6 +3488,162 @@ class StateStore:
             ).fetchone()
         return json.loads(row["snapshot_json"]) if row is not None else None
 
+    def book_media_assets(
+        self,
+        workspace_id: str,
+        logical_document_id: str | None = None,
+        *,
+        page_no: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        clauses = ["workspace_id = ?"]
+        arguments: list[Any] = [workspace_id]
+        if logical_document_id is not None:
+            clauses.append("logical_document_id = ?")
+            arguments.append(logical_document_id)
+        if page_no is not None:
+            if page_no < 1:
+                raise ValueError("page_no must be positive")
+            clauses.append("page_no = ?")
+            arguments.append(page_no)
+        arguments.append(limit)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT asset_json FROM book_media_assets "
+                f"WHERE {' AND '.join(clauses)} ORDER BY page_no, media_id LIMIT ?",  # noqa: S608
+                arguments,
+            ).fetchall()
+        return [json.loads(row["asset_json"]) for row in rows]
+
+    def all_book_media_assets(self, workspace_id: str) -> list[dict[str, Any]]:
+        """Enumerate the complete active media mark set without a query limit."""
+
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT asset_json FROM book_media_assets
+                   WHERE workspace_id = ? ORDER BY logical_document_id, page_no, media_id""",
+                (workspace_id,),
+            ).fetchall()
+        return [json.loads(row["asset_json"]) for row in rows]
+
+    def book_media_asset(self, workspace_id: str, media_id: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._db.execute(
+                """SELECT asset_json FROM book_media_assets
+                   WHERE workspace_id = ? AND media_id = ?""",
+                (workspace_id, media_id),
+            ).fetchone()
+        if row is None:
+            raise NotFoundError(f"Media asset {media_id} was not found")
+        return json.loads(row["asset_json"])
+
+    def book_media_links(
+        self,
+        workspace_id: str,
+        *,
+        node_id: str | None = None,
+        relation: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 10_000:
+            raise ValueError("limit must be between 1 and 10000")
+        clauses = ["workspace_id = ?"]
+        arguments: list[Any] = [workspace_id]
+        if node_id is not None:
+            clauses.append("(source_id = ? OR target_id = ?)")
+            arguments.extend([node_id, node_id])
+        if relation is not None:
+            clauses.append("relation = ?")
+            arguments.append(relation)
+        arguments.append(limit)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT link_json FROM book_media_links "
+                f"WHERE {' AND '.join(clauses)} ORDER BY link_id LIMIT ?",  # noqa: S608
+                arguments,
+            ).fetchall()
+        return [json.loads(row["link_json"]) for row in rows]
+
+    def search_book_media(
+        self,
+        workspace_id: str,
+        query: str,
+        *,
+        logical_document_id: str | None = None,
+        limit: int = 16,
+    ) -> list[dict[str, Any]]:
+        """Caption/OCR/context FTS fallback available without a dense model."""
+
+        if limit < 1 or limit > 100:
+            raise ValueError("limit must be between 1 and 100")
+        stopwords = {
+            "aber",
+            "auch",
+            "das",
+            "der",
+            "die",
+            "eine",
+            "einer",
+            "eines",
+            "für",
+            "ist",
+            "mit",
+            "oder",
+            "sind",
+            "und",
+            "von",
+            "was",
+            "welche",
+            "welcher",
+            "welches",
+            "wie",
+            "the",
+            "what",
+            "which",
+            "with",
+            "and",
+            "are",
+        }
+        tokens = list(
+            dict.fromkeys(
+                token
+                for token in re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+                if len(token) >= 3 and token not in stopwords
+            )
+        )[:12]
+        if not tokens:
+            return []
+        fts_query = " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+        clauses = ["book_media_router MATCH ?", "r.workspace_id = ?"]
+        arguments: list[Any] = [fts_query, workspace_id]
+        if logical_document_id is not None:
+            clauses.append("r.logical_document_id = ?")
+            arguments.append(logical_document_id)
+        arguments.append(limit)
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT a.asset_json, bm25(book_media_router) AS lexical_rank
+                   FROM book_media_router AS r
+                   JOIN book_media_assets AS a
+                     ON a.workspace_id = r.workspace_id
+                    AND a.logical_document_id = r.logical_document_id
+                    AND a.media_id = r.media_id
+                   WHERE """
+                + " AND ".join(clauses)
+                + " ORDER BY lexical_rank, r.media_id LIMIT ?",  # noqa: S608
+                arguments,
+            ).fetchall()
+        return [
+            {
+                **json.loads(row["asset_json"]),
+                "lexical_rank": row["lexical_rank"],
+                "retrieval_path": "media-fts",
+            }
+            for row in rows
+        ]
+
     def validate_index_generation(self, workspace_id: str, generation_id: str) -> dict[str, Any]:
         """Validate invariants SQLite can prove before the caller marks READY."""
 
@@ -1770,6 +3691,14 @@ class StateStore:
             ).fetchall()
             targets = self._db.execute(
                 "SELECT * FROM book_term_targets WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            media_assets = self._db.execute(
+                "SELECT * FROM book_media_assets WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            media_links = self._db.execute(
+                "SELECT * FROM book_media_links WHERE workspace_id = ?",
                 (workspace_id,),
             ).fetchall()
         if generation is None:
@@ -1933,7 +3862,7 @@ class StateStore:
         for logical_id, snapshot_row in snapshot_by_book.items():
             try:
                 snapshot_payload = json.loads(snapshot_row["snapshot_json"])
-                if snapshot_payload.get("schema_version") != "2":
+                if snapshot_payload.get("schema_version") not in {"2", "3"}:
                     errors.append(f"snapshot_schema:{logical_id}")
                 if snapshot_payload.get("content_hash") != snapshot_row["content_hash"]:
                     errors.append(f"snapshot_hash:{logical_id}")
@@ -1944,6 +3873,17 @@ class StateStore:
                 manifest_evidence = {item for item in evidence_by_book if item[0] == logical_id}
                 if snapshot_evidence != manifest_evidence:
                     errors.append(f"snapshot_evidence:{logical_id}")
+                snapshot_media = {
+                    (logical_id, str(item["media_id"]))
+                    for item in snapshot_payload.get("media", {}).get("assets", [])
+                }
+                stored_media = {
+                    (row["logical_document_id"], row["media_id"])
+                    for row in media_assets
+                    if row["logical_document_id"] == logical_id
+                }
+                if snapshot_media != stored_media:
+                    errors.append(f"snapshot_media:{logical_id}")
             except (KeyError, TypeError, ValueError):
                 errors.append(f"snapshot_invalid:{logical_id}")
         term_ids = {(row["logical_document_id"], row["term_id"]) for row in terms}
@@ -1994,6 +3934,44 @@ class StateStore:
                 not in evidence_by_book
             ):
                 errors.append(f"target_evidence_missing:{target['term_id']}")
+        media_ids = {(row["logical_document_id"], row["media_id"]) for row in media_assets}
+        for asset in media_assets:
+            logical_id = asset["logical_document_id"]
+            if asset["generation_id"] != generation_id:
+                errors.append(f"media_generation:{asset['media_id']}")
+            if (logical_id, asset["section_node_id"]) not in node_ids:
+                errors.append(f"media_section_missing:{asset['media_id']}")
+            try:
+                payload = json.loads(asset["asset_json"])
+                if payload.get("media_id") != asset["media_id"]:
+                    errors.append(f"media_payload_id:{asset['media_id']}")
+                if any(
+                    (logical_id, evidence_id) not in evidence_by_book
+                    for evidence_id in payload.get("evidence_ids", [])
+                ):
+                    errors.append(f"media_evidence_missing:{asset['media_id']}")
+            except (TypeError, ValueError):
+                errors.append(f"media_payload_invalid:{asset['media_id']}")
+        for link in media_links:
+            logical_id = link["logical_document_id"]
+            relation = link["relation"]
+            endpoint_sets = {
+                "section_contains_media": (node_ids, media_ids),
+                "evidence_depicts_media": (evidence_by_book, media_ids),
+                "evidence_context_for_media": (evidence_by_book, media_ids),
+                "media_mentions_term": (media_ids, term_ids),
+                "media_duplicate_of": (media_ids, media_ids),
+                "media_variant_of": (media_ids, media_ids),
+            }
+            expected = endpoint_sets.get(relation)
+            if expected is None:
+                errors.append(f"media_link_relation:{link['link_id']}")
+                continue
+            if (logical_id, link["source_id"]) not in expected[0] or (
+                logical_id,
+                link["target_id"],
+            ) not in expected[1]:
+                errors.append(f"media_link_endpoint:{link['link_id']}")
         report = {
             "valid": not errors,
             "workspace_id": workspace_id,
@@ -2004,6 +3982,8 @@ class StateStore:
             "structure_node_count": len(nodes),
             "term_count": len(terms),
             "edge_count": len(edges),
+            "media_asset_count": len(media_assets),
+            "media_link_count": len(media_links),
             "errors": sorted(set(errors)),
         }
         if errors:
@@ -2011,115 +3991,440 @@ class StateStore:
         return report
 
     def route_book_knowledge(
-        self, workspace_id: str, query: str, limit: int = 12
+        self,
+        workspace_id: str,
+        query: str,
+        limit: int = 12,
+        *,
+        allowed_segment_ids: Collection[str] | None = None,
+        allowed_document_ids: Collection[str] | None = None,
+        expand_sections: bool = False,
+        global_query: bool = False,
+        include_adjacency: bool = False,
     ) -> list[dict[str, Any]]:
-        """Route lexical terms/aliases to sections and evidence without a vector side index."""
+        """Route a bounded lexical/BookRAG neighbourhood back to raw chunks.
+
+        The three expansion flags are deliberately opt-in so callers which only
+        need the historic term/section routes keep their old scope. ``global_query``
+        permits parent/child traversal, while ``include_adjacency`` permits one
+        previous and one next section per seed. Every direct and expanded result
+        spends the same ``limit`` budget.
+        """
 
         if limit < 1 or limit > 100:
             raise ValueError("limit must be between 1 and 100")
         tokens = re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
         if not tokens:
             return []
+
+        def normalized_ids(values: Collection[str] | None) -> tuple[str, ...] | None:
+            if values is None:
+                return None
+            candidates = (values,) if isinstance(values, str) else values
+            return tuple(sorted({value for value in candidates if value}))
+
+        documents = normalized_ids(allowed_document_ids)
+        segments = normalized_ids(allowed_segment_ids)
+        if documents == () or segments == ():
+            return []
         fts_query = " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+
         with self._lock:
+            clauses = ["book_term_router MATCH ?", "r.workspace_id = ?"]
+            arguments: list[object] = [fts_query, workspace_id]
+            if documents is not None:
+                placeholders = ", ".join("?" for _ in documents)
+                clauses.append(f"r.logical_document_id IN ({placeholders})")
+                arguments.extend(documents)
+            if segments is not None:
+                placeholders = ", ".join("?" for _ in segments)
+                # A segment restriction must constrain eligible router rows
+                # before LIMIT. Applying it to the returned targets afterwards
+                # lets high-ranking rows from excluded editions hide valid rows.
+                clauses.append(
+                    f"""(
+                        EXISTS (
+                            SELECT 1
+                            FROM book_term_targets AS eligible_target
+                            JOIN chunk_manifest AS eligible_chunk
+                              ON eligible_chunk.workspace_id = eligible_target.workspace_id
+                             AND eligible_chunk.logical_document_id =
+                                 eligible_target.logical_document_id
+                             AND (
+                                 eligible_chunk.evidence_id = eligible_target.evidence_id
+                                 OR (
+                                     eligible_chunk.section_node_id = eligible_target.node_id
+                                     AND (
+                                         eligible_target.evidence_id IS NULL
+                                         OR NOT EXISTS (
+                                             SELECT 1 FROM chunk_manifest AS exact_chunk
+                                             WHERE exact_chunk.workspace_id =
+                                                   eligible_target.workspace_id
+                                               AND exact_chunk.logical_document_id =
+                                                   eligible_target.logical_document_id
+                                               AND exact_chunk.evidence_id =
+                                                   eligible_target.evidence_id
+                                         )
+                                     )
+                                 )
+                             )
+                            WHERE eligible_target.workspace_id = r.workspace_id
+                              AND eligible_target.logical_document_id =
+                                  r.logical_document_id
+                              AND eligible_target.term_id = r.term_id
+                              AND eligible_chunk.segment_document_id IN ({placeholders})
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM chunk_manifest AS section_chunk
+                            WHERE section_chunk.workspace_id = r.workspace_id
+                              AND section_chunk.logical_document_id = r.logical_document_id
+                              AND section_chunk.section_node_id = r.term_id
+                              AND section_chunk.segment_document_id IN ({placeholders})
+                        )
+                    )"""
+                )
+                arguments.extend(segments)
+                arguments.extend(segments)
+            arguments.append(limit * 3)
             routed = self._db.execute(
                 """SELECT r.logical_document_id, r.term_id, r.canonical,
                           bm25(book_term_router) AS lexical_rank
                    FROM book_term_router AS r
-                   WHERE book_term_router MATCH ? AND r.workspace_id = ?
-                   ORDER BY lexical_rank LIMIT ?""",
-                (fts_query, workspace_id, limit * 3),
+                   WHERE """
+                + " AND ".join(clauses)
+                + " ORDER BY lexical_rank LIMIT ?",  # noqa: S608
+                arguments,
             ).fetchall()
-            results: list[dict[str, Any]] = []
-            seen: set[tuple[object, ...]] = set()
-            for route in routed:
-                targets = self._db.execute(
-                    """SELECT t.*, COALESCE(c.chunk_id, section_chunk.chunk_id) AS chunk_id
-                       FROM book_term_targets AS t
-                       LEFT JOIN chunk_manifest AS c
-                         ON c.workspace_id = t.workspace_id
-                        AND c.logical_document_id = t.logical_document_id
-                        AND c.evidence_id = t.evidence_id
-                       LEFT JOIN chunk_manifest AS section_chunk
-                         ON section_chunk.rowid = (
-                            SELECT c2.rowid FROM chunk_manifest AS c2
-                            WHERE c2.workspace_id = t.workspace_id
-                              AND c2.logical_document_id = t.logical_document_id
-                              AND c2.section_node_id = t.node_id
-                            ORDER BY c2.global_order, c2.chunk_order LIMIT 1
-                         )
-                       WHERE t.workspace_id = ? AND t.logical_document_id = ? AND t.term_id = ?
-                       ORDER BY t.confidence DESC, t.page_start LIMIT 4""",
-                    (workspace_id, route["logical_document_id"], route["term_id"]),
+
+            def representative_chunk(
+                logical_document_id: str, section_node_id: str
+            ) -> sqlite3.Row | None:
+                representative_arguments: list[object] = [
+                    workspace_id,
+                    logical_document_id,
+                    section_node_id,
+                ]
+                segment_clause = ""
+                if segments is not None:
+                    placeholders = ", ".join("?" for _ in segments)
+                    segment_clause = f" AND segment_document_id IN ({placeholders})"
+                    representative_arguments.extend(segments)
+                return self._db.execute(
+                    """SELECT chunk_id, evidence_id FROM chunk_manifest
+                       WHERE workspace_id = ? AND logical_document_id = ?
+                         AND section_node_id = ?"""
+                    + segment_clause
+                    + " ORDER BY global_order, chunk_order LIMIT 1",  # noqa: S608
+                    representative_arguments,
+                ).fetchone()
+
+            def exact_chunk(
+                logical_document_id: str, evidence_id: str
+            ) -> tuple[sqlite3.Row | None, bool]:
+                exact_arguments: list[object] = [
+                    workspace_id,
+                    logical_document_id,
+                    evidence_id,
+                ]
+                segment_clause = ""
+                if segments is not None:
+                    placeholders = ", ".join("?" for _ in segments)
+                    segment_clause = f" AND segment_document_id IN ({placeholders})"
+                    exact_arguments.extend(segments)
+                chunk = self._db.execute(
+                    """SELECT chunk_id, evidence_id FROM chunk_manifest
+                       WHERE workspace_id = ? AND logical_document_id = ?
+                         AND evidence_id = ?"""
+                    + segment_clause
+                    + " ORDER BY global_order, chunk_order LIMIT 1",  # noqa: S608
+                    exact_arguments,
+                ).fetchone()
+                if chunk is not None or segments is None:
+                    return chunk, chunk is not None
+                exists = self._db.execute(
+                    """SELECT 1 FROM chunk_manifest
+                       WHERE workspace_id = ? AND logical_document_id = ?
+                         AND evidence_id = ? LIMIT 1""",
+                    (workspace_id, logical_document_id, evidence_id),
+                ).fetchone()
+                return None, exists is not None
+
+            def resolve_term(
+                *,
+                logical_document_id: str,
+                term_id: str,
+                term: str,
+                lexical_rank: float,
+                retrieval_path: str | None = None,
+                graph_edge: sqlite3.Row | None = None,
+            ) -> list[dict[str, Any]]:
+                target_rows = self._db.execute(
+                    """SELECT * FROM book_term_targets
+                       WHERE workspace_id = ? AND logical_document_id = ? AND term_id = ?
+                       ORDER BY confidence DESC, page_start, target_key""",
+                    (workspace_id, logical_document_id, term_id),
                 ).fetchall()
-                if not targets:
-                    node = self._db.execute(
-                        """SELECT node_id, page_start, page_end, confidence
-                           FROM book_structure_nodes
-                           WHERE workspace_id = ? AND logical_document_id = ? AND node_id = ?""",
-                        (workspace_id, route["logical_document_id"], route["term_id"]),
-                    ).fetchone()
-                    if node is not None:
-                        representative = self._db.execute(
-                            """SELECT chunk_id, evidence_id FROM chunk_manifest
-                               WHERE workspace_id = ? AND logical_document_id = ?
-                                 AND section_node_id = ?
-                               ORDER BY global_order, chunk_order LIMIT 1""",
-                            (workspace_id, route["logical_document_id"], node["node_id"]),
-                        ).fetchone()
-                        results.append(
+                resolved: list[dict[str, Any]] = []
+                for target in target_rows:
+                    chunk: sqlite3.Row | None = None
+                    exact_exists = False
+                    if target["evidence_id"]:
+                        chunk, exact_exists = exact_chunk(
+                            logical_document_id, target["evidence_id"]
+                        )
+                    if chunk is None and target["node_id"] and not exact_exists:
+                        chunk = representative_chunk(logical_document_id, target["node_id"])
+                    if segments is not None and chunk is None:
+                        continue
+                    item: dict[str, Any] = {
+                        "logical_document_id": logical_document_id,
+                        "term_id": term_id,
+                        "term": term,
+                        "section_node_id": target["node_id"],
+                        "page_start": target["page_start"],
+                        "page_end": target["page_end"],
+                        "evidence_id": (
+                            chunk["evidence_id"] if chunk is not None else target["evidence_id"]
+                        ),
+                        "chunk_id": chunk["chunk_id"] if chunk is not None else None,
+                        "confidence": target["confidence"],
+                        "retrieval_path": retrieval_path or f"book-{target['relation']}",
+                        "lexical_rank": lexical_rank,
+                    }
+                    if graph_edge is not None:
+                        item.update(
                             {
-                                "logical_document_id": route["logical_document_id"],
-                                "term_id": route["term_id"],
-                                "term": route["canonical"],
-                                "section_node_id": node["node_id"],
-                                "page_start": node["page_start"],
-                                "page_end": node["page_end"],
-                                "evidence_id": (
-                                    representative["evidence_id"] if representative else None
-                                ),
-                                "chunk_id": (
-                                    representative["chunk_id"] if representative else None
-                                ),
-                                "confidence": node["confidence"],
-                                "retrieval_path": "book-section",
-                                "lexical_rank": route["lexical_rank"],
+                                "graph_edge_id": graph_edge["edge_id"],
+                                "graph_relation": graph_edge["relation"],
+                                "graph_weight": graph_edge["weight"],
                             }
                         )
-                        if len(results) >= limit:
-                            return results
-                        continue
-                    targets = [None]
-                for target in targets:
-                    key = (
-                        route["logical_document_id"],
-                        route["term_id"],
-                        target["node_id"] if target else None,
-                        target["evidence_id"] if target else None,
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    results.append(
+                    resolved.append(item)
+                    if len(resolved) >= 4:
+                        break
+                return resolved
+
+            def resolve_section(
+                *,
+                logical_document_id: str,
+                section_node_id: str,
+                term_id: str,
+                term: str,
+                lexical_rank: float,
+                retrieval_path: str,
+                graph_edge: sqlite3.Row | None = None,
+            ) -> dict[str, Any] | None:
+                node = self._db.execute(
+                    """SELECT node_id, page_start, page_end, confidence
+                       FROM book_structure_nodes
+                       WHERE workspace_id = ? AND logical_document_id = ? AND node_id = ?""",
+                    (workspace_id, logical_document_id, section_node_id),
+                ).fetchone()
+                if node is None:
+                    return None
+                representative = representative_chunk(logical_document_id, node["node_id"])
+                if segments is not None and representative is None:
+                    return None
+                item: dict[str, Any] = {
+                    "logical_document_id": logical_document_id,
+                    "term_id": term_id,
+                    "term": term,
+                    "section_node_id": node["node_id"],
+                    "page_start": node["page_start"],
+                    "page_end": node["page_end"],
+                    "evidence_id": representative["evidence_id"] if representative else None,
+                    "chunk_id": representative["chunk_id"] if representative else None,
+                    "confidence": node["confidence"],
+                    "retrieval_path": retrieval_path,
+                    "lexical_rank": lexical_rank,
+                }
+                if graph_edge is not None:
+                    item.update(
                         {
-                            "logical_document_id": route["logical_document_id"],
-                            "term_id": route["term_id"],
-                            "term": route["canonical"],
-                            "section_node_id": target["node_id"] if target else None,
-                            "page_start": target["page_start"] if target else None,
-                            "page_end": target["page_end"] if target else None,
-                            "evidence_id": target["evidence_id"] if target else None,
-                            "chunk_id": target["chunk_id"] if target else None,
-                            "confidence": target["confidence"] if target else 0.0,
-                            "retrieval_path": (
-                                f"book-{target['relation']}" if target else "book-term"
-                            ),
-                            "lexical_rank": route["lexical_rank"],
+                            "graph_edge_id": graph_edge["edge_id"],
+                            "graph_relation": graph_edge["relation"],
+                            "graph_weight": graph_edge["weight"],
                         }
                     )
+                return item
+
+            seed_queues: list[list[dict[str, Any]]] = []
+            for route in routed:
+                logical_id = route["logical_document_id"]
+                term_id = route["term_id"]
+                canonical = route["canonical"]
+                lexical_rank = route["lexical_rank"]
+                queue = resolve_term(
+                    logical_document_id=logical_id,
+                    term_id=term_id,
+                    term=canonical,
+                    lexical_rank=lexical_rank,
+                )
+                if not queue:
+                    section = resolve_section(
+                        logical_document_id=logical_id,
+                        section_node_id=term_id,
+                        term_id=term_id,
+                        term=canonical,
+                        lexical_rank=lexical_rank,
+                        retrieval_path="book-section",
+                    )
+                    if section is not None:
+                        queue.append(section)
+                    elif segments is None:
+                        queue.append(
+                            {
+                                "logical_document_id": logical_id,
+                                "term_id": term_id,
+                                "term": canonical,
+                                "section_node_id": None,
+                                "page_start": None,
+                                "page_end": None,
+                                "evidence_id": None,
+                                "chunk_id": None,
+                                "confidence": 0.0,
+                                "retrieval_path": "book-term",
+                                "lexical_rank": lexical_rank,
+                            }
+                        )
+
+                if expand_sections:
+                    term_exists = self._db.execute(
+                        """SELECT 1 FROM book_terms
+                           WHERE workspace_id = ? AND logical_document_id = ? AND term_id = ?""",
+                        (workspace_id, logical_id, term_id),
+                    ).fetchone()
+                    if term_exists is not None:
+                        edge_rows = self._db.execute(
+                            """SELECT * FROM book_graph_edges
+                               WHERE workspace_id = ? AND logical_document_id = ?
+                                 AND relation IN ('alias_of', 'see_also', 'co_occurs')
+                                 AND (source_id = ? OR target_id = ?)
+                               ORDER BY weight DESC, edge_id""",
+                            (workspace_id, logical_id, term_id, term_id),
+                        ).fetchall()
+                        co_occurs_count = 0
+                        for edge in edge_rows:
+                            if edge["relation"] == "co_occurs" and co_occurs_count >= 4:
+                                continue
+                            neighbour_id = (
+                                edge["target_id"]
+                                if edge["source_id"] == term_id
+                                else edge["source_id"]
+                            )
+                            neighbour = self._db.execute(
+                                """SELECT canonical FROM book_terms
+                                   WHERE workspace_id = ? AND logical_document_id = ?
+                                     AND term_id = ?""",
+                                (workspace_id, logical_id, neighbour_id),
+                            ).fetchone()
+                            if neighbour is None:
+                                continue
+                            expanded_targets = resolve_term(
+                                logical_document_id=logical_id,
+                                term_id=neighbour_id,
+                                term=neighbour["canonical"],
+                                lexical_rank=lexical_rank,
+                                retrieval_path=f"book-graph-{edge['relation']}",
+                                graph_edge=edge,
+                            )
+                            if edge["relation"] == "co_occurs":
+                                expanded_targets = expanded_targets[: 4 - co_occurs_count]
+                                co_occurs_count += len(expanded_targets)
+                            queue.extend(expanded_targets)
+
+                seed_sections = {
+                    item["section_node_id"]
+                    for item in queue
+                    if item["section_node_id"] is not None
+                    and not str(item["retrieval_path"]).startswith("book-graph-")
+                }
+                if global_query:
+                    for section_id in sorted(seed_sections):
+                        hierarchy = self._db.execute(
+                            """SELECT * FROM book_graph_edges
+                               WHERE workspace_id = ? AND logical_document_id = ?
+                                 AND relation = 'parent_of'
+                                 AND (source_id = ? OR target_id = ?)
+                               ORDER BY weight DESC, edge_id""",
+                            (workspace_id, logical_id, section_id, section_id),
+                        ).fetchall()
+                        for edge in hierarchy:
+                            is_child = edge["source_id"] == section_id
+                            related_id = edge["target_id"] if is_child else edge["source_id"]
+                            section = resolve_section(
+                                logical_document_id=logical_id,
+                                section_node_id=related_id,
+                                term_id=term_id,
+                                term=canonical,
+                                lexical_rank=lexical_rank,
+                                retrieval_path=(
+                                    "book-graph-child" if is_child else "book-graph-parent"
+                                ),
+                                graph_edge=edge,
+                            )
+                            if section is not None:
+                                queue.append(section)
+                if include_adjacency:
+                    adjacency_added = {"next": False, "previous": False}
+                    for section_id in sorted(seed_sections):
+                        for direction, source_column, target_column in (
+                            ("next", "source_id", "target_id"),
+                            ("previous", "target_id", "source_id"),
+                        ):
+                            if adjacency_added[direction]:
+                                continue
+                            edge = self._db.execute(
+                                f"""SELECT * FROM book_graph_edges
+                                    WHERE workspace_id = ? AND logical_document_id = ?
+                                      AND relation = 'next_section'
+                                      AND {source_column} = ?
+                                    ORDER BY weight DESC, edge_id LIMIT 1""",  # noqa: S608
+                                (workspace_id, logical_id, section_id),
+                            ).fetchone()
+                            if edge is None:
+                                continue
+                            section = resolve_section(
+                                logical_document_id=logical_id,
+                                section_node_id=edge[target_column],
+                                term_id=term_id,
+                                term=canonical,
+                                lexical_rank=lexical_rank,
+                                retrieval_path=f"book-graph-{direction}",
+                                graph_edge=edge,
+                            )
+                            if section is not None:
+                                queue.append(section)
+                                adjacency_added[direction] = True
+                if queue:
+                    seed_queues.append(queue)
+
+            results: list[dict[str, Any]] = []
+            seen: set[tuple[object, ...]] = set()
+            while seed_queues and len(results) < limit:
+                remaining: list[list[dict[str, Any]]] = []
+                for queue in seed_queues:
+                    added = False
+                    while queue and not added:
+                        item = queue.pop(0)
+                        identity = (
+                            item["logical_document_id"],
+                            item["chunk_id"]
+                            or item["evidence_id"]
+                            or item["section_node_id"]
+                            or item["term_id"],
+                        )
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        results.append(item)
+                        added = True
+                    if queue:
+                        remaining.append(queue)
                     if len(results) >= limit:
-                        return results
-        return results
+                        break
+                seed_queues = remaining
+            return results
 
     def update_book_metadata(
         self, workspace_id: str, logical_document_id: str, metadata: dict[str, Any]
@@ -2163,8 +4468,14 @@ class StateStore:
             raise ValueError(f"Unsupported document filters: {sorted(unknown_filters)}")
         if document_policy not in DOCUMENT_POLICIES:
             raise ValueError(f"Unsupported document policy: {document_policy}")
-        records = self.book_records(workspace_id)
+        managed_records = self.book_records(workspace_id)
+        hidden = self.hidden_document_ids(workspace_id)
+        records = [
+            record for record in managed_records if record["logical_document_id"] not in hidden
+        ]
         if not records:
+            if managed_records or hidden:
+                return []
             # A legacy workspace with no managed catalogue still needs Haiku's
             # unfiltered compatibility path. A managed import with staged
             # segments, however, must never leak its unpublished partial book.

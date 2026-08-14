@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import metadata
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -22,11 +22,20 @@ from uuid import uuid4
 from ..models.domain import BookMetadata, CapabilitySet, Citation, EvidenceMode, SearchHit
 from ..models.errors import OmaRagError
 from ..runtime import configure_process_environment, release_native_memory
-from .base import HaikuAdapter
+from .base import (
+    HaikuAdapter,
+    SearchManyFailure,
+    SearchManyItem,
+    SearchManyRequest,
+    SearchManyResult,
+    SearchManyStats,
+    normalize_search_many_requests,
+)
 
 _QUERY_OPERATIONS = {
     "warm",
     "search",
+    "search_many",
     "get_chunk",
     "get_chunks",
     "rerank",
@@ -296,7 +305,7 @@ def _worker_main(
     idle_seconds: float,
     memory_max: int,
 ) -> None:
-    configure_process_environment()
+    configure_process_environment(offline_models=True)
     _set_parent_death_signal()
     stop = threading.Event()
     watchdog = threading.Thread(
@@ -444,6 +453,10 @@ class IsolatedHaikuAdapter(HaikuAdapter):
     @property
     def available(self) -> bool:
         return self._available
+
+    @property
+    def supports_native_search_many(self) -> bool:
+        return self.available
 
     @property
     def query_worker_state(self) -> str:
@@ -639,7 +652,9 @@ class IsolatedHaikuAdapter(HaikuAdapter):
                 remaining = deadline - now
                 if remaining <= 0:
                     break
-                await asyncio.sleep(min(2.0, remaining))
+                # Residency is optional; react quickly when the coordinator's
+                # memory reserve becomes guarded while the worker is idle.
+                await asyncio.sleep(min(0.5, remaining))
             async with self._query_lock:
                 if self._query_worker is worker:
                     worker.terminate()
@@ -732,6 +747,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
         indexing_options: dict[str, Any] | None = None,
+        llm_url: str | None = None,
     ) -> dict[str, Any]:
         return await self._call(
             "ingest",
@@ -750,7 +766,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             metadata=metadata,
             original_source=original_source,
             indexing_options=indexing_options,
-            llm_url=self.ollama_url,
+            llm_url=llm_url or self.ollama_url,
         )
 
     async def delete_document(self, database: Path, document_id: str) -> bool:
@@ -774,6 +790,64 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             document_filter=document_filter,
             search_type=search_type,
             rerank=rerank,
+        )
+
+    async def search_many(
+        self,
+        database: Path,
+        requests: list[SearchManyRequest] | list[str],
+        limit: int | None = None,
+        *,
+        document_filter: str | None = None,
+        search_type: str = "hybrid",
+        rerank: bool = True,
+        hydrate_chunk_ids: list[str] | None = None,
+    ) -> SearchManyResult:
+        requests = normalize_search_many_requests(
+            requests,
+            limit,
+            document_filter=document_filter,
+            search_type=search_type,
+            rerank=rerank,
+        )
+        hydration_ids = list(dict.fromkeys(hydrate_chunk_ids or []))
+        if not requests and not hydration_ids:
+            return SearchManyResult(
+                items=[],
+                hydrated_chunks=[],
+                stats=SearchManyStats(backend_sessions=0, native_batch=True),
+            )
+        try:
+            result = await self._call(
+                "search_many",
+                database,
+                requests,
+                hydrate_chunk_ids=hydrate_chunk_ids,
+            )
+        except Exception as exc:
+            failure = SearchManyFailure.from_exception(exc)
+            result = SearchManyResult(
+                items=[
+                    SearchManyItem(key=request.key, hits=[], failure=failure)
+                    for request in requests
+                ],
+                hydrated_chunks=[],
+                stats=SearchManyStats(
+                    search_requests=len(requests),
+                    requested_chunk_hydrations=len(hydrate_chunk_ids or []),
+                    native_batch=True,
+                    fallback_reason="worker_batch_failed",
+                ),
+                hydration_failure=failure if hydration_ids else None,
+            )
+        previous_round_trips = len(requests) + int(bool(hydration_ids))
+        return replace(
+            result,
+            stats=replace(
+                result.stats,
+                ipc_round_trips=1,
+                ipc_round_trips_saved=max(0, previous_round_trips - 1),
+            ),
         )
 
     async def get_chunk(self, database: Path, chunk_id: str) -> SearchHit | None:

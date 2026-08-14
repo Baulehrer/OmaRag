@@ -20,16 +20,19 @@ use omarag_app::{
 use omarag_client::{HttpOmaRagClient, OmaRagClient};
 use omarag_domain::{
     BackupSummary, CommitImportRequest, ConfigDocument, DocumentSummary, DomainEvent,
-    EventSubscription, JobId, JobSnapshot, PreflightImportRequest, QualityReport,
-    RetrievalExplanation, RunId, RunRequest, SourceDefinition, WorkspaceId, WorkspaceManifest,
+    EventSubscription, HardwareProfileResponse, JobId, JobSnapshot, ModelProfilePreflight,
+    OmaRagError, PerformanceProfile, PreflightImportRequest, QualityReport, RetrievalExplanation,
+    RunId, RunRequest, SourceDefinition, VisualEvidenceResponse, WorkspaceId, WorkspaceManifest,
     WorkspaceSummary,
 };
 use omarag_tui::{
-    ChatImagePreview, LoadedModel, ModelRoleStatus, RuntimeMetrics, Theme,
+    ChatImagePreview, LoadedModel, MediaImagePreview, ModelRoleStatus, RuntimeMetrics, Theme,
+    VisualInspectorState, fallback_hardware_profile,
     input::{
-        JobCommand, UiCommand, expand_import_paths, fuzzy_score, handle_event, refresh_file_browser,
+        JobCommand, UiCommand, expand_import_paths, fuzzy_score, handle_event_with_visuals,
+        refresh_file_browser,
     },
-    related_image_refs, render_with_previews,
+    performance_profile, related_page_refs, render_with_runtime,
 };
 use ratatui_image::picker::Picker;
 use serde::Deserialize;
@@ -79,6 +82,19 @@ enum BackendMessage {
         key: (String, u32),
         result: Result<ChatImagePreview, String>,
     },
+    MediaPreviewLoaded {
+        key: String,
+        result: Result<MediaImagePreview, String>,
+    },
+    VisualEvidenceLoaded {
+        run_id: RunId,
+        response: Option<VisualEvidenceResponse>,
+    },
+    HardwareProfileLoaded(Option<HardwareProfileResponse>),
+    HardwareRecommendationLoaded {
+        profile: PerformanceProfile,
+        response: Option<HardwareProfileResponse>,
+    },
     RunStarted(Result<RunId, String>),
     RunCancelled(Result<(), String>),
     SearchCompleted(Result<RetrievalExplanation, String>),
@@ -89,6 +105,11 @@ enum BackendMessage {
     BackupCreated(Result<BackupSummary, String>),
     SourceCreated(Result<SourceDefinition, String>),
     ConfigSaved(Result<ConfigDocument, String>),
+    AutomaticStackPreflight {
+        workspace: WorkspaceId,
+        result: Result<ModelProfilePreflight, String>,
+    },
+    AutomaticStackApplied(Result<ConfigDocument, String>),
     ModelCatalogLoaded(Result<ModelCatalogResponse, String>),
     ModelTransfer(ModelTransfer),
     ModelOperationFinished {
@@ -106,6 +127,12 @@ struct PreviewScope {
     keys: Vec<(String, u32)>,
 }
 
+#[derive(Debug)]
+struct MediaPreviewScope {
+    token: CancellationToken,
+    keys: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct CitationPreviewTarget {
     citation_index: usize,
@@ -119,6 +146,15 @@ struct CitationPreviewTarget {
 }
 
 impl Default for PreviewScope {
+    fn default() -> Self {
+        Self {
+            token: CancellationToken::new(),
+            keys: Vec::new(),
+        }
+    }
+}
+
+impl Default for MediaPreviewScope {
     fn default() -> Self {
         Self {
             token: CancellationToken::new(),
@@ -312,8 +348,15 @@ async fn main() -> Result<()> {
     let mut system = System::new_all();
     let mut metrics = runtime_metrics(&system, 0);
     let mut chat_previews = Vec::new();
+    let mut media_previews = Vec::new();
     let mut preview_pending = BTreeSet::new();
+    let mut media_preview_pending = BTreeSet::new();
     let mut preview_scope = PreviewScope::default();
+    let mut media_preview_scope = MediaPreviewScope::default();
+    let mut visual_inspector = VisualInspectorState::default();
+    let mut hardware_profile = fallback_hardware_profile(&metrics);
+    let mut requested_profile = performance_profile(state.model_manager.profile);
+    spawn_hardware_profile_scan(Arc::clone(&client), requested_profile, backend_tx.clone());
     let mut observed_draft = String::new();
     let mut draft_warmup_requested = false;
     let mut warmup_deadline: Option<TokioInstant> = None;
@@ -356,8 +399,14 @@ async fn main() -> Result<()> {
                 (state.overlay == Some(Overlay::FileBrowser))
                     .then(|| std::path::PathBuf::from(&state.file_browser.current_dir)),
             );
+            let (terminal_width, terminal_height) =
+                crossterm::terminal::size().unwrap_or((120, 34));
+            let compact_inspector = terminal_width < 120 || terminal_height < 34;
             schedule_chat_previews(
                 &state,
+                &visual_inspector,
+                !compact_inspector
+                    || visual_inspector.tab == omarag_tui::VisualInspectorTab::Pages,
                 Arc::clone(&client),
                 &image_picker,
                 &mut chat_previews,
@@ -365,8 +414,38 @@ async fn main() -> Result<()> {
                 &mut preview_scope,
                 backend_tx.clone(),
             );
+            schedule_media_previews(
+                &visual_inspector,
+                !compact_inspector
+                    || visual_inspector.tab == omarag_tui::VisualInspectorTab::Figures,
+                Arc::clone(&client),
+                &image_picker,
+                &mut media_previews,
+                &mut media_preview_pending,
+                &mut media_preview_scope,
+                backend_tx.clone(),
+            );
+            let selected_profile = performance_profile(state.model_manager.profile);
+            hardware_profile.profile = selected_profile;
+            if requested_profile != selected_profile {
+                requested_profile = selected_profile;
+                spawn_hardware_recommendation(
+                    Arc::clone(&client),
+                    selected_profile,
+                    backend_tx.clone(),
+                );
+            }
             terminal.draw(|frame| {
-                render_with_previews(frame, &state, &theme, &metrics, &mut chat_previews)
+                render_with_runtime(
+                    frame,
+                    &state,
+                    &theme,
+                    &metrics,
+                    &mut chat_previews,
+                    &mut media_previews,
+                    &visual_inspector,
+                    &hardware_profile,
+                )
             })?;
             tokio::select! {
                 _ = tokio::time::sleep(redraw_delay) => {
@@ -432,6 +511,9 @@ async fn main() -> Result<()> {
                 }
                 Some(domain_event) = domain_rx.recv() => {
                     let completed_chat = (domain_event.event_type == "run.completed").then(|| domain_event.timestamp.clone());
+                    let completed_visual = (domain_event.event_type == "run.completed")
+                        .then(|| domain_event.run_id.clone())
+                        .flatten();
                     let refresh_jobs = domain_event.event_type.starts_with("job.");
                     let refresh_features = matches!(
                         domain_event.event_type.as_str(),
@@ -445,6 +527,13 @@ async fn main() -> Result<()> {
                     update(&mut state, Action::EventReceived(domain_event));
                     if let Some(timestamp) = completed_chat {
                         remember_chat_session(&mut state, timestamp);
+                    }
+                    if let Some(run_id) = completed_visual {
+                        spawn_visual_evidence(
+                            Arc::clone(&client),
+                            run_id,
+                            backend_tx.clone(),
+                        );
                     }
                     if refresh_jobs {
                         spawn_command(
@@ -464,7 +553,11 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(terminal_event) = terminal_rx.recv() => {
-                    if let Some(command) = handle_event(&mut state, terminal_event) {
+                    if let Some(command) = handle_event_with_visuals(
+                        &mut state,
+                        &mut visual_inspector,
+                        terminal_event,
+                    ) {
                         spawn_command(
                             Arc::clone(&client),
                             model_api.clone(),
@@ -474,6 +567,13 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(message) = backend_rx.recv() => {
+                    if matches!(&message, BackendMessage::RunStarted(Ok(_))) {
+                        visual_inspector.clear();
+                        media_previews.clear();
+                        media_preview_pending.clear();
+                        media_preview_scope.token.cancel();
+                        media_preview_scope = MediaPreviewScope::default();
+                    }
                     let message = match message {
                         BackendMessage::FilesystemChanged => {
                             if state.overlay == Some(Overlay::FileBrowser) {
@@ -486,7 +586,63 @@ async fn main() -> Result<()> {
                             if let Ok(preview) = result {
                                 chat_previews.retain(|item| (item.pdf_path.as_str(), item.page) != (key.0.as_str(), key.1));
                                 chat_previews.push(preview);
-                                chat_previews.sort_by_key(|item| citation_preview_position(&state, &item.pdf_path, item.page));
+                                chat_previews.sort_by_key(|item| citation_preview_position(
+                                    &state,
+                                    &visual_inspector,
+                                    &item.pdf_path,
+                                    item.page,
+                                ));
+                            }
+                            continue;
+                        }
+                        BackendMessage::MediaPreviewLoaded { key, result } => {
+                            media_preview_pending.remove(&key);
+                            if let Ok(preview) = result {
+                                media_previews.retain(|item| item.media_id != preview.media_id);
+                                media_previews.push(preview);
+                                media_previews.sort_by_key(|item| {
+                                    visual_inspector
+                                        .evidence
+                                        .media
+                                        .iter()
+                                        .position(|asset| asset.media_id == item.media_id)
+                                        .unwrap_or(usize::MAX)
+                                });
+                            }
+                            continue;
+                        }
+                        BackendMessage::VisualEvidenceLoaded { run_id, response } => {
+                            if state.chat.last_run.as_ref() == Some(&run_id) {
+                                match response {
+                                    Some(response) => visual_inspector.replace(run_id, response),
+                                    None => visual_inspector.use_legacy(run_id),
+                                }
+                                media_previews.clear();
+                                media_preview_pending.clear();
+                                media_preview_scope.token.cancel();
+                                media_preview_scope = MediaPreviewScope::default();
+                            }
+                            continue;
+                        }
+                        BackendMessage::HardwareProfileLoaded(Some(profile)) => {
+                            hardware_profile = merge_hardware_profile(
+                                hardware_profile,
+                                profile,
+                                performance_profile(state.model_manager.profile),
+                            );
+                            continue;
+                        }
+                        BackendMessage::HardwareProfileLoaded(None) => continue,
+                        BackendMessage::HardwareRecommendationLoaded { profile, response } => {
+                            if profile == performance_profile(state.model_manager.profile)
+                                && let Some(response) = response
+                            {
+                                hardware_profile.profile = profile;
+                                if !response.catalog_version.is_empty() {
+                                    hardware_profile.catalog_version = response.catalog_version;
+                                }
+                                hardware_profile.expert_mode = response.expert_mode;
+                                hardware_profile.recommendations = response.recommendations;
                             }
                             continue;
                         }
@@ -530,6 +686,7 @@ async fn main() -> Result<()> {
     }
     running.store(false, Ordering::Relaxed);
     preview_scope.token.cancel();
+    media_preview_scope.token.cancel();
     domain_task.abort();
     let paste_result = execute!(stdout(), DisableMouseCapture, DisableBracketedPaste);
     let restore_result = ratatui::try_restore();
@@ -949,6 +1106,108 @@ fn spawn_event_stream(
     })
 }
 
+fn spawn_visual_evidence(
+    client: Arc<HttpOmaRagClient>,
+    run_id: RunId,
+    tx: mpsc::Sender<BackendMessage>,
+) {
+    tokio::spawn(async move {
+        let response = match client.visual_evidence(run_id.clone()).await {
+            Ok(response) => Some(response),
+            Err(OmaRagError::Api { status: 404, .. }) => None,
+            // A malformed/older response must degrade exactly like a legacy
+            // server: cited pages remain usable and figures stay empty.
+            Err(_) => None,
+        };
+        let _ = tx
+            .send(BackendMessage::VisualEvidenceLoaded { run_id, response })
+            .await;
+    });
+}
+
+fn spawn_hardware_profile_scan(
+    client: Arc<HttpOmaRagClient>,
+    profile: PerformanceProfile,
+    tx: mpsc::Sender<BackendMessage>,
+) {
+    tokio::spawn(async move {
+        let scan = tokio::time::timeout(Duration::from_secs(3), client.hardware_scan())
+            .await
+            .ok()
+            .and_then(Result::ok);
+        let Some(mut scan) = scan else {
+            let _ = tx.send(BackendMessage::HardwareProfileLoaded(None)).await;
+            return;
+        };
+        if let Some(recommendation) = load_model_recommendation(client.as_ref(), profile).await {
+            if !recommendation.catalog_version.is_empty() {
+                scan.catalog_version = recommendation.catalog_version;
+            }
+            if !recommendation.tier_label.is_empty() {
+                scan.tier_label = recommendation.tier_label;
+            }
+            scan.profile = profile;
+            scan.expert_mode = recommendation.expert_mode;
+            scan.recommendations = recommendation.recommendations;
+        }
+        let _ = tx
+            .send(BackendMessage::HardwareProfileLoaded(Some(scan)))
+            .await;
+    });
+}
+
+fn spawn_hardware_recommendation(
+    client: Arc<HttpOmaRagClient>,
+    profile: PerformanceProfile,
+    tx: mpsc::Sender<BackendMessage>,
+) {
+    tokio::spawn(async move {
+        let response = load_model_recommendation(client.as_ref(), profile).await;
+        let _ = tx
+            .send(BackendMessage::HardwareRecommendationLoaded { profile, response })
+            .await;
+    });
+}
+
+async fn load_model_recommendation(
+    client: &HttpOmaRagClient,
+    profile: PerformanceProfile,
+) -> Option<HardwareProfileResponse> {
+    // GET is the compact, read-only TUI view. The richer POST response is a
+    // preflight envelope and must never be mistaken for an apply operation.
+    tokio::time::timeout(Duration::from_secs(3), client.model_recommendation(profile))
+        .await
+        .ok()
+        .and_then(Result::ok)
+}
+
+fn merge_hardware_profile(
+    mut fallback: HardwareProfileResponse,
+    backend: HardwareProfileResponse,
+    selected_profile: PerformanceProfile,
+) -> HardwareProfileResponse {
+    let recommendations_match = backend.profile == selected_profile;
+    // Any successfully decoded scan is authoritative for tier and bottleneck.
+    fallback.schema_version = backend.schema_version;
+    fallback.tier = backend.tier;
+    if !backend.tier_label.is_empty() {
+        fallback.tier_label = backend.tier_label;
+    }
+    if !backend.limiting_factor.is_empty() {
+        fallback.limiting_factor = backend.limiting_factor;
+    }
+    if !backend.catalog_version.is_empty() {
+        fallback.catalog_version = backend.catalog_version;
+    }
+    fallback.scanned_at = backend.scanned_at;
+    fallback.profile = selected_profile;
+    fallback.expert_mode = backend.expert_mode;
+    if recommendations_match {
+        fallback.recommendations = backend.recommendations;
+    }
+    fallback
+}
+
 fn spawn_command(
     client: Arc<HttpOmaRagClient>,
     model_api: ModelApi,
@@ -987,6 +1246,7 @@ fn spawn_command(
                 session_id,
                 question,
                 evidence_mode,
+                profile,
                 filters,
             } => BackendMessage::RunStarted(
                 client
@@ -994,6 +1254,7 @@ fn spawn_command(
                         let mut request = RunRequest::question(question, evidence_mode)
                             .with_session_id(session_id);
                         request.filters = filters;
+                        request.options.profile = profile.api_label().into();
                         request
                     })
                     .await
@@ -1111,6 +1372,21 @@ fn spawn_command(
                     .await
                     .map_err(|error| error.to_string()),
             ),
+            UiCommand::PreflightAutomaticStack { workspace, profile } => {
+                let result = client
+                    .preflight_model_profile(workspace.clone(), profile)
+                    .await
+                    .map_err(|error| error.to_string());
+                BackendMessage::AutomaticStackPreflight { workspace, result }
+            }
+            UiCommand::ApplyAutomaticStack { workspace, request } => {
+                BackendMessage::AutomaticStackApplied(
+                    client
+                        .apply_model_profile(workspace, request)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }
             UiCommand::RefreshModelCatalog {
                 source,
                 category,
@@ -1630,18 +1906,17 @@ fn citation_source_path(state: &AppState, citation: &omarag_domain::Citation) ->
         .map(|document| document.source.clone())
 }
 
-fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
-    related_image_refs(state)
+fn citation_preview_targets(
+    state: &AppState,
+    visual: &VisualInspectorState,
+) -> Vec<CitationPreviewTarget> {
+    related_page_refs(state, Some(&visual.evidence))
         .into_iter()
         .filter_map(|(citation_index, page_index, page)| {
             let citation = state.chat.citations.get(citation_index)?;
             let path = citation_source_path(state, citation)?;
             let source_title = citation.document_title.as_deref().unwrap_or("Source");
-            let title = if citation.picture_refs.is_empty() {
-                format!("{source_title} · p.{page}")
-            } else {
-                format!("Figure · {source_title} · p.{page}")
-            };
+            let title = format!("Page · {source_title} · p.{page}");
             Some(CitationPreviewTarget {
                 citation_index,
                 page_index,
@@ -1667,8 +1942,11 @@ fn citation_preview_targets(state: &AppState) -> Vec<CitationPreviewTarget> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn schedule_chat_previews(
     state: &AppState,
+    visual: &VisualInspectorState,
+    enabled: bool,
     client: Arc<HttpOmaRagClient>,
     picker: &Picker,
     previews: &mut Vec<ChatImagePreview>,
@@ -1676,7 +1954,13 @@ fn schedule_chat_previews(
     scope: &mut PreviewScope,
     tx: mpsc::Sender<BackendMessage>,
 ) {
-    let targets = citation_preview_targets(state);
+    if !enabled {
+        scope.token.cancel();
+        scope.keys.clear();
+        pending.clear();
+        return;
+    }
+    let targets = citation_preview_targets(state, visual);
     let keys = targets
         .iter()
         .map(|target| (target.path.clone(), target.page))
@@ -1774,8 +2058,102 @@ fn schedule_chat_previews(
     }
 }
 
-fn citation_preview_position(state: &AppState, path: &str, page: u32) -> usize {
-    citation_preview_targets(state)
+#[allow(clippy::too_many_arguments)]
+fn schedule_media_previews(
+    visual: &VisualInspectorState,
+    enabled: bool,
+    client: Arc<HttpOmaRagClient>,
+    picker: &Picker,
+    previews: &mut Vec<MediaImagePreview>,
+    pending: &mut BTreeSet<String>,
+    scope: &mut MediaPreviewScope,
+    tx: mpsc::Sender<BackendMessage>,
+) {
+    if !enabled {
+        scope.token.cancel();
+        scope.keys.clear();
+        pending.clear();
+        return;
+    }
+    let targets = visual
+        .evidence
+        .media
+        .iter()
+        .filter(|asset| asset.is_individual_asset())
+        .take(VisualEvidenceResponse::MAX_MEDIA)
+        .filter_map(|asset| {
+            let url = asset.image_url()?.to_owned();
+            let media_id = asset.media_id.clone();
+            let key = format!("{media_id}\u{1f}{url}");
+            Some((key, media_id, url))
+        })
+        .collect::<Vec<_>>();
+    let keys = targets
+        .iter()
+        .map(|(key, _, _)| key.clone())
+        .collect::<Vec<_>>();
+    if scope.keys != keys {
+        scope.token.cancel();
+        scope.token = CancellationToken::new();
+        scope.keys = keys;
+        pending.clear();
+    }
+    let media_ids = targets
+        .iter()
+        .map(|(_, media_id, _)| media_id.as_str())
+        .collect::<BTreeSet<_>>();
+    previews.retain(|preview| media_ids.contains(preview.media_id.as_str()));
+    pending.retain(|key| targets.iter().any(|(target, _, _)| target == key));
+    for (key, media_id, url) in targets {
+        if previews.iter().any(|preview| preview.media_id == media_id)
+            || !pending.insert(key.clone())
+        {
+            continue;
+        }
+        let picker = picker.clone();
+        let tx = tx.clone();
+        let cancellation = scope.token.clone();
+        let client = Arc::clone(&client);
+        tokio::spawn(async move {
+            let result = async {
+                let bytes = client
+                    .visual_evidence_asset(url)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tokio::task::spawn_blocking(move || {
+                    let image = ImageReader::new(Cursor::new(bytes))
+                        .with_guessed_format()
+                        .map_err(|error| error.to_string())?
+                        .decode()
+                        .map_err(|error| error.to_string())?;
+                    Ok(MediaImagePreview::new(
+                        media_id,
+                        picker.new_resize_protocol(image),
+                    ))
+                })
+                .await
+                .map_err(|error| error.to_string())?
+            };
+            let result = tokio::select! {
+                _ = cancellation.cancelled() => return,
+                result = result => result,
+            };
+            if !cancellation.is_cancelled() {
+                let _ = tx
+                    .send(BackendMessage::MediaPreviewLoaded { key, result })
+                    .await;
+            }
+        });
+    }
+}
+
+fn citation_preview_position(
+    state: &AppState,
+    visual: &VisualInspectorState,
+    path: &str,
+    page: u32,
+) -> usize {
+    citation_preview_targets(state, visual)
         .iter()
         .position(|target| target.path == path && target.page == page)
         .unwrap_or(usize::MAX)
@@ -2130,8 +2508,12 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
             }
             Err(error) => notify_error(state, error),
         },
-        BackendMessage::PreviewLoaded { .. } => {
-            unreachable!("preview messages are handled in the event loop")
+        BackendMessage::PreviewLoaded { .. }
+        | BackendMessage::MediaPreviewLoaded { .. }
+        | BackendMessage::VisualEvidenceLoaded { .. }
+        | BackendMessage::HardwareProfileLoaded(_)
+        | BackendMessage::HardwareRecommendationLoaded { .. } => {
+            unreachable!("runtime-only messages are handled in the event loop")
         }
         BackendMessage::RunStarted(result) => match result {
             Ok(id) => {
@@ -2265,6 +2647,52 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 notify_error(state, error);
             }
         },
+        BackendMessage::AutomaticStackPreflight { workspace, result } => {
+            state.model_manager.busy = false;
+            if state.active_workspace.as_ref() != Some(&workspace) {
+                state.automatic_stack_preflight = None;
+                state.model_manager.transfer_status = "Automatic stack preview expired".into();
+                return false;
+            }
+            match result {
+                Ok(preflight) => {
+                    state.model_manager.transfer_status = if preflight.requires_reindex {
+                        "Automatic stack requires a full rebuild".into()
+                    } else {
+                        "Automatic stack ready for review".into()
+                    };
+                    state.automatic_stack_preflight = Some(preflight);
+                    state.overlay = Some(Overlay::AutomaticStackPreflight);
+                    state.input_mode = InputMode::Nav;
+                }
+                Err(error) => {
+                    state.automatic_stack_preflight = None;
+                    state.model_manager.transfer_status = "Automatic stack unavailable".into();
+                    notify_error(state, error);
+                }
+            }
+        }
+        BackendMessage::AutomaticStackApplied(result) => {
+            state.model_manager.busy = false;
+            state.automatic_stack_preflight = None;
+            match result {
+                Ok(config) => {
+                    update(state, Action::ConfigSaved(config));
+                    state.model_manager.transfer_status = "Automatic stack applied".into();
+                    update(
+                        state,
+                        Action::Notify(Notification {
+                            level: NotificationLevel::Info,
+                            message: "Automatic model stack applied.".into(),
+                        }),
+                    );
+                }
+                Err(error) => {
+                    state.model_manager.transfer_status = "Automatic stack apply failed".into();
+                    notify_error(state, error);
+                }
+            }
+        }
         BackendMessage::ModelCatalogLoaded(result) => {
             state.model_manager.busy = false;
             match result {
@@ -2449,5 +2877,31 @@ mod tests {
             state.notifications.last().map(|item| item.message.as_str()),
             Some("Selection copied.")
         );
+    }
+
+    #[test]
+    fn backend_scan_owns_tier_while_partial_fields_keep_safe_fallbacks() {
+        let fallback = HardwareProfileResponse {
+            tier: omarag_domain::HardwareTier::new(4).unwrap(),
+            tier_label: "Legacy tier 4".into(),
+            limiting_factor: "VRAM".into(),
+            catalog_version: "bundled".into(),
+            ..HardwareProfileResponse::default()
+        };
+        let backend = HardwareProfileResponse {
+            tier: omarag_domain::HardwareTier::new(8).unwrap(),
+            profile: PerformanceProfile::Fast,
+            recommendations: vec![omarag_domain::ModelRecommendation {
+                role: "chat".into(),
+                model: "recommended-chat".into(),
+                ..omarag_domain::ModelRecommendation::default()
+            }],
+            ..HardwareProfileResponse::default()
+        };
+        let merged = merge_hardware_profile(fallback, backend, PerformanceProfile::Fast);
+        assert_eq!(merged.tier.level(), 8);
+        assert_eq!(merged.catalog_version, "bundled");
+        assert_eq!(merged.profile, PerformanceProfile::Fast);
+        assert_eq!(merged.recommendations[0].model, "recommended-chat");
     }
 }

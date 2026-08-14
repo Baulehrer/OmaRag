@@ -10,7 +10,12 @@ from .models.domain import Citation
 from .models.errors import ConflictError, NotFoundError
 
 
-def _source_path(source_uri: str | None) -> Path:
+def _source_path(source_uri: str | None, managed_source: Path | None = None) -> Path:
+    if managed_source is not None:
+        path = managed_source.resolve()
+        if not path.is_file() or path.suffix.lower() != ".pdf":
+            raise NotFoundError("The cited managed PDF is no longer available")
+        return path
     if not source_uri:
         raise NotFoundError("Citation has no original source")
     parsed = urlparse(source_uri)
@@ -90,7 +95,17 @@ def _prune(cache_dir: Path, limit_bytes: int = 300 * 1024**2) -> None:
             path.unlink(missing_ok=True)
 
 
-async def render_citation_preview(citation: Citation, cache_dir: Path, max_px: int) -> bytes:
+async def render_citation_preview(
+    citation: Citation,
+    cache_dir: Path,
+    max_px: int,
+    *,
+    managed_source: Path | None = None,
+) -> bytes:
     return await asyncio.to_thread(
-        _render, _source_path(citation.source_uri), citation, cache_dir, max_px
+        _render,
+        _source_path(citation.source_uri, managed_source),
+        citation,
+        cache_dir,
+        max_px,
     )

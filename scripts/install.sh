@@ -2,7 +2,7 @@
 set -eu
 
 REPOSITORY=${OMARAG_REPOSITORY:-${ORACLE_REPOSITORY:-Baulehrer/OmaRag}}
-VERSION=1.0.0
+VERSION=1.2.0
 PREFIX=${ORACLE_PREFIX:-"$HOME/.local"}
 INSTALL_SERVICE=1
 INSTALL_UPDATER=1
@@ -29,7 +29,7 @@ done
 
 case "$(uname -m)" in
     x86_64|amd64) ARCH=x86_64 ;;
-    *) printf 'OmaRag 1.0 supports x86_64 Linux only.\n' >&2; exit 1 ;;
+    *) printf 'OmaRag supports x86_64 Linux only.\n' >&2; exit 1 ;;
 esac
 
 TAG="v$VERSION"

@@ -5,13 +5,21 @@ from pathlib import Path
 
 import pytest
 
+from omarag_bridge.adapters.base import (
+    SearchManyItem,
+    SearchManyRequest,
+    SearchManyResult,
+    SearchManyStats,
+)
 from omarag_bridge.adapters.isolated import (
+    _QUERY_OPERATIONS,
     IsolatedHaikuAdapter,
     WorkerLimits,
     _ChildCallbacks,
     _ollama_targets,
     _unload_ollama_targets,
 )
+from omarag_bridge.services.resource_coordinator import MemorySnapshot, ResourceCoordinator
 
 
 def _adapter(*, idle: float = 0.1) -> IsolatedHaikuAdapter:
@@ -24,6 +32,30 @@ def _adapter(*, idle: float = 0.1) -> IsolatedHaikuAdapter:
         query_idle_seconds=idle,
         unload_ollama_models=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_query_residency_grows_with_reuse_and_drops_on_pressure(monkeypatch) -> None:
+    coordinator = ResourceCoordinator()
+    ready = MemorySnapshot(total=16_000, available=10_000, reserve=2_000)
+    pressured = MemorySnapshot(total=16_000, available=3_000, reserve=2_000)
+    monkeypatch.setattr(coordinator, "memory", lambda: ready)
+
+    assert coordinator.residency_seconds() == 30.0
+    expected = [60.0, 120.0, 240.0, 300.0, 300.0]
+    for lifetime in expected:
+        async with coordinator.chat():
+            pass
+        assert coordinator.residency_seconds() == lifetime
+
+    monkeypatch.setattr(coordinator, "memory", lambda: pressured)
+    assert coordinator.residency_seconds() == 0.0
+
+    capped = ResourceCoordinator(max_residency_seconds=45.0)
+    monkeypatch.setattr(capped, "memory", lambda: ready)
+    async with capped.chat():
+        pass
+    assert capped.residency_seconds() == 45.0
 
 
 def test_adapter_metadata_does_not_import_haiku_client() -> None:
@@ -149,3 +181,70 @@ async def test_worker_forwards_index_phase_callbacks() -> None:
 
     assert connection.sent[-1]["name"] == "on_phase"
     assert connection.sent[-1]["args"] == ("embedding", 26, 50, 300)
+
+
+@pytest.mark.asyncio
+async def test_search_many_uses_one_worker_round_trip_and_reports_savings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter()
+    assert "search_many" in _QUERY_OPERATIONS
+    calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+    async def call(operation: str, *args: object, **kwargs: object) -> SearchManyResult:
+        calls.append((operation, args, kwargs))
+        return SearchManyResult(
+            items=[SearchManyItem(key="F1", hits=[])],
+            hydrated_chunks=[],
+            stats=SearchManyStats(
+                search_requests=2,
+                successful_searches=2,
+                backend_sessions=1,
+                native_batch=True,
+            ),
+        )
+
+    monkeypatch.setattr(adapter, "_call", call)
+    requests = [
+        SearchManyRequest(key="F1", query="first", limit=8, rerank=False),
+        SearchManyRequest(key="F2", query="second", limit=8, rerank=False),
+    ]
+
+    result = await adapter.search_many(
+        tmp_path / "knowledge.lancedb",
+        requests,
+        hydrate_chunk_ids=["route-1", "route-1"],
+    )
+
+    assert len(calls) == 1
+    operation, args, kwargs = calls[0]
+    assert operation == "search_many"
+    assert args == (tmp_path / "knowledge.lancedb", requests)
+    assert kwargs == {"hydrate_chunk_ids": ["route-1", "route-1"]}
+    assert result.stats.ipc_round_trips == 1
+    assert result.stats.ipc_round_trips_saved == 2
+
+
+@pytest.mark.asyncio
+async def test_search_many_contains_worker_failure_per_facet(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter()
+
+    async def call(*_args: object, **_kwargs: object) -> SearchManyResult:
+        raise RuntimeError("worker unavailable")
+
+    monkeypatch.setattr(adapter, "_call", call)
+    result = await adapter.search_many(
+        tmp_path / "knowledge.lancedb",
+        [SearchManyRequest(key="F1", query="first", limit=8, rerank=False)],
+        hydrate_chunk_ids=["route-1"],
+    )
+
+    assert result.items[0].failure is not None
+    assert result.items[0].failure.code == "RuntimeError"
+    assert result.hydration_failure is not None
+    assert result.stats.ipc_round_trips == 1
+    assert result.stats.fallback_reason == "worker_batch_failed"

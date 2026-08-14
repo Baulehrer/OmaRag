@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import os
 import re
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -13,6 +15,8 @@ from importlib import metadata as package_metadata
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
+
+from ruamel.yaml import YAML, YAMLError
 
 from ..models.book import (
     BookBookmark,
@@ -44,9 +48,26 @@ from ..services.book_structure_service import (
     parse_table_of_contents,
     reconcile_book_structure,
 )
+from ..services.media_service import (
+    MediaVlmEnrichmentResult,
+    MediaVlmLimits,
+    build_media_snapshot,
+    collect_media_assets,
+    enrich_media_assets_vlm,
+    materialize_collected_media,
+)
+from ..services.structure_fallback_service import (
+    OllamaStructureFallbackRunner,
+    StructureFallbackResult,
+    StructureFallbackRunner,
+    StructureRouteSelection,
+    refine_uncertain_navigation_regions,
+)
 
 BOOK_V2_PIPELINE = "book-index-v2"
-CACHE_SCHEMA = 1
+BOOK_V3_PIPELINE = "book-index-v3"
+CACHE_SCHEMA = 3
+CACHE_KEY_SCHEMA = 1
 PageRange = tuple[int, int]
 
 
@@ -92,6 +113,127 @@ def _package_version(name: str) -> str:
         return package_metadata.version(name)
     except package_metadata.PackageNotFoundError:
         return "unknown"
+
+
+def _valid_ollama_model_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    valid = (
+        len(candidate) <= 256
+        and "://" not in candidate
+        and not any(character.isspace() for character in candidate)
+    )
+    return candidate if valid else None
+
+
+def _same_ollama_model_name(left: str, right: str) -> bool:
+    return left.removesuffix(":latest") == right.removesuffix(":latest")
+
+
+def _configured_vlm_model(config: Any, *, config_path: Path | None = None) -> str | None:
+    """Prefer the explicit local VL role, then a vision-enabled Ollama QA model."""
+
+    if config_path is not None:
+        try:
+            if config_path.is_file() and config_path.stat().st_size <= 2 * 1024**2:
+                raw = YAML(typ="safe").load(config_path.read_text(encoding="utf-8")) or {}
+                raw_oracle = _value(raw, "oracle", default={}) or {}
+                raw_defaults = _value(raw_oracle, "model_defaults", default={}) or {}
+                if explicit := _valid_ollama_model_name(_value(raw_defaults, "vl", default=None)):
+                    return explicit
+        except (OSError, TypeError, ValueError, YAMLError):
+            # AppConfig remains authoritative if the optional OmaRAG extension
+            # cannot be recovered from the raw YAML mapping.
+            pass
+    oracle = _value(config, "oracle", default={}) or {}
+    defaults = _value(oracle, "model_defaults", default={}) or {}
+    if explicit := _valid_ollama_model_name(_value(defaults, "vl", default=None)):
+        return explicit
+    qa = _value(config, "qa", default={}) or {}
+    qa_model = _value(qa, "model", default={}) or {}
+    provider = str(_value(qa_model, "provider", default="") or "").casefold()
+    vision = bool(_value(qa_model, "vision", default=False))
+    if provider != "ollama" or not vision:
+        return None
+    return _valid_ollama_model_name(_value(qa_model, "name", default=None))
+
+
+def _configured_vlm_digest(config_path: Path, model: str | None) -> str | None:
+    """Return the release-pinned digest, or an empty fail-closed auto-profile marker."""
+
+    try:
+        if not config_path.is_file() or config_path.stat().st_size > 2 * 1024**2:
+            return None
+        raw = YAML(typ="safe").load(config_path.read_text(encoding="utf-8")) or {}
+        profile = (_value(raw, "oracle", default={}) or {}).get("model_profile") or {}
+        if not isinstance(profile, dict) or profile.get("expert_mode") is not False:
+            return None
+        artifacts = profile.get("artifacts") or {}
+        artifact = artifacts.get("vl") if isinstance(artifacts, dict) else None
+        if not isinstance(artifact, dict):
+            return ""
+        if (
+            str(artifact.get("provider") or "") != "ollama"
+            or not model
+            or not _same_ollama_model_name(str(artifact.get("model") or ""), model)
+        ):
+            return ""
+        digest = str(artifact.get("digest") or "")
+        return digest if 0 < len(digest) <= 256 else ""
+    except (OSError, TypeError, ValueError, YAMLError):
+        return ""
+
+
+def _configured_structure_model(config: Any, *, config_path: Path | None = None) -> str | None:
+    """Resolve only the explicit local structure-routing role.
+
+    There is deliberately no QA-model fallback: until a hardware profile owns
+    this role, ``llm_fallback=auto`` remains fail-safe and unused unless a
+    caller injects both the role and its local runner.
+    """
+
+    if config_path is not None:
+        try:
+            if config_path.is_file() and config_path.stat().st_size <= 2 * 1024**2:
+                raw = YAML(typ="safe").load(config_path.read_text(encoding="utf-8")) or {}
+                raw_oracle = _value(raw, "oracle", default={}) or {}
+                raw_defaults = _value(raw_oracle, "model_defaults", default={}) or {}
+                if explicit := _valid_ollama_model_name(
+                    _value(raw_defaults, "structure", default=None)
+                ):
+                    return explicit
+        except (OSError, TypeError, ValueError, YAMLError):
+            pass
+    oracle = _value(config, "oracle", default={}) or {}
+    defaults = _value(oracle, "model_defaults", default={}) or {}
+    return _valid_ollama_model_name(_value(defaults, "structure", default=None))
+
+
+def _configured_structure_digest(config_path: Path, model: str | None) -> str | None:
+    """Pin an automatic structure role to the shared chat catalog artifact."""
+
+    try:
+        if not config_path.is_file() or config_path.stat().st_size > 2 * 1024**2:
+            return None
+        raw = YAML(typ="safe").load(config_path.read_text(encoding="utf-8")) or {}
+        profile = (_value(raw, "oracle", default={}) or {}).get("model_profile") or {}
+        if not isinstance(profile, dict) or profile.get("expert_mode") is not False:
+            return None
+        artifacts = profile.get("artifacts") or {}
+        artifact = artifacts.get("chat") if isinstance(artifacts, dict) else None
+        if not isinstance(artifact, dict):
+            return ""
+        if (
+            str(artifact.get("provider") or "") != "ollama"
+            or not model
+            or not _same_ollama_model_name(str(artifact.get("model") or ""), model)
+        ):
+            return ""
+        digest = str(artifact.get("digest") or "")
+        return digest if 0 < len(digest) <= 256 else ""
+    except (OSError, TypeError, ValueError, YAMLError):
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,11 +406,18 @@ def build_docling_converter(config: Any, processing_profile: str) -> Any:
 
 
 class RangeCache:
-    """Content-addressed Docling cache keyed by absolute PDF page range."""
+    """Compressed content-addressed cache with backward V1.1 reads."""
 
-    def __init__(self, root: Path, *, limit_bytes: int = 5 * 1024**3) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        limit_bytes: int = 5 * 1024**3,
+        max_age_days: int = 30,
+    ) -> None:
         self.root = root
         self.limit_bytes = limit_bytes
+        self.max_age_seconds = max_age_days * 24 * 60 * 60
 
     def key(
         self,
@@ -278,7 +427,9 @@ class RangeCache:
     ) -> str:
         material = json.dumps(
             {
-                "schema": CACHE_SCHEMA,
+                # Keep the original key namespace so V1.1 JSON entries remain
+                # discoverable until natural eviction.
+                "schema": CACHE_KEY_SCHEMA,
                 "source": source_fingerprint,
                 "page_range": list(page_range),
                 "conversion": signature,
@@ -289,25 +440,35 @@ class RangeCache:
         return hashlib.sha256(material.encode()).hexdigest()
 
     def path(self, key: str) -> Path:
+        return self.root / f"{key}.json.gz"
+
+    def legacy_path(self, key: str) -> Path:
         return self.root / f"{key}.json"
 
     def load(self, key: str, page_range: PageRange) -> Any | None:
         path = self.path(key)
-        if not path.exists():
+        legacy_path = self.legacy_path(key)
+        if not path.exists() and not legacy_path.exists():
             return None
         try:
             from docling_core.types.doc import DoclingDocument
 
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if payload.get("schema") != CACHE_SCHEMA:
+            active_path = path if path.exists() else legacy_path
+            if active_path.suffix == ".gz":
+                with gzip.open(active_path, mode="rt", encoding="utf-8") as source:
+                    payload = json.load(source)
+            else:
+                payload = json.loads(active_path.read_text(encoding="utf-8"))
+            if payload.get("schema") not in {1, CACHE_SCHEMA}:
                 raise ValueError("unsupported cache schema")
             if tuple(payload.get("page_range", ())) != page_range:
                 raise ValueError("page range mismatch")
             document = DoclingDocument.model_validate(payload["document"])
-            os.utime(path, None)
+            os.utime(active_path, None)
             return document
         except (KeyError, OSError, TypeError, ValueError):
             path.unlink(missing_ok=True)
+            legacy_path.unlink(missing_ok=True)
             return None
 
     def store(self, key: str, page_range: PageRange, document: Any) -> None:
@@ -319,23 +480,31 @@ class RangeCache:
             "page_range": list(page_range),
             "document": document.export_to_dict(),
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=self.root, suffix=".tmp", delete=False
-        ) as temporary:
-            json.dump(payload, temporary, ensure_ascii=False, separators=(",", ":"))
+        with tempfile.NamedTemporaryFile(dir=self.root, suffix=".tmp", delete=False) as temporary:
             temporary_path = Path(temporary.name)
+        with gzip.open(temporary_path, mode="wt", encoding="utf-8", compresslevel=6) as target:
+            json.dump(payload, target, ensure_ascii=False, separators=(",", ":"))
         temporary_path.replace(self.path(key))
 
     def prune(self) -> None:
         if not self.root.exists():
             return
         paths = sorted(
-            (item for item in self.root.glob("*.json") if item.is_file()),
+            (
+                item
+                for pattern in ("*.json", "*.json.gz")
+                for item in self.root.glob(pattern)
+                if item.is_file()
+            ),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
         retained = 0
+        newest_allowed = time.time() - self.max_age_seconds
         for path in paths:
+            if path.stat().st_mtime < newest_allowed:
+                path.unlink(missing_ok=True)
+                continue
             retained += path.stat().st_size
             if retained > self.limit_bytes:
                 path.unlink(missing_ok=True)
@@ -641,6 +810,8 @@ def _chunk_contract_payload(chunk: Any, evidence: EvidenceRecord) -> dict[str, A
         "embedding_aliases": _strings(chunk_metadata.get("embedding_aliases")),
         "reference_roles": _strings(chunk_metadata.get("reference_roles")),
         "context_hash": evidence.context_hash,
+        "evidence_kind": evidence.evidence_kind,
+        "provenance_kind": evidence.provenance_kind,
         "quality_flags": list(evidence.quality_flags),
     }
 
@@ -698,6 +869,8 @@ def _chunk_manifest(
         "doc_item_refs": refs,
         "navigation_role": str(chunk_metadata.get("navigation_role", "body")),
         "evidence_role": "raw",
+        "evidence_kind": evidence.evidence_kind,
+        "provenance_kind": evidence.provenance_kind,
         "section_node_id": evidence.section_node_id,
         "raw_tokens": evidence.raw_tokens,
         "context_hash": evidence.context_hash,
@@ -777,10 +950,21 @@ def _plan_ranges(
 
 @dataclass(frozen=True, slots=True)
 class ConvertedRange:
+    # page_range is the disjoint ownership/core interval. conversion_range may
+    # include a one-page halo on either side so Docling can preserve semantic
+    # units that cross an operational memory boundary.
     page_range: PageRange
+    conversion_range: PageRange
     cache_key: str
     cache_hit: bool
     retained_document: Any | None = None
+
+
+def _conversion_range(core_range: PageRange, total_pages: int, *, halo_pages: int = 1) -> PageRange:
+    return (
+        max(1, core_range[0] - halo_pages),
+        min(total_pages, core_range[1] + halo_pages),
+    )
 
 
 def _docling_bbox(provenance: Any) -> tuple[float, float, float, float] | None:
@@ -876,6 +1060,8 @@ def _parse_navigation(
     page_labels: dict[str, int],
     *,
     total_pages: int,
+    detected_regions: list[NavigationRegion] | None = None,
+    route_selections: list[StructureRouteSelection] | None = None,
 ) -> tuple[
     list[NavigationRegion],
     list[TocEntry],
@@ -883,7 +1069,52 @@ def _parse_navigation(
     list[GlossaryEntry],
     dict[str, list[TocEntry]],
 ]:
-    regions = detect_navigation_regions(pages, total_pages=total_pages)
+    regions = (
+        list(detected_regions)
+        if detected_regions is not None
+        else detect_navigation_regions(pages, total_pages=total_pages)
+    )
+    selections = list(route_selections or [])
+
+    def apply_route_depths(
+        entries: list[TocEntry], role: str, *, model_assisted: bool
+    ) -> list[TocEntry]:
+        if not model_assisted:
+            return entries
+        updated: list[TocEntry] = []
+        for entry in entries:
+            matching = next(
+                (
+                    selection
+                    for selection in selections
+                    if selection.role == role
+                    and selection.page_no == entry.source_page
+                    and selection.locator == entry.locator.raw
+                    and (
+                        selection.source_ref == entry.source_ref
+                        if entry.source_ref is not None
+                        else selection.substring in entry.title
+                        or entry.title in selection.substring
+                    )
+                ),
+                None,
+            )
+            if matching is None:
+                updated.append(entry)
+                continue
+            # Model-assisted levels remain explicitly below the immutable
+            # deterministic-confidence boundary. Text, page and locator stay
+            # byte-for-byte owned by the deterministic parser.
+            updated.append(
+                entry.model_copy(
+                    update={
+                        "depth": matching.level,
+                        "confidence": min(0.81, matching.objective),
+                    }
+                )
+            )
+        return updated
+
     toc_entries: list[TocEntry] = []
     index_entries: list[IndexEntry] = []
     glossary_entries: list[GlossaryEntry] = []
@@ -896,7 +1127,13 @@ def _parse_navigation(
         if not region.accepted:
             continue
         if region.role == "toc":
-            toc_entries.extend(parse_table_of_contents(pages, region, page_labels))
+            toc_entries.extend(
+                apply_route_depths(
+                    parse_table_of_contents(pages, region, page_labels),
+                    region.role,
+                    model_assisted="llm_objective_gain" in region.metrics,
+                )
+            )
         elif region.role == "index":
             index_entries.extend(parse_subject_index(pages, region, page_labels))
         elif region.role in {"glossary", "abbreviations", "symbols"}:
@@ -904,7 +1141,13 @@ def _parse_navigation(
         elif region.role in reference_entries:
             # Figure/table/equation lists look like a TOC but describe
             # caption targets. They must not become chapter outline anchors.
-            reference_entries[region.role].extend(parse_reference_list(pages, region, page_labels))
+            reference_entries[region.role].extend(
+                apply_route_depths(
+                    parse_reference_list(pages, region, page_labels),
+                    region.role,
+                    model_assisted="llm_objective_gain" in region.metrics,
+                )
+            )
     return regions, toc_entries, index_entries, glossary_entries, reference_entries
 
 
@@ -1156,7 +1399,50 @@ def _evidence_anchors(
             )
         )
         quality_flags.append("missing-element-provenance")
+    anchors.sort(
+        key=lambda anchor: (
+            anchor.page_no,
+            anchor.bbox[1] if anchor.bbox is not None else 0.0,
+            anchor.source_ref,
+        )
+    )
     return anchors, list(dict.fromkeys(quality_flags))
+
+
+def _typed_evidence(
+    chunk_metadata: dict[str, Any],
+    anchors: list[EvidenceAnchor],
+    quality_flags: list[str],
+) -> tuple[str, str]:
+    """Classify raw evidence conservatively from provider-owned labels only."""
+    labels = {
+        value.casefold().replace("-", "_").replace(" ", "_")
+        for value in [
+            *_strings(chunk_metadata.get("labels")),
+            *(anchor.label or "" for anchor in anchors),
+        ]
+        if value
+    }
+    navigation_role = str(chunk_metadata.get("navigation_role") or "body")
+    if navigation_role != "body":
+        evidence_kind = "navigation"
+    elif labels & {"table", "table_item"}:
+        evidence_kind = "table"
+    elif labels & {"formula", "equation"}:
+        evidence_kind = "formula"
+    elif labels & {"picture", "figure", "image"}:
+        evidence_kind = "figure"
+    elif any("ocr" in flag.casefold() for flag in quality_flags):
+        evidence_kind = "ocr"
+    else:
+        evidence_kind = "prose" if anchors else "unknown"
+    provenance_kind = (
+        "page-fallback"
+        if "missing-element-provenance" in quality_flags
+        or all(anchor.label == "page-fallback" for anchor in anchors)
+        else "element"
+    )
+    return evidence_kind, provenance_kind
 
 
 def build_evidence_record(
@@ -1193,6 +1479,7 @@ def build_evidence_record(
     node = _node_for_page(structure, min(pages))
     evidence_id = stable_evidence_id(fingerprint, config_hash, anchors, raw_content)
     context_hash = str(chunk_metadata.get("embedding_context_hash", "")) or None
+    evidence_kind, provenance_kind = _typed_evidence(chunk_metadata, anchors, quality_flags)
     record = EvidenceRecord(
         evidence_id=evidence_id,
         raw_content=raw_content,
@@ -1207,6 +1494,8 @@ def build_evidence_record(
         raw_tokens=len(re.findall(r"\w+|[^\w\s]", raw_content, re.UNICODE)),
         context_hash=context_hash,
         previous_evidence_id=previous_evidence_id,
+        evidence_kind=evidence_kind,
+        provenance_kind=provenance_kind,
         quality_flags=quality_flags,
     )
     chunk_metadata.update(
@@ -1216,6 +1505,8 @@ def build_evidence_record(
             "section_node_id": record.section_node_id,
             "raw_tokens": record.raw_tokens,
             "context_hash": record.context_hash,
+            "evidence_kind": record.evidence_kind,
+            "provenance_kind": record.provenance_kind,
             "quality_flags": record.quality_flags,
         }
     )
@@ -1245,6 +1536,7 @@ async def ingest_pdf_book_v2(
     llm_url: str | None = None,
     heading_patch_hook: HeadingPatchHook | None = None,
     embed_chunks_fn: Callable[[list[Any], Any, Any], Awaitable[list[Any]]] | None = None,
+    structure_fallback_runner: StructureFallbackRunner | None = None,
 ) -> dict[str, Any]:
     """Index a PDF from immutable bytes using public Docling and Haiku APIs.
 
@@ -1252,6 +1544,34 @@ async def ingest_pdf_book_v2(
     absolute ``page_range``. The same Docling ``DocumentConverter`` instance is
     reused for the complete book. No derived PDFs are created or merged.
     """
+    requested_enrichment = str((indexing_options or {}).get("enrichment", "captions")).casefold()
+    requested_llm_fallback = str((indexing_options or {}).get("llm_fallback", "auto")).casefold()
+    requested_visual_dense = str((indexing_options or {}).get("visual_dense", "off")).casefold()
+    defer_previous_generation_retirement = bool(
+        (indexing_options or {}).get("_defer_previous_generation_retirement", False)
+    )
+    if requested_llm_fallback not in {"auto", "off"}:
+        raise ConflictError(f"Unsupported local structure fallback mode: {requested_llm_fallback}")
+    if requested_visual_dense not in {"off", "on"}:
+        raise ConflictError(f"Unsupported visual dense mode: {requested_visual_dense}")
+    if requested_visual_dense == "on":
+        # The separate media-vector store deliberately has no production
+        # encoder until the pinned Media-Goldset proves >=10 pp Recall@5 over
+        # caption/graph routing. Accepting the flag without vectors would be a
+        # dangerously silent quality regression, so V1.2 fails closed.
+        raise ConflictError(
+            "Visual Dense has not passed the media quality gate for this release; "
+            "use visual_dense=off",
+            details={
+                "required_gate": "media-gold-recall-at-5-plus-10pp",
+                "fallback": "caption-page-graph",
+            },
+        )
+    requested_pipeline = str((indexing_options or {}).get("pipeline", "book-v2")).casefold()
+    if requested_pipeline not in {"book-v2", "book-v3", "compatible"}:
+        raise ConflictError(f"Unsupported book indexing pipeline: {requested_pipeline}")
+    pipeline_version = BOOK_V3_PIPELINE if requested_pipeline == "book-v3" else BOOK_V2_PIPELINE
+    boundary_halo_pages = 1 if pipeline_version == BOOK_V3_PIPELINE else 0
     source = source.resolve()
     actual_fingerprint = await asyncio.to_thread(_file_sha256, source)
     if document_fingerprint and document_fingerprint != actual_fingerprint:
@@ -1276,8 +1596,12 @@ async def ingest_pdf_book_v2(
 
     logical_id = f"book-{fingerprint[:20]}"
     generation_id = generation_id or f"gen-{uuid4().hex[:16]}"
-    source_uri = source.as_uri()
+    # Public provenance must not reveal the user's absolute filesystem layout.
+    # The managed original remains resolvable through the workspace book record.
+    source_uri = f"omarag://documents/{logical_id}/generations/{generation_id}"
     conversion_signature = _conversion_signature(config, processing_profile)
+    conversion_signature["pipeline"] = pipeline_version
+    conversion_signature["boundary_halo_pages"] = boundary_halo_pages
     pipeline_signature = {
         **conversion_signature,
         "haiku": haiku_version or "unknown",
@@ -1318,7 +1642,7 @@ async def ingest_pdf_book_v2(
 
     config_hash = stable_hash(
         {
-            "pipeline": BOOK_V2_PIPELINE,
+            "pipeline": pipeline_version,
             "conversion": pipeline_signature,
             "processing": jsonable(getattr(config, "processing", None)),
             "embeddings": jsonable(getattr(config, "embeddings", None)),
@@ -1353,42 +1677,54 @@ async def ingest_pdf_book_v2(
     cache_hits = 0
     converted_ranges = 0
     pass_two_reconversions = 0
+    halo_fallback_ranges = 0
 
     # Pass 1: convert every absolute range and retain only lightweight global
     # signals. Chunking cannot be correct until the complete outline is known.
-    pending = _plan_ranges(scanned_pages, processing_profile, segment_sizer)
+    pending = [
+        (page_range, boundary_halo_pages)
+        for page_range in _plan_ranges(scanned_pages, processing_profile, segment_sizer)
+    ]
     while pending:
-        page_range = pending.pop(0)
+        page_range, halo_pages = pending.pop(0)
+        conversion_range = _conversion_range(page_range, total_pages, halo_pages=halo_pages)
         start_page, end_page = page_range
         if before_segment is not None and not await before_segment(
             start_page - 1, end_page, total_pages
         ):
             raise asyncio.CancelledError
-        cache_key = cache.key(fingerprint, page_range, conversion_signature)
+        cache_key = cache.key(fingerprint, conversion_range, conversion_signature)
         cache_hit = False
         try:
             async with guard():
                 if on_phase is not None:
                     await on_phase("converting", start_page, end_page, total_pages)
-                docling_document = await asyncio.to_thread(cache.load, cache_key, page_range)
+                docling_document = await asyncio.to_thread(cache.load, cache_key, conversion_range)
                 cache_hit = docling_document is not None
                 if docling_document is None:
                     result = await asyncio.to_thread(
                         converter.convert,
                         source,
-                        page_range=page_range,
+                        page_range=conversion_range,
                     )
                     docling_document = _value(result, "document", default=result)
-                    await asyncio.to_thread(cache.store, cache_key, page_range, docling_document)
+                    await asyncio.to_thread(
+                        cache.store, cache_key, conversion_range, docling_document
+                    )
                     converted_ranges += 1
                 else:
                     cache_hits += 1
                 pages, headings = collect_docling_book_signals(
                     docling_document,
-                    page_range,
+                    conversion_range,
                     page_labels=preflight.page_labels,
                     scanned_pages=scanned_pages,
                 )
+                # Halo pages are conversion context, never global-signal owners.
+                pages = [page for page in pages if start_page <= page.page_no <= end_page]
+                headings = [
+                    heading for heading in headings if start_page <= heading.page_no <= end_page
+                ]
                 # Real Docling documents round-trip through the range cache. A
                 # retained fallback keeps custom adapters/tests functional when
                 # they expose no Docling-compatible serialization.
@@ -1404,10 +1740,27 @@ async def ingest_pdf_book_v2(
         except Exception as exc:
             if _looks_like_memory_pressure(exc) and start_page < end_page:
                 middle = (start_page + end_page) // 2
-                pending[0:0] = [(start_page, middle), (middle + 1, end_page)]
+                pending[0:0] = [
+                    ((start_page, middle), boundary_halo_pages),
+                    ((middle + 1, end_page), boundary_halo_pages),
+                ]
+                continue
+            if _looks_like_memory_pressure(exc) and halo_pages:
+                # At the minimum core size, sacrifice the optional halo rather
+                # than failing a book that V1.1 could index safely.
+                halo_fallback_ranges += 1
+                pending.insert(0, (page_range, 0))
                 continue
             raise
-        converted.append(ConvertedRange(page_range, cache_key, cache_hit, retained))
+        converted.append(
+            ConvertedRange(
+                page_range,
+                conversion_range,
+                cache_key,
+                cache_hit,
+                retained,
+            )
+        )
         book_pages.extend(pages)
         heading_candidates.extend(headings)
 
@@ -1424,17 +1777,80 @@ async def ingest_pdf_book_v2(
         )
     if on_phase is not None:
         await on_phase("reconciling", total_pages, total_pages, total_pages)
-    (
-        regions,
-        toc_entries,
-        index_entries,
-        glossary_entries,
-        reference_entries,
-    ) = _parse_navigation(
-        book_pages,
-        preflight.page_labels,
-        total_pages=total_pages,
-    )
+    deterministic_regions = detect_navigation_regions(book_pages, total_pages=total_pages)
+    structure_fallback = StructureFallbackResult(regions=deterministic_regions)
+    if requested_llm_fallback == "auto":
+        try:
+            structure_config_path = database.parent.parent / "haiku.rag.yaml"
+            structure_fallback = await refine_uncertain_navigation_regions(
+                pages=book_pages,
+                regions=deterministic_regions,
+                total_pages=total_pages,
+                endpoint=llm_url,
+                model=_configured_structure_model(
+                    config,
+                    config_path=structure_config_path,
+                ),
+                runner=(structure_fallback_runner or OllamaStructureFallbackRunner()),
+                expected_digest=_configured_structure_digest(
+                    structure_config_path,
+                    _configured_structure_model(config, config_path=structure_config_path),
+                ),
+                inference_guard=guard,
+            )
+        except Exception as exc:
+            # Model assistance is routing-only and may never turn an otherwise
+            # valid deterministic index into a failed import.
+            structure_fallback = StructureFallbackResult(
+                regions=deterministic_regions,
+                candidate_regions=sum(not region.accepted for region in deterministic_regions),
+                skipped_regions=sum(not region.accepted for region in deterministic_regions),
+                failures=(f"internal-{type(exc).__name__.casefold()}",),
+            )
+    try:
+        (
+            regions,
+            toc_entries,
+            index_entries,
+            glossary_entries,
+            reference_entries,
+        ) = _parse_navigation(
+            book_pages,
+            preflight.page_labels,
+            total_pages=total_pages,
+            detected_regions=structure_fallback.regions,
+            route_selections=structure_fallback.selections,
+        )
+    except Exception as exc:
+        if not structure_fallback.used:
+            raise
+        # Even a fully validated proposal remains optional. If a downstream
+        # deterministic parser cannot consume it, roll back the whole model
+        # contribution and continue with the original regions.
+        structure_fallback = StructureFallbackResult(
+            regions=deterministic_regions,
+            candidate_regions=structure_fallback.candidate_regions,
+            calls=structure_fallback.calls,
+            applied_regions=0,
+            skipped_regions=structure_fallback.candidate_regions,
+            failures=(
+                *structure_fallback.failures,
+                f"application-{type(exc).__name__.casefold()}",
+            ),
+            model=structure_fallback.model,
+        )
+        (
+            regions,
+            toc_entries,
+            index_entries,
+            glossary_entries,
+            reference_entries,
+        ) = _parse_navigation(
+            book_pages,
+            preflight.page_labels,
+            total_pages=total_pages,
+            detected_regions=deterministic_regions,
+        )
     seen_headings: set[tuple[int, str, str | None]] = set()
     unique_headings: list[HeadingCandidate] = []
     for heading in sorted(
@@ -1507,6 +1923,13 @@ async def ingest_pdf_book_v2(
                 "formula_reference_count": len(reference_entries["formulas"]),
                 "navigation_region_count": len(regions),
                 "accepted_navigation_region_count": sum(region.accepted for region in regions),
+                "llm_fallback_candidate_regions": structure_fallback.candidate_regions,
+                "llm_fallback_calls": structure_fallback.calls,
+                "llm_fallback_applied_regions": structure_fallback.applied_regions,
+                "llm_fallback_route_selections": len(structure_fallback.selections),
+                "llm_fallback_used": structure_fallback.used,
+                "llm_fallback_model": structure_fallback.model,
+                "llm_fallback_failures": list(structure_fallback.failures),
             }
         }
     )
@@ -1533,6 +1956,9 @@ async def ingest_pdf_book_v2(
     imported_ids: list[str] = []
     manifest_chunks: list[dict[str, Any]] = []
     evidence: list[EvidenceRecord] = []
+    media_assets = []
+    media_issues: list[str] = []
+    vlm_enrichment: MediaVlmEnrichmentResult | None = None
     seen_evidence_ids: set[str] = set()
     exact_duplicate_count = 0
     resumed_ranges = 0
@@ -1598,6 +2024,7 @@ async def ingest_pdf_book_v2(
         global_order = 0
         for segment_index, converted_range in enumerate(converted):
             page_range = converted_range.page_range
+            conversion_range = converted_range.conversion_range
             start_page, end_page = page_range
             # Pass 2 is the expensive provider-facing half. Re-enter the job's
             # pause/cancel gate and resource lease before every range; do not
@@ -1610,7 +2037,7 @@ async def ingest_pdf_book_v2(
             if docling_document is None:
                 async with guard():
                     docling_document = await asyncio.to_thread(
-                        cache.load, converted_range.cache_key, page_range
+                        cache.load, converted_range.cache_key, conversion_range
                     )
             if docling_document is None:
                 # A concurrent cache prune must not change semantics: reconvert
@@ -1619,13 +2046,13 @@ async def ingest_pdf_book_v2(
                     result = await asyncio.to_thread(
                         converter.convert,
                         source,
-                        page_range=page_range,
+                        page_range=conversion_range,
                     )
                     docling_document = _value(result, "document", default=result)
                     await asyncio.to_thread(
                         cache.store,
                         converted_range.cache_key,
-                        page_range,
+                        conversion_range,
                         docling_document,
                     )
                     pass_two_reconversions += 1
@@ -1643,7 +2070,7 @@ async def ingest_pdf_book_v2(
                     regions=regions,
                     page_aliases=page_aliases,
                     page_reference_roles=page_reference_roles,
-                    page_range=page_range,
+                    page_range=conversion_range,
                     hook=heading_patch_hook,
                 )
 
@@ -1660,6 +2087,12 @@ async def ingest_pdf_book_v2(
                     config_hash=config_hash,
                     previous_evidence_id=previous_id,
                 )
+                owner_page = record.anchors[0].page_no
+                if owner_page < start_page or owner_page > end_page:
+                    # The halo supplied context to Docling, but another disjoint
+                    # core owns this raw evidence. It must never be embedded or
+                    # imported twice.
+                    continue
                 if record.evidence_id in seen_evidence_ids:
                     exact_duplicate_count += 1
                     continue
@@ -1672,6 +2105,21 @@ async def ingest_pdf_book_v2(
                 chunk_metadata = dict(_value(chunk, "metadata", default={}) or {})
                 chunk_metadata["chunk_contract_hash"] = _chunk_contract_hash(chunk, record)
                 chunk.metadata = chunk_metadata
+
+            media_assets.extend(
+                asset
+                for asset in collect_media_assets(
+                    document=docling_document,
+                    source_pdf=source,
+                    source_fingerprint=fingerprint,
+                    logical_document_id=logical_id,
+                    generation_id=generation_id,
+                    structure=structure,
+                    evidence=[record for _chunk, record in range_pairs],
+                    page_labels=preflight.page_labels,
+                )
+                if start_page <= asset.page_no <= end_page
+            )
 
             candidate = candidate_for_range(list(resume_segments or []), page_range)
             candidate_metadata = dict(candidate.get("metadata", {})) if candidate else {}
@@ -1695,12 +2143,12 @@ async def ingest_pdf_book_v2(
                     heading_patch_hook is None or bool(getattr(heading_patch_hook, "version", None))
                 )
                 and candidate_document_id in current_by_id
-                and candidate_metadata.get("pipeline_version") == BOOK_V2_PIPELINE
+                and candidate_metadata.get("pipeline_version") == pipeline_version
                 and candidate_metadata.get("config_hash") == config_hash
                 and candidate_metadata.get("structure_hash") == structure_hash
                 and listed_candidate_metadata.get("logical_document_id") == logical_id
                 and listed_candidate_metadata.get("generation_id") == generation_id
-                and listed_candidate_metadata.get("pipeline_version") == BOOK_V2_PIPELINE
+                and listed_candidate_metadata.get("pipeline_version") == pipeline_version
                 and listed_candidate_metadata.get("config_hash") == config_hash
                 and listed_candidate_metadata.get("structure_hash") == structure_hash
                 and listed_candidate_metadata.get("fingerprint") == fingerprint
@@ -1783,8 +2231,8 @@ async def ingest_pdf_book_v2(
                     "segment_index": segment_index,
                     "core_start": start_page,
                     "core_end": end_page,
-                    "conversion_start": start_page,
-                    "conversion_end": end_page,
+                    "conversion_start": conversion_range[0],
+                    "conversion_end": conversion_range[1],
                     "page_start": start_page,
                     "page_end": end_page,
                     "page_offset": 0,
@@ -1804,7 +2252,7 @@ async def ingest_pdf_book_v2(
                         else "text"
                     ),
                     "cache_key": converted_range.cache_key,
-                    "pipeline_version": BOOK_V2_PIPELINE,
+                    "pipeline_version": pipeline_version,
                     "config_hash": config_hash,
                     "structure_hash": structure_hash,
                     **_book_payload(metadata),
@@ -1884,8 +2332,8 @@ async def ingest_pdf_book_v2(
                 "page_end": end_page,
                 "core_start": start_page,
                 "core_end": end_page,
-                "conversion_start": start_page,
-                "conversion_end": end_page,
+                "conversion_start": conversion_range[0],
+                "conversion_end": conversion_range[1],
                 "page_number_mode": "absolute",
                 "role": range_role,
                 "fingerprint": fingerprint,
@@ -1897,7 +2345,7 @@ async def ingest_pdf_book_v2(
                     "cache_path": str(cache.path(converted_range.cache_key)),
                     "page_kind": page_kind,
                     "role": range_role,
-                    "pipeline_version": BOOK_V2_PIPELINE,
+                    "pipeline_version": pipeline_version,
                     "config_hash": config_hash,
                     "structure_hash": structure_hash,
                     "empty_range": not segment_manifest,
@@ -1920,6 +2368,69 @@ async def ingest_pdf_book_v2(
             index_entries=index_entries,
             glossary_entries=glossary_entries,
         )
+        media_snapshot = None
+        if media_assets:
+            try:
+                materialized_media = await asyncio.to_thread(
+                    materialize_collected_media,
+                    source_pdf=source,
+                    assets=media_assets,
+                    workspace_root=database.parent,
+                    expected_fingerprint=fingerprint,
+                    expected_generation_id=generation_id,
+                    materialize_limit=(
+                        MediaVlmLimits().max_crops if requested_enrichment == "vlm" else 0
+                    ),
+                )
+            except Exception as exc:
+                materialized_media = [
+                    asset.model_copy(
+                        update={
+                            "quality_flags": [
+                                *asset.quality_flags,
+                                "crop-unavailable",
+                            ]
+                        }
+                    )
+                    for asset in media_assets
+                ]
+                media_issues.append(
+                    f"Medienausschnitte konnten nicht materialisiert werden: {type(exc).__name__}."
+                )
+            if requested_enrichment == "vlm":
+                try:
+                    config_path = database.parent.parent / "haiku.rag.yaml"
+                    vlm_model = _configured_vlm_model(config, config_path=config_path)
+                    vlm_enrichment = await enrich_media_assets_vlm(
+                        assets=materialized_media,
+                        workspace_root=database.parent,
+                        llm_url=llm_url,
+                        model=vlm_model,
+                        expected_digest=_configured_vlm_digest(config_path, vlm_model),
+                        inference_guard=guard,
+                    )
+                except Exception as exc:
+                    # Visual routing hints are optional. A failure must never
+                    # invalidate native captions or factual book evidence.
+                    vlm_enrichment = MediaVlmEnrichmentResult(
+                        assets=materialized_media,
+                        eligible_count=sum(
+                            asset.crop_resource is not None for asset in materialized_media
+                        ),
+                        failure=f"internal-{type(exc).__name__.casefold()}",
+                    )
+                materialized_media = vlm_enrichment.assets
+            media_snapshot = build_media_snapshot(
+                structure=structure,
+                evidence=evidence,
+                assets=materialized_media,
+                terms=graph.terms,
+            )
+        elif requested_enrichment == "vlm":
+            vlm_enrichment = MediaVlmEnrichmentResult(
+                assets=[],
+                failure="no-media-assets",
+            )
         snapshot = build_book_knowledge_snapshot(
             logical_document_id=logical_id,
             generation_id=generation_id,
@@ -1928,6 +2439,7 @@ async def ingest_pdf_book_v2(
             structure=structure,
             evidence=evidence,
             graph=graph,
+            media=media_snapshot,
         )
         if on_phase is not None:
             await on_phase("verifying", total_pages, total_pages, total_pages)
@@ -1941,11 +2453,16 @@ async def ingest_pdf_book_v2(
                     "actual": final_fingerprint,
                 },
             )
-        # Old generations remain searchable until the complete new snapshot has
-        # validated. Retirement uses Haiku's public document API only.
-        for document_id in old_document_ids:
-            with suppress(Exception):
-                await rag.delete_document(document_id)
+        # Standalone adapter users keep the historical behaviour. The daemon
+        # instead requests deferred retirement: it first publishes the complete
+        # generation in its transactional Store catalogue and only then removes
+        # the old Haiku documents under the corpus resource lease. That ordering
+        # lets query filters observe either complete generation, never an empty
+        # or partially replaced book.
+        if not defer_previous_generation_retirement:
+            for document_id in old_document_ids:
+                with suppress(Exception):
+                    await rag.delete_document(document_id)
 
     await asyncio.to_thread(cache.prune)
     if snapshot is None:  # defensive: the public client context must complete
@@ -1954,9 +2471,7 @@ async def ingest_pdf_book_v2(
     substantive_coverage = (quality_counts["chunks"] - quality_counts["navigation"]) / max(
         quality_counts["chunks"], 1
     )
-    issues: list[str] = []
-    requested_llm_fallback = (indexing_options or {}).get("llm_fallback", "auto")
-    requested_enrichment = (indexing_options or {}).get("enrichment", "captions")
+    issues: list[str] = list(media_issues)
     low_confidence_regions = sum(not region.accepted for region in regions)
     if provenance_coverage < 0.9:
         issues.append("Ein Teil der Chunks besitzt keine elementgenaue PDF-Provenienz.")
@@ -1965,19 +2480,41 @@ async def ingest_pdf_book_v2(
             "Keine belastbare Gliederung erkannt; deterministische Seitenfenster werden genutzt."
         )
     if requested_llm_fallback == "auto" and low_confidence_regions:
+        if structure_fallback.used:
+            issues.append(
+                "Der lokale Struktur-Fallback verbesserte "
+                f"{structure_fallback.applied_regions} Region(en); "
+                f"{low_confidence_regions} unsichere Region(en) blieben verworfen."
+            )
+        else:
+            failure = structure_fallback.failures[0] if structure_fallback.failures else "unused"
+            issues.append(
+                "Unsichere Navigationsregionen wurden deterministisch verworfen; "
+                f"der lokale Struktur-Fallback blieb sicher ungenutzt ({failure})."
+            )
+    if requested_enrichment == "vlm" and vlm_enrichment is not None:
+        if not vlm_enrichment.used:
+            issues.append(
+                "VLM-Anreicherung wurde nicht verwendet "
+                f"(0/{vlm_enrichment.eligible_count}, "
+                f"abgeschnitten: {vlm_enrichment.truncated_count}, "
+                f"Fehler: {vlm_enrichment.failure or 'keine Beschreibung'}); "
+                "native Captions und FTS bleiben aktiv."
+            )
+        elif vlm_enrichment.failure or vlm_enrichment.truncated_count:
+            issues.append(
+                "VLM-Anreicherung war teilweise erfolgreich "
+                f"({vlm_enrichment.enriched_count}/{vlm_enrichment.eligible_count}, "
+                f"abgeschnitten: {vlm_enrichment.truncated_count}, "
+                f"Fehler: {vlm_enrichment.failure or 'keiner'})."
+            )
+    if (
+        str(getattr(config.processing, "pictures", "none")) == "description"
+        and requested_enrichment != "vlm"
+    ):
         issues.append(
-            "Unsichere Navigationsregionen wurden deterministisch verworfen; "
-            "der lokale LLM-Fallback ist im PDF-v2-Adapter noch nicht aktiv."
-        )
-    if requested_enrichment == "vlm":
-        issues.append(
-            "VLM-Anreicherung ist im lokalen PDF-v2-Adapter noch nicht aktiv; "
-            "vorhandene Captions und Bildprovenienz bleiben erhalten."
-        )
-    if str(getattr(config.processing, "pictures", "none")) == "description":
-        issues.append(
-            "Book-v2 speichert Bilder, fuehrt Bildbeschreibungen aber nur ueber den "
-            "Modellbroker aus."
+            "Bildbeschreibungen sind opt-in; indexing.enrichment='vlm' aktiviert "
+            "das lokal konfigurierte VL-/QA-Modell."
         )
     toc_found = any(region.accepted and region.role == "toc" for region in regions)
     index_found = any(region.accepted and region.role == "index" for region in regions)
@@ -2008,7 +2545,7 @@ async def ingest_pdf_book_v2(
         index_found=index_found,
         glossary_found=glossary_found,
         fallback_used=structure.mode == "window-fallback",
-        llm_fallback_used=False,
+        llm_fallback_used=structure_fallback.used,
         exact_duplicate_count=exact_duplicate_count,
         issues=issues,
     )
@@ -2022,6 +2559,9 @@ async def ingest_pdf_book_v2(
         "document_id": logical_id,
         "logical_document_id": logical_id,
         "generation_id": generation_id,
+        "superseded_segment_document_ids": (
+            old_document_ids if defer_previous_generation_retirement else []
+        ),
         "segment_document_ids": imported_ids,
         "segments": segments,
         "page_count": total_pages,
@@ -2035,7 +2575,7 @@ async def ingest_pdf_book_v2(
         "book_metadata": metadata.model_dump(mode="json") if metadata else None,
         "original_source": original_source or str(source),
         "managed_source": str(source),
-        "pipeline_version": BOOK_V2_PIPELINE,
+        "pipeline_version": pipeline_version,
         "quality": quality.model_dump(mode="json"),
         "chunk_manifest": manifest_chunks,
         "book_structure": structure.model_dump(mode="json"),
@@ -2049,9 +2589,19 @@ async def ingest_pdf_book_v2(
             "pass_two_reconversions": pass_two_reconversions,
             "resumed_ranges": resumed_ranges,
             "range_count": len(converted),
+            "boundary_halo_pages": boundary_halo_pages,
+            "halo_fallback_ranges": halo_fallback_ranges,
+            "core_owned_evidence": True,
             "ocr_pages": sum(scanned_pages),
             "text_pages": total_pages - sum(scanned_pages),
-            "vl_pages": 0,
+            "vl_pages": len(
+                {
+                    asset.page_no
+                    for asset in snapshot.media.assets
+                    if asset.derived_text
+                    and any(text.origin == "model-derived" for text in asset.derived_text)
+                }
+            ),
             "toc_entries": len(toc_entries),
             "index_entries": len(index_entries),
             "glossary_entries": len(glossary_entries),
@@ -2062,12 +2612,42 @@ async def ingest_pdf_book_v2(
             "evidence_records": len(evidence),
             "graph_terms": len(snapshot.graph.terms),
             "graph_edges": len(snapshot.graph.edges),
+            "media_assets": len(snapshot.media.assets),
+            "media_links": len(snapshot.media.links),
+            "media_duplicate_groups": len(snapshot.media.duplicate_groups),
             "two_pass_structure": True,
             "low_confidence_navigation_regions": low_confidence_regions,
             "llm_fallback_requested": requested_llm_fallback,
-            "llm_fallback_used": False,
+            "llm_fallback_used": structure_fallback.used,
+            "llm_fallback_candidate_regions": structure_fallback.candidate_regions,
+            "llm_fallback_calls": structure_fallback.calls,
+            "llm_fallback_applied_regions": structure_fallback.applied_regions,
+            "llm_fallback_route_selections": len(structure_fallback.selections),
+            "llm_fallback_skipped_regions": structure_fallback.skipped_regions,
+            "llm_fallback_failures": list(structure_fallback.failures),
+            "llm_fallback_model": structure_fallback.model,
             "enrichment_requested": requested_enrichment,
-            "vlm_enrichment_used": False,
+            "vlm_enrichment_used": bool(vlm_enrichment and vlm_enrichment.used),
+            "vlm_enrichment_count": (
+                vlm_enrichment.enriched_count if vlm_enrichment is not None else 0
+            ),
+            "vlm_enrichment_eligible": (
+                vlm_enrichment.eligible_count if vlm_enrichment is not None else 0
+            ),
+            "vlm_enrichment_attempted": (
+                vlm_enrichment.attempted_count if vlm_enrichment is not None else 0
+            ),
+            "vlm_enrichment_truncated": bool(vlm_enrichment and vlm_enrichment.truncated_count),
+            "vlm_enrichment_truncated_count": (
+                vlm_enrichment.truncated_count if vlm_enrichment is not None else 0
+            ),
+            "vlm_enrichment_failure": (
+                vlm_enrichment.failure if vlm_enrichment is not None else None
+            ),
+            "vlm_model": vlm_enrichment.model if vlm_enrichment is not None else None,
+            "vlm_model_digest": (
+                vlm_enrichment.model_digest if vlm_enrichment is not None else None
+            ),
             "pdf_original_unchanged": True,
             "absolute_page_ranges": True,
             "docling_converter_instances": 1,

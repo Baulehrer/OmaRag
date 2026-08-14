@@ -8,7 +8,10 @@ use omarag_app::{
 };
 #[cfg(test)]
 use omarag_app::{ModelCategory, ModelQuantization};
-use omarag_domain::{AnswerCacheStatus, JobSnapshot, JobStatus, SourceCheck};
+use omarag_domain::{
+    AnswerCacheStatus, HardwareProfileResponse, HardwareTier, JobSnapshot, JobStatus,
+    MediaEvidence, PerformanceProfile, RunId, SourceCheck, VisualEvidenceResponse,
+};
 use pulldown_cmark::{
     Event as MarkdownEvent, HeadingLevel, Options as MarkdownOptions, Parser, Tag, TagEnd,
 };
@@ -17,7 +20,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+    },
 };
 use ratatui_image::{
     StatefulImage,
@@ -480,6 +485,137 @@ pub struct ChatImagePreview {
     response_rx: std::sync::mpsc::Receiver<ResizeResponse>,
 }
 
+pub struct MediaImagePreview {
+    pub media_id: String,
+    pub protocol: ThreadProtocol,
+    response_rx: std::sync::mpsc::Receiver<ResizeResponse>,
+}
+
+impl MediaImagePreview {
+    pub fn new(media_id: String, protocol: StatefulProtocol) -> Self {
+        let (request_tx, request_rx) = std::sync::mpsc::channel::<ResizeRequest>();
+        let (response_tx, response_rx) = std::sync::mpsc::channel::<ResizeResponse>();
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                if let Ok(response) = request.resize_encode() {
+                    let _ = response_tx.send(response);
+                }
+            }
+        });
+        Self {
+            media_id,
+            protocol: ThreadProtocol::new(request_tx, Some(protocol)),
+            response_rx,
+        }
+    }
+
+    fn receive_resizes(&mut self) {
+        while let Ok(response) = self.response_rx.try_recv() {
+            self.protocol.update_resized_protocol(response);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VisualInspectorTab {
+    #[default]
+    Pages,
+    Figures,
+    Sources,
+}
+
+impl VisualInspectorTab {
+    pub const ALL: [Self; 3] = [Self::Pages, Self::Figures, Self::Sources];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pages => "Pages",
+            Self::Figures => "Figures",
+            Self::Sources => "Sources",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Pages => Self::Figures,
+            Self::Figures => Self::Sources,
+            Self::Sources => Self::Pages,
+        }
+    }
+
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Pages => Self::Sources,
+            Self::Figures => Self::Pages,
+            Self::Sources => Self::Figures,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VisualInspectorState {
+    pub run_id: Option<RunId>,
+    pub evidence: VisualEvidenceResponse,
+    pub tab: VisualInspectorTab,
+    pub selected_media: usize,
+    pub sources_collapsed: bool,
+    /// True when the backend does not implement the V1.1 endpoint. Citation
+    /// pages remain available, but the figures section intentionally stays empty.
+    pub legacy: bool,
+}
+
+impl VisualInspectorState {
+    pub fn replace(&mut self, run_id: RunId, evidence: VisualEvidenceResponse) {
+        self.run_id = Some(run_id);
+        self.evidence = evidence.normalized();
+        self.selected_media = self
+            .selected_media
+            .min(self.evidence.media.len().saturating_sub(1));
+        self.legacy = false;
+    }
+
+    pub fn use_legacy(&mut self, run_id: RunId) {
+        self.run_id = Some(run_id);
+        self.evidence = VisualEvidenceResponse::default();
+        self.selected_media = 0;
+        self.legacy = true;
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+pub fn performance_profile(profile: omarag_app::HardwareProfile) -> PerformanceProfile {
+    match profile {
+        omarag_app::HardwareProfile::Eco => PerformanceProfile::Fast,
+        omarag_app::HardwareProfile::Laptop => PerformanceProfile::Normal,
+        omarag_app::HardwareProfile::Quality => PerformanceProfile::Quality,
+    }
+}
+
+pub fn fallback_hardware_profile(metrics: &RuntimeMetrics) -> HardwareProfileResponse {
+    let tier = HardwareTier::for_capacity(metrics.memory_total, metrics.vram_total);
+    let limiting_factor = if metrics.memory_total < 16 * 1_073_741_824 {
+        "system memory"
+    } else if metrics.vram_total == 0 {
+        "accelerator / VRAM"
+    } else if metrics.vram_total < 24 * 1_073_741_824 {
+        "VRAM"
+    } else if metrics.cpu_count < 8 {
+        "CPU"
+    } else {
+        "model memory"
+    };
+    HardwareProfileResponse {
+        tier,
+        tier_label: format!("Local tier {}", tier.level()),
+        limiting_factor: limiting_factor.into(),
+        catalog_version: format!("bundled-{}", env!("CARGO_PKG_VERSION")),
+        ..HardwareProfileResponse::default()
+    }
+}
+
 impl ChatImagePreview {
     pub fn new(
         citation_index: usize,
@@ -536,6 +672,30 @@ pub fn render_with_previews(
     metrics: &RuntimeMetrics,
     previews: &mut [ChatImagePreview],
 ) {
+    let hardware = fallback_hardware_profile(metrics);
+    render_with_runtime(
+        frame,
+        state,
+        theme,
+        metrics,
+        previews,
+        &mut [],
+        &VisualInspectorState::default(),
+        &hardware,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_with_runtime(
+    frame: &mut Frame<'_>,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    previews: &mut [ChatImagePreview],
+    media_previews: &mut [MediaImagePreview],
+    visual: &VisualInspectorState,
+    hardware: &HardwareProfileResponse,
+) {
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.background).fg(theme.text)),
         frame.area(),
@@ -551,10 +711,32 @@ pub fn render_with_previews(
         render_sidebar(frame, areas.sidebar, state, theme, metrics);
     }
     if areas.workspace.width > 0 {
-        render_workspace(frame, areas.workspace, state, theme, metrics, previews);
+        render_workspace(
+            frame,
+            areas.workspace,
+            state,
+            theme,
+            metrics,
+            previews,
+            hardware,
+        );
     }
     if areas.inspector.width > 0 {
-        render_inspector(frame, areas.inspector, state, theme, metrics, previews);
+        let mut inspector_runtime = InspectorRenderContext {
+            previews,
+            media_previews,
+            visual,
+            hardware,
+            compact_shell: frame.area().width < 120 || frame.area().height < 34,
+        };
+        render_inspector(
+            frame,
+            areas.inspector,
+            state,
+            theme,
+            metrics,
+            &mut inspector_runtime,
+        );
     }
     render_footer(frame, footer, state, theme);
     render_overlay(frame, state, theme);
@@ -1162,6 +1344,7 @@ fn render_workspace(
     theme: &Theme,
     metrics: &RuntimeMetrics,
     previews: &mut [ChatImagePreview],
+    hardware: &HardwareProfileResponse,
 ) {
     let block = workspace_block(
         state.view.label(),
@@ -1182,7 +1365,9 @@ fn render_workspace(
         View::Sources => render_sources_workspace(frame, inner, state, theme),
         View::Quality => render_quality_workspace(frame, inner, state, theme),
         View::Backups => render_backups_workspace(frame, inner, state, theme),
-        View::FoundryOverview => render_foundry_workspace(frame, inner, state, theme, metrics),
+        View::FoundryOverview => {
+            render_foundry_workspace(frame, inner, state, theme, metrics, hardware)
+        }
         View::Models => render_models_workspace(frame, inner, state, theme, metrics),
         View::System => render_system_workspace(frame, inner, state, theme, metrics),
         View::Activity => render_activity_workspace(frame, inner, state, theme, metrics),
@@ -1857,17 +2042,12 @@ fn render_foundry_workspace(
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
+    hardware: &HardwareProfileResponse,
 ) {
     let [summary, rail, packages, status] = foundry_setup_areas(area);
     let controls = foundry_controls(state);
     let [preset_list, controls_area] = model_center_areas(packages, controls.len());
-    let profile = state
-        .model_manager
-        .profile
-        .label()
-        .split(" ·")
-        .next()
-        .unwrap_or("Local");
+    let profile = performance_profile(state.model_manager.profile).label();
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -1879,7 +2059,8 @@ fn render_foundry_workspace(
                 ),
                 Span::styled(
                     format!(
-                        "  {} · {} · {}K",
+                        "  Tier {} · {} · {} · {}K",
+                        hardware.tier,
                         profile,
                         state.model_manager.quantization.label(),
                         state.model_manager.context_tokens / 1024
@@ -1888,7 +2069,11 @@ fn render_foundry_workspace(
                 ),
             ]),
             Line::styled(
-                hardware_recommendation(metrics),
+                format!(
+                    "Limited by {} · catalog {} · Expert: Models → custom controls",
+                    nonempty(&hardware.limiting_factor, "hardware"),
+                    nonempty(&hardware.catalog_version, "legacy")
+                ),
                 Style::default().fg(theme.muted),
             ),
         ]),
@@ -2564,6 +2749,7 @@ pub(crate) enum FoundryControl {
     Quantization,
     Context,
     Memory,
+    AutomaticStack,
     InstallStack,
     Download,
     Load,
@@ -2582,6 +2768,9 @@ pub(crate) fn foundry_controls(state: &AppState) -> Vec<FoundryControl> {
     ];
     match state.view {
         View::FoundryOverview => {
+            if state.active_workspace.is_some() {
+                controls.push(FoundryControl::AutomaticStack);
+            }
             if !state.model_manager.packages.is_empty() {
                 controls.push(FoundryControl::InstallStack);
             }
@@ -2616,13 +2805,8 @@ fn foundry_control_line(
         FoundryControl::Profile => (
             "F",
             "Profile",
-            state
-                .model_manager
-                .profile
+            performance_profile(state.model_manager.profile)
                 .label()
-                .split(" ·")
-                .next()
-                .unwrap_or("Local")
                 .to_owned(),
             theme.green,
         ),
@@ -2643,6 +2827,14 @@ fn foundry_control_line(
             "Memory",
             state.model_manager.memory_policy.label().to_owned(),
             theme.orange,
+        ),
+        FoundryControl::AutomaticStack => (
+            "G",
+            "Use automatic stack",
+            performance_profile(state.model_manager.profile)
+                .label()
+                .to_owned(),
+            theme.green,
         ),
         FoundryControl::InstallStack => {
             let installed = state
@@ -2726,8 +2918,9 @@ fn render_foundry_inspector(
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
+    hardware: &HardwareProfileResponse,
 ) {
-    let detail_lines = match state.view {
+    let mut detail_lines = match state.view {
         View::FoundryOverview => state
             .model_manager
             .packages
@@ -2764,6 +2957,55 @@ fn render_foundry_inspector(
             ),
         _ => Vec::new(),
     };
+    if state.view == View::FoundryOverview {
+        let mut hardware_lines = vec![
+            Line::styled(
+                format!(
+                    "HARDWARE TIER {} · {}",
+                    hardware.tier,
+                    performance_profile(state.model_manager.profile)
+                ),
+                Style::default()
+                    .fg(theme.focus)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                format!(
+                    "Limit: {} · catalog {}",
+                    nonempty(&hardware.limiting_factor, "unknown"),
+                    nonempty(&hardware.catalog_version, "legacy")
+                ),
+                Style::default().fg(theme.muted),
+            ),
+            Line::styled(
+                "Fast / Normal / Quality stay adaptive. Open Models for expert tuning.",
+                Style::default().fg(theme.cyan),
+            ),
+        ];
+        if !hardware.recommendations.is_empty() {
+            hardware_lines.push(Line::from(""));
+            hardware_lines.push(Line::styled(
+                "AUTOMATIC STACK",
+                Style::default()
+                    .fg(theme.orange)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            hardware_lines.extend(hardware.recommendations.iter().map(|recommendation| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:<17}", recommendation.role.to_ascii_uppercase()),
+                        Style::default().fg(theme.muted),
+                    ),
+                    Span::styled(
+                        recommendation.model.clone(),
+                        Style::default().fg(theme.text),
+                    ),
+                ])
+            }));
+        }
+        hardware_lines.push(Line::from(""));
+        detail_lines.splice(0..0, hardware_lines);
+    }
     frame.render_widget(
         Paragraph::new(detail_lines)
             .wrap(Wrap { trim: false })
@@ -2772,13 +3014,21 @@ fn render_foundry_inspector(
     );
 }
 
+struct InspectorRenderContext<'a> {
+    previews: &'a mut [ChatImagePreview],
+    media_previews: &'a mut [MediaImagePreview],
+    visual: &'a VisualInspectorState,
+    hardware: &'a HardwareProfileResponse,
+    compact_shell: bool,
+}
+
 fn render_inspector(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
-    previews: &mut [ChatImagePreview],
+    runtime: &mut InspectorRenderContext<'_>,
 ) {
     let title = match state.view {
         View::Conversation | View::Retrieval => "Source",
@@ -2795,11 +3045,11 @@ fn render_inspector(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if matches!(state.view, View::FoundryOverview | View::Models) {
-        render_foundry_inspector(frame, inner, state, theme, metrics);
+        render_foundry_inspector(frame, inner, state, theme, metrics, runtime.hardware);
         return;
     }
     if matches!(state.view, View::Conversation | View::Retrieval) {
-        render_source_inspector(frame, inner, state, theme, metrics, previews);
+        render_source_inspector(frame, inner, state, theme, metrics, runtime);
         return;
     }
     let lines = inspector_lines(state, theme, metrics, inner.width);
@@ -2817,45 +3067,100 @@ fn render_source_inspector(
     state: &AppState,
     theme: &Theme,
     metrics: &RuntimeMetrics,
-    previews: &mut [ChatImagePreview],
+    runtime: &mut InspectorRenderContext<'_>,
 ) {
-    let [images_area, sources_area] = source_inspector_areas(area);
-    let image_refs = related_image_refs(state);
-    let has_picture_refs = state
-        .chat
-        .citations
-        .iter()
-        .any(|citation| !citation.picture_refs.is_empty());
-    let evidence_title = if image_refs.is_empty() {
-        "Related images".into()
-    } else if has_picture_refs {
-        format!("Related images · {}", image_refs.len())
-    } else {
-        format!("Page evidence · {}", image_refs.len())
-    };
-    let images_block = Block::default()
+    let visual = runtime.visual;
+    let layout = visual_inspector_areas(area, runtime.compact_shell, visual.sources_collapsed);
+    if runtime.compact_shell {
+        let selected = VisualInspectorTab::ALL
+            .iter()
+            .position(|tab| *tab == visual.tab)
+            .unwrap_or_default();
+        frame.render_widget(
+            Tabs::new(VisualInspectorTab::ALL.map(|tab| tab.label()))
+                .select(selected)
+                .style(Style::default().fg(theme.muted))
+                .highlight_style(
+                    Style::default()
+                        .fg(theme.focus)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .divider(" · ")
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(theme.border)),
+                ),
+            layout.tabs,
+        );
+        match visual.tab {
+            VisualInspectorTab::Pages => render_page_evidence(
+                frame,
+                layout.pages,
+                state,
+                theme,
+                runtime.previews,
+                &visual.evidence,
+            ),
+            VisualInspectorTab::Figures => {
+                render_media_evidence(frame, layout.figures, theme, runtime.media_previews, visual)
+            }
+            VisualInspectorTab::Sources => {
+                render_source_list(frame, layout.sources, state, theme, metrics, false)
+            }
+        }
+        return;
+    }
+
+    render_page_evidence(
+        frame,
+        layout.pages,
+        state,
+        theme,
+        runtime.previews,
+        &visual.evidence,
+    );
+    render_media_evidence(frame, layout.figures, theme, runtime.media_previews, visual);
+    render_source_list(
+        frame,
+        layout.sources,
+        state,
+        theme,
+        metrics,
+        visual.sources_collapsed,
+    );
+}
+
+fn render_page_evidence(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    previews: &mut [ChatImagePreview],
+    evidence: &VisualEvidenceResponse,
+) {
+    let page_refs = related_page_refs(state, Some(evidence));
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
-            format!(" {evidence_title} "),
-            Style::default()
-                .fg(theme.purple)
-                .add_modifier(Modifier::BOLD),
+            format!(" Pages · {} ", page_refs.len()),
+            Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
         ));
-    let images_inner = images_block.inner(images_area);
-    frame.render_widget(images_block, images_area);
-    if image_refs.is_empty() {
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if page_refs.is_empty() {
         frame.render_widget(
-            Paragraph::new("Ask a question to find matching pages and figures.")
+            Paragraph::new("Ask a question to find cited pages.")
                 .style(Style::default().fg(theme.muted))
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true }),
-            images_inner,
+            inner,
         );
     } else {
-        let tiles = evidence_tiles(images_inner, image_refs.len());
+        let tiles = evidence_tiles(inner, page_refs.len());
         for (slot, tile) in tiles.into_iter().enumerate() {
-            let (citation_index, page_index, page) = image_refs[slot];
+            let (citation_index, page_index, page) = page_refs[slot];
             let selected =
                 citation_index == state.citation_cursor && page_index == state.citation_page_cursor;
             let tile_block = Block::default()
@@ -2900,26 +3205,138 @@ fn render_source_inspector(
             }
         }
     }
+}
 
-    let sources_block = Block::default()
+fn render_media_evidence(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &Theme,
+    previews: &mut [MediaImagePreview],
+    visual: &VisualInspectorState,
+) {
+    let media = visual
+        .evidence
+        .media
+        .iter()
+        .filter(|asset| asset.is_individual_asset())
+        .take(VisualEvidenceResponse::MAX_MEDIA)
+        .collect::<Vec<_>>();
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
-            " Sources ",
+            format!(" Figures · {} ", media.len()),
+            Style::default()
+                .fg(theme.purple)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if media.is_empty() {
+        let message = if visual.legacy {
+            "This server has no extracted-figure endpoint. Pages remain in the Pages section."
+        } else {
+            "No individually extracted figure is relevant to this answer."
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(Style::default().fg(theme.muted))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+    for (slot, tile) in evidence_tiles(inner, media.len()).into_iter().enumerate() {
+        let asset = media[slot];
+        let selected = slot == visual.selected_media;
+        let page = asset
+            .page
+            .map_or(String::new(), |page| format!(" · p.{page}"));
+        let title = format!(" {} · {}{} ", slot + 1, media_kind_label(asset), page);
+        let tile_block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if selected { theme.focus } else { theme.border }))
+            .title(Line::styled(
+                truncate(&title, tile.width.saturating_sub(2) as usize),
+                Style::default().fg(if selected { theme.focus } else { theme.muted }),
+            ));
+        let tile_inner = tile_block.inner(tile);
+        frame.render_widget(tile_block, tile);
+        if let Some(preview) = previews
+            .iter_mut()
+            .find(|preview| preview.media_id == asset.media_id)
+        {
+            preview.receive_resizes();
+            frame.render_stateful_widget(
+                StatefulImage::default(),
+                tile_inner,
+                &mut preview.protocol,
+            );
+        } else {
+            let caption = asset
+                .caption
+                .as_deref()
+                .filter(|caption| !caption.trim().is_empty())
+                .unwrap_or("Loading extracted crop…");
+            frame.render_widget(
+                Paragraph::new(truncate(caption, tile_inner.width as usize * 3))
+                    .style(Style::default().fg(theme.muted))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true }),
+                tile_inner,
+            );
+        }
+    }
+}
+
+fn media_kind_label(asset: &MediaEvidence) -> String {
+    let kind = asset.kind.trim();
+    if kind.is_empty() {
+        "Figure".into()
+    } else {
+        let mut characters = kind.chars();
+        characters
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+            .unwrap_or_else(|| "Figure".into())
+    }
+}
+
+fn render_source_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    theme: &Theme,
+    metrics: &RuntimeMetrics,
+    collapsed: bool,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            if collapsed {
+                " [+] Sources · S to expand "
+            } else {
+                " [−] Sources · S to collapse "
+            },
             Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
         ));
-    let sources_inner = sources_block.inner(sources_area);
-    frame.render_widget(sources_block, sources_area);
-    let lines = inspector_lines(state, theme, metrics, sources_inner.width);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if collapsed {
+        return;
+    }
+    let lines = inspector_lines(state, theme, metrics, inner.width);
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((state.inspector_scroll, 0)),
-        sources_inner,
+        inner,
     );
 }
 
-fn evidence_tiles(area: Rect, count: usize) -> Vec<Rect> {
+pub(crate) fn evidence_tiles(area: Rect, count: usize) -> Vec<Rect> {
     match count {
         0 => Vec::new(),
         1 => vec![area],
@@ -2941,12 +3358,71 @@ fn evidence_tiles(area: Rect, count: usize) -> Vec<Rect> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct VisualInspectorAreas {
+    pub tabs: Rect,
+    pub pages: Rect,
+    pub figures: Rect,
+    pub sources: Rect,
+}
+
+pub(crate) fn visual_inspector_areas(
+    area: Rect,
+    compact_shell: bool,
+    sources_collapsed: bool,
+) -> VisualInspectorAreas {
+    if compact_shell {
+        let [tabs, content] =
+            Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
+        return VisualInspectorAreas {
+            tabs,
+            pages: content,
+            figures: content,
+            sources: content,
+        };
+    }
+    let source_constraint = if sources_collapsed {
+        Constraint::Length(3)
+    } else {
+        Constraint::Percentage(34)
+    };
+    let [pages, figures, sources] = Layout::vertical([
+        Constraint::Percentage(33),
+        Constraint::Fill(1),
+        source_constraint,
+    ])
+    .areas(area);
+    VisualInspectorAreas {
+        pages,
+        figures,
+        sources,
+        ..VisualInspectorAreas::default()
+    }
+}
+
+/// Legacy geometry retained for downstream input/tests. New code should use
+/// `visual_inspector_areas` so pages, figures and sources never share a bucket.
 pub(crate) fn source_inspector_areas(area: Rect) -> [Rect; 2] {
-    let image_height = (area.height * 45 / 100).clamp(10, 22).min(area.height);
-    Layout::vertical([Constraint::Length(image_height), Constraint::Fill(1)]).areas(area)
+    let layout = visual_inspector_areas(area, false, false);
+    [
+        Rect::new(
+            layout.pages.x,
+            layout.pages.y,
+            layout.pages.width,
+            layout.pages.height.saturating_add(layout.figures.height),
+        ),
+        layout.sources,
+    ]
 }
 
 pub fn related_image_refs(state: &AppState) -> Vec<(usize, usize, u32)> {
+    related_page_refs(state, None)
+}
+
+pub fn related_page_refs(
+    state: &AppState,
+    evidence: Option<&VisualEvidenceResponse>,
+) -> Vec<(usize, usize, u32)> {
     let mut output = Vec::with_capacity(4);
     let mut seen = std::collections::BTreeSet::new();
     let mut consider = |citation_index: usize, page_index: usize| {
@@ -2966,9 +3442,27 @@ pub fn related_image_refs(state: &AppState) -> Vec<(usize, usize, u32)> {
             output.push((citation_index, page_index, page));
         }
     };
-    for citation_index in 0..state.chat.citations.len() {
-        if !state.chat.citations[citation_index].picture_refs.is_empty() {
-            consider(citation_index, 0);
+    if let Some(evidence) = evidence {
+        for page_evidence in &evidence.pages {
+            let citation_index = page_evidence
+                .citation_index
+                .filter(|index| *index < state.chat.citations.len())
+                .or_else(|| {
+                    state.chat.citations.iter().position(|citation| {
+                        citation.pages.contains(&page_evidence.page)
+                            && (page_evidence.document_id.is_none()
+                                || citation.document_id == page_evidence.document_id
+                                || citation.logical_document_id == page_evidence.document_id)
+                    })
+                });
+            if let Some(citation_index) = citation_index
+                && let Some(page_index) = state.chat.citations[citation_index]
+                    .pages
+                    .iter()
+                    .position(|page| *page == page_evidence.page)
+            {
+                consider(citation_index, page_index);
+            }
         }
     }
     for citation_index in 0..state.chat.citations.len() {
@@ -4437,6 +4931,20 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &AppState, theme: &Th
     };
     let hints: &[(&str, &str)] = match state.overlay {
         Some(Overlay::ConfirmQuit) => &[("Enter / Y", "Quit"), ("Esc / N", "Stay")],
+        Some(Overlay::AutomaticStackPreflight)
+            if state
+                .automatic_stack_preflight
+                .as_ref()
+                .is_some_and(|preflight| preflight.requires_reindex) =>
+        {
+            &[("Enter", "Close"), ("Esc", "Close")]
+        }
+        Some(Overlay::AutomaticStackPreflight) => {
+            &[("Enter / Y", "Continue"), ("Esc / N", "Cancel")]
+        }
+        Some(Overlay::AutomaticStackDownloadConfirm) => {
+            &[("D", "Download & apply"), ("Esc / N", "Cancel")]
+        }
         Some(Overlay::FileBrowser) => &[
             ("↑↓", "Select"),
             ("Space", "Mark"),
@@ -4569,6 +5077,12 @@ fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         Some(Overlay::Workspaces) => render_libraries(frame, state, theme),
         Some(Overlay::Help) => render_help(frame, theme),
         Some(Overlay::ConfirmModelDelete) => render_delete_model_confirm(frame, state, theme),
+        Some(Overlay::AutomaticStackPreflight) => {
+            render_automatic_stack_preflight(frame, state, theme)
+        }
+        Some(Overlay::AutomaticStackDownloadConfirm) => {
+            render_automatic_stack_download_confirmation(frame, state, theme)
+        }
         Some(Overlay::FileBrowser) => render_file_browser(frame, state, theme),
         Some(Overlay::ConfirmImport) => {
             render_file_browser(frame, state, theme);
@@ -4585,6 +5099,216 @@ fn render_overlay(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
         Some(Overlay::CustomModel) => render_custom_model(frame, state, theme),
         None => {}
     }
+}
+
+fn render_automatic_stack_preflight(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
+    let area = centered(82, 30, frame.area());
+    frame.render_widget(Clear, area);
+    let Some(preflight) = state.automatic_stack_preflight.as_ref() else {
+        frame.render_widget(
+            Paragraph::new("The automatic stack preview is no longer available. Press Esc.")
+                .block(panel("Automatic model stack", true, theme)),
+            area,
+        );
+        return;
+    };
+    let recommendation = &preflight.recommendation;
+    let mut lines = vec![
+        Line::styled(
+            format!(
+                "Tier {} · {} · {} context tokens",
+                recommendation.stack_tier, recommendation.profile, recommendation.context_tokens
+            ),
+            Style::default().fg(theme.cyan).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(
+                "Catalog {} · recommendation {}",
+                nonempty(&recommendation.catalog_release, "release unknown"),
+                recommendation.recommendation_id
+            ),
+            Style::default().fg(theme.muted),
+        ),
+        Line::from(""),
+        Line::styled(
+            "EXACT MODEL CHANGES",
+            Style::default()
+                .fg(theme.orange)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if preflight.changes.is_empty() {
+        lines.push(Line::styled(
+            "  No model changes",
+            Style::default().fg(theme.muted),
+        ));
+    } else {
+        lines.extend(preflight.changes.iter().map(|(role, model)| {
+            Line::from(vec![
+                Span::styled(
+                    format!("  {:<18}", role.to_ascii_uppercase()),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(model.clone(), Style::default().fg(theme.text)),
+            ])
+        }));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Download total  ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format_bytes(recommendation.total_download_bytes),
+                Style::default()
+                    .fg(if preflight.downloads.is_empty() {
+                        theme.green
+                    } else {
+                        theme.yellow
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Full reindex    ", Style::default().fg(theme.muted)),
+            Span::styled(
+                if preflight.requires_reindex {
+                    "YES — blocked here"
+                } else {
+                    "No"
+                },
+                Style::default()
+                    .fg(if preflight.requires_reindex {
+                        theme.red
+                    } else {
+                        theme.green
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Media reindex   ", Style::default().fg(theme.muted)),
+            Span::styled(
+                if preflight.requires_visual_reindex {
+                    "Yes"
+                } else {
+                    "No"
+                },
+                Style::default().fg(if preflight.requires_visual_reindex {
+                    theme.yellow
+                } else {
+                    theme.green
+                }),
+            ),
+        ]),
+    ]);
+    for assignment in &preflight.downloads {
+        lines.push(Line::styled(
+            format!(
+                "  {} · {} · {}",
+                assignment.role.label(),
+                assignment.model,
+                format_bytes(assignment.download_bytes)
+            ),
+            Style::default().fg(theme.yellow),
+        ));
+    }
+    lines.push(Line::from(""));
+    if preflight.requires_reindex {
+        lines.extend([
+            Line::styled(
+                "FULL REBUILD REQUIRED — NOTHING WILL BE APPLIED",
+                Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                "The embedding vector space changes. Close this dialog and run the full rebuild workflow.",
+                Style::default().fg(theme.red),
+            ),
+        ]);
+    } else if !preflight.can_apply {
+        lines.push(Line::styled(
+            "This recommendation cannot be applied. No changes will be sent.",
+            Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+        ));
+    } else if preflight.downloads.is_empty() {
+        lines.push(Line::styled(
+            "Enter applies these installed models. No download is performed.",
+            Style::default().fg(theme.green),
+        ));
+    } else {
+        lines.push(Line::styled(
+            "Enter continues to a separate download confirmation. No download happens yet.",
+            Style::default().fg(theme.green),
+        ));
+    }
+    for warning in preflight.warnings.iter().take(2) {
+        lines.push(Line::styled(
+            format!("Warning: {warning}"),
+            Style::default().fg(theme.yellow),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel("Use automatic model stack", true, theme)),
+        area,
+    );
+}
+
+fn render_automatic_stack_download_confirmation(
+    frame: &mut Frame<'_>,
+    state: &AppState,
+    theme: &Theme,
+) {
+    let area = centered(76, 18, frame.area());
+    frame.render_widget(Clear, area);
+    let Some(preflight) = state.automatic_stack_preflight.as_ref() else {
+        return;
+    };
+    let mut lines = vec![
+        Line::from(""),
+        Line::styled(
+            "SECOND CONFIRMATION: MODEL DOWNLOADS",
+            Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw(format!("{} pinned model(s), ", preflight.downloads.len())),
+            Span::styled(
+                format_bytes(preflight.recommendation.total_download_bytes),
+                Style::default()
+                    .fg(theme.yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    for assignment in &preflight.downloads {
+        lines.push(Line::styled(
+            format!(
+                "  {} · {} · {}",
+                assignment.role.label(),
+                assignment.model,
+                format_bytes(assignment.download_bytes)
+            ),
+            Style::default().fg(theme.text),
+        ));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::styled(
+            "Press D to send DOWNLOAD_MODELS and apply the stack.",
+            Style::default().fg(theme.red).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            "Enter does nothing here. Esc cancels without mutation.",
+            Style::default().fg(theme.green),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(panel("Confirm downloads", true, theme)),
+        area,
+    );
 }
 
 fn render_book_scope(frame: &mut Frame<'_>, state: &AppState, theme: &Theme) {
@@ -6355,6 +7079,7 @@ fn estimated_model_memory(
         .saturating_add(256 * 1_048_576)
 }
 
+#[cfg(test)]
 fn hardware_recommendation(metrics: &RuntimeMetrics) -> String {
     let ram_gib = metrics.memory_total as f64 / 1_073_741_824.0;
     let vram_gib = metrics.vram_total as f64 / 1_073_741_824.0;
@@ -6379,6 +7104,14 @@ fn truncate(value: &str, max: usize) -> String {
     result
 }
 
+fn nonempty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
 fn centered(width_percent: u16, height: u16, area: Rect) -> Rect {
     let width = area.width.saturating_mul(width_percent) / 100;
     Rect::new(
@@ -6393,6 +7126,7 @@ fn centered(width_percent: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use omarag_app::{Action, update};
+    use omarag_domain::{Citation, ModelProfilePreflight, PageEvidence, VisualEvidenceSelection};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn rendered(width: u16, height: u16, state: &AppState, theme: Theme) -> String {
@@ -6418,6 +7152,247 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn rendered_runtime(
+        width: u16,
+        height: u16,
+        state: &AppState,
+        visual: &VisualInspectorState,
+        hardware: &HardwareProfileResponse,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_with_runtime(
+                    frame,
+                    state,
+                    &Theme::default(),
+                    &RuntimeMetrics::default(),
+                    &mut [],
+                    &mut [],
+                    visual,
+                    hardware,
+                )
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn visual_test_citation() -> Citation {
+        Citation {
+            evidence_id: Some("E1".into()),
+            prompt_evidence_id: Some("E1".into()),
+            chunk_id: "chunk-1".into(),
+            chunk_ids: Vec::new(),
+            document_id: Some("doc-1".into()),
+            logical_document_id: None,
+            source_uri: Some("/tmp/book.pdf".into()),
+            document_title: Some("Book".into()),
+            pages: vec![7],
+            headings: Vec::new(),
+            element_types: Vec::new(),
+            doc_item_refs: Vec::new(),
+            picture_refs: vec!["legacy-picture-ref".into()],
+            primary_anchors: Vec::new(),
+            context_anchors: Vec::new(),
+            excerpt: "Evidence".into(),
+            excerpt_char_start: None,
+            excerpt_char_end: None,
+            chunk_content_hash: None,
+            retrieval_rank: None,
+            rerank_score: None,
+            claim_ids: Vec::new(),
+            retrieval_paths: Vec::new(),
+            relevance_score: None,
+            book: None,
+            verification_status: "verified".into(),
+        }
+    }
+
+    fn visual_test_media(media_id: &str, kind: &str) -> MediaEvidence {
+        MediaEvidence {
+            media_id: media_id.into(),
+            kind: kind.into(),
+            bbox: Some(omarag_domain::MediaBoundingBox {
+                x0: 0.1,
+                y0: 0.1,
+                x1: 0.8,
+                y1: 0.8,
+                coordinate_space: Some("normalized".into()),
+            }),
+            ..MediaEvidence::default()
+        }
+    }
+
+    #[test]
+    fn visual_inspector_keeps_cited_pages_and_media_assets_strictly_separate() {
+        let mut state = AppState {
+            view: View::Conversation,
+            ..AppState::default()
+        };
+        state.chat.citations = vec![visual_test_citation()];
+        let mut visual = VisualInspectorState::default();
+        visual.replace(
+            "run-1".into(),
+            VisualEvidenceResponse {
+                pages: vec![PageEvidence {
+                    page_id: "page-7".into(),
+                    citation_index: Some(0),
+                    document_id: Some("doc-1".into()),
+                    page: 7,
+                    ..PageEvidence::default()
+                }],
+                media: vec![
+                    visual_test_media("not-a-crop", "page_preview"),
+                    visual_test_media("figure-1", "figure"),
+                    visual_test_media("figure-2", "diagram"),
+                    visual_test_media("figure-3", "table"),
+                    visual_test_media("figure-4", "formula"),
+                    visual_test_media("figure-5", "image"),
+                ],
+                selection: VisualEvidenceSelection {
+                    max_media: 8,
+                    cut_reason: None,
+                },
+                ..VisualEvidenceResponse::default()
+            },
+        );
+        let content = rendered_runtime(
+            160,
+            48,
+            &state,
+            &visual,
+            &HardwareProfileResponse::default(),
+        );
+        assert!(content.contains("Pages · 1"));
+        assert!(content.contains("Figures · 4"));
+        assert!(content.contains("Sources"));
+        assert!(!content.contains("Page_preview"));
+    }
+
+    #[test]
+    fn legacy_visual_fallback_has_pages_but_zero_fake_figures() {
+        let mut state = AppState {
+            view: View::Conversation,
+            ..AppState::default()
+        };
+        state.chat.citations = vec![visual_test_citation()];
+        let mut visual = VisualInspectorState::default();
+        visual.use_legacy("run-old".into());
+        let content = rendered_runtime(
+            160,
+            48,
+            &state,
+            &visual,
+            &HardwareProfileResponse::default(),
+        );
+        assert!(content.contains("Pages · 1"));
+        assert!(content.contains("Figures · 0"));
+        assert!(content.contains("extracted-figure"), "{content}");
+    }
+
+    #[test]
+    fn compact_inspector_uses_pages_figures_and_sources_tabs() {
+        let state = AppState {
+            view: View::Conversation,
+            focus_pane: FocusPane::Inspector,
+            ..AppState::default()
+        };
+        let visual = VisualInspectorState {
+            tab: VisualInspectorTab::Figures,
+            ..VisualInspectorState::default()
+        };
+        let content = rendered_runtime(
+            110,
+            32,
+            &state,
+            &visual,
+            &HardwareProfileResponse::default(),
+        );
+        assert!(content.contains("Pages"));
+        assert!(content.contains("Figures"));
+        assert!(content.contains("Sources"));
+        assert!(content.contains("Figures · 0"));
+    }
+
+    #[test]
+    fn model_center_explains_server_tier_catalog_profile_and_expert_path() {
+        let state = AppState {
+            view: View::FoundryOverview,
+            ..AppState::default()
+        };
+        let hardware = HardwareProfileResponse {
+            tier: HardwareTier::new(7).unwrap(),
+            limiting_factor: "VRAM".into(),
+            catalog_version: "2026.08.1".into(),
+            profile: PerformanceProfile::Normal,
+            recommendations: vec![omarag_domain::ModelRecommendation {
+                role: "chat".into(),
+                model: "recommended-chat".into(),
+                ..omarag_domain::ModelRecommendation::default()
+            }],
+            ..HardwareProfileResponse::default()
+        };
+        let content =
+            rendered_runtime(160, 48, &state, &VisualInspectorState::default(), &hardware);
+        assert!(content.contains("Tier 7 · Normal"));
+        assert!(content.contains("VRAM"));
+        assert!(content.contains("2026.08.1"));
+        assert!(content.contains("Expert"));
+        assert!(content.contains("AUTOMATIC STACK"));
+        assert!(content.contains("recommended-chat"));
+    }
+
+    #[test]
+    fn automatic_stack_overlay_shows_changes_download_total_and_reindex_block() {
+        let preflight: ModelProfilePreflight = serde_json::from_value(serde_json::json!({
+            "recommendation": {
+                "recommendation_id": "rec-1",
+                "catalog_release": "2026.08",
+                "profile": "normal",
+                "stack_tier": 5,
+                "assignments": [],
+                "context_tokens": 8192,
+                "total_download_bytes": 4_294_967_296_u64,
+                "warnings": []
+            },
+            "changes": {"chat": "qwen/current:4b"},
+            "downloads": [{
+                "role": "chat",
+                "artifact_id": "chat-1",
+                "provider": "ollama",
+                "model": "qwen/current:4b",
+                "revision": "r1",
+                "digest": "sha256:abc",
+                "install_state": "not-installed",
+                "download_bytes": 4_294_967_296_u64
+            }],
+            "requires_reindex": true,
+            "requires_visual_reindex": false,
+            "can_apply": false,
+            "warnings": []
+        }))
+        .unwrap();
+        let state = AppState {
+            overlay: Some(Overlay::AutomaticStackPreflight),
+            automatic_stack_preflight: Some(preflight),
+            ..AppState::default()
+        };
+
+        let content = rendered(140, 40, &state, Theme::default());
+        assert!(content.contains("EXACT MODEL CHANGES"));
+        assert!(content.contains("qwen/current:4b"));
+        assert!(content.contains("4.0 GiB"), "{content}");
+        assert!(content.contains("YES — blocked here"));
+        assert!(content.contains("FULL REBUILD REQUIRED"));
     }
 
     fn rendered_rows_metrics(
@@ -6599,6 +7574,7 @@ mod tests {
                 last_event_id: None,
                 checkpoint: None,
                 progress_detail: None,
+                pinned: false,
             },
         );
         let progress = rendered_metrics(

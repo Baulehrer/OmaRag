@@ -73,6 +73,31 @@ async def test_model_resolution_readiness_and_digest_are_read_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_installed_model_inventory_is_short_lived_and_explicitly_invalidated() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        assert request.url.path == "/api/tags"
+        calls += 1
+        return httpx.Response(200, json={"models": _models()})
+
+    base_url = "http://inventory-cache.test"
+    OllamaStreamClient.invalidate_inventory(base_url)
+    async with httpx.AsyncClient(base_url=base_url, transport=httpx.MockTransport(handler)) as http:
+        client = OllamaStreamClient(base_url=base_url, client=http)
+        # Injected transports normally stay isolated. Enable the shared path
+        # explicitly here to exercise the production cache deterministically.
+        client._uses_shared_inventory_cache = True
+        assert await client.list_models() == await client.list_models()
+        assert calls == 1
+        OllamaStreamClient.invalidate_inventory(base_url)
+        await client.list_models()
+        assert calls == 2
+    OllamaStreamClient.invalidate_inventory(base_url)
+
+
+@pytest.mark.asyncio
 async def test_readiness_reports_degraded_without_loading_missing_resident_model() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/tags":

@@ -7,9 +7,11 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from dataclasses import replace
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ..models.domain import (
     BookMetadata,
@@ -20,7 +22,15 @@ from ..models.domain import (
     SearchHit,
 )
 from ..models.errors import AdapterUnavailableError, ConflictError
-from .base import HaikuAdapter
+from .base import (
+    HaikuAdapter,
+    SearchManyFailure,
+    SearchManyItem,
+    SearchManyRequest,
+    SearchManyResult,
+    SearchManyStats,
+    normalize_search_many_requests,
+)
 
 
 def _value(obj: Any, *names: str, default: Any = None) -> Any:
@@ -54,6 +64,74 @@ def _absolute_pages(pages: Any, document_meta: dict[str, Any]) -> list[int]:
         return values
     offset = int(document_meta.get("page_offset", 0) or 0)
     return [page + offset for page in values]
+
+
+def _public_source_uri(
+    document_id: Any,
+    document_meta: dict[str, Any],
+    chunk_metadata: dict[str, Any] | None = None,
+) -> str:
+    """Return an opaque public identity, never a host filesystem location."""
+
+    chunk_metadata = chunk_metadata or {}
+    logical_id = (
+        chunk_metadata.get("logical_document_id")
+        or document_meta.get("logical_document_id")
+        or document_id
+        or "unknown"
+    )
+    generation_id = (
+        chunk_metadata.get("generation_id") or document_meta.get("generation_id") or "legacy"
+    )
+    return (
+        f"omarag://documents/{quote(str(logical_id), safe='')}"
+        f"/generations/{quote(str(generation_id), safe='')}"
+    )
+
+
+def _raw_reranker_revision(database: Path, model_name: str, provider: str) -> str | None:
+    """Read pins that Haiku 0.74's ModelConfig intentionally discards as extras."""
+
+    config_path = database.parent.parent / "haiku.rag.yaml"
+    try:
+        import yaml
+
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+
+    reranking = raw.get("reranking") or {}
+    raw_model = reranking.get("model") if isinstance(reranking, dict) else {}
+    raw_model = raw_model if isinstance(raw_model, dict) else {}
+
+    def provider_family(value: object) -> str:
+        normalized = str(value or "").casefold().replace("_", "-")
+        if normalized in {"cross-encoder", "hugging-face", "sentence-transformers"}:
+            return "cross-encoder"
+        return normalized
+
+    configured_matches = str(raw_model.get("name") or "") == model_name and provider_family(
+        raw_model.get("provider")
+    ) == provider_family(provider)
+    explicit = str(raw_model.get("revision") or "") or None
+    if configured_matches and explicit:
+        return explicit
+
+    oracle = raw.get("oracle") or {}
+    profile = oracle.get("model_profile") if isinstance(oracle, dict) else {}
+    profile = profile if isinstance(profile, dict) else {}
+    if profile.get("expert_mode") is not False:
+        return None
+    artifacts = profile.get("artifacts") or {}
+    artifact = artifacts.get("rerank") if isinstance(artifacts, dict) else {}
+    artifact = artifact if isinstance(artifact, dict) else {}
+    if str(artifact.get("model") or "") != model_name or provider_family(
+        artifact.get("provider")
+    ) != provider_family(provider):
+        return None
+    return str(artifact.get("revision") or "") or None
 
 
 def _enum_value(value: Any) -> str | None:
@@ -168,18 +246,20 @@ Anwendung zeigt zugehoerige Bilder bei den Quellen.
 """.strip()
 
 NORMAL_PREAMBLE = """
-Bevorzuge die bereitgestellten Fach- und Lehrbuecher und belege fachliche
-Aussagen. Kennzeichne Schlussfolgerungen ausdruecklich. Wenn eine Aussage nicht
-aus den Quellen folgt, sage das klar und erfinde keine Fundstelle. Gib relevante
-Tabellen als Markdown und mathematische Ausdruecke als LaTeX zwischen
-Dollarzeichen aus. Verweise nicht auf Abbildungsnummern im Fliesstext.
+Nutze ausschließlich die bereitgestellten Fach- und Lehrbuecher und belege jede
+fachliche Aussage. Kennzeichne Schlussfolgerungen ausdrücklich und bilde auch
+sie nur aus den Quellen. Wenn eine Aussage nicht aus den Quellen folgt, sage
+das klar und erfinde keine Fundstelle. Gib relevante Tabellen als Markdown und
+mathematische Ausdruecke als LaTeX zwischen Dollarzeichen aus. Verweise nicht
+auf Abbildungsnummern im Fliesstext.
 """.strip()
 
 EXPLORE_PREAMBLE = """
-Nutze die bereitgestellten Quellen als Ausgangspunkt. Trenne belegte Aussagen,
-eigene Schlussfolgerungen und ergaenzendes Allgemeinwissen sichtbar voneinander.
-Erfinde keine Fundstellen. Formatiere Tabellen als Markdown und Mathematik als
-LaTeX zwischen Dollarzeichen.
+Nutze ausschließlich die bereitgestellten Quellen. Erkunde mehrere belegte
+Deutungen und Zusammenhänge, aber ergänze kein externes Modellwissen. Trenne
+wörtlich belegte Aussagen und aus den Quellen abgeleitete Schlussfolgerungen
+sichtbar voneinander. Erfinde keine Fundstellen. Formatiere Tabellen als
+Markdown und Mathematik als LaTeX zwischen Dollarzeichen.
 """.strip()
 
 
@@ -219,6 +299,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
 
     def __init__(self) -> None:
         self._persistent_reranker: Any | None = None
+        self._persistent_reranker_key: tuple[str, str | None] | None = None
         self.version = None
         for distribution in ("haiku-rag", "haiku-rag-slim"):
             try:
@@ -256,6 +337,10 @@ class VanillaHaikuAdapter(HaikuAdapter):
     @property
     def available(self) -> bool:
         return self._available
+
+    @property
+    def supports_native_search_many(self) -> bool:
+        return self.available
 
     @staticmethod
     def _client_type() -> type[Any]:
@@ -542,7 +627,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 metadata = {
                     **result_metadata,
                     **chunk_metadata,
-                    "source_uri": _value(result, "document_uri") or _value(document, "uri"),
+                    "source_uri": _public_source_uri(document_id, document_meta, chunk_metadata),
                     "headings": citation_headings,
                     "labels": _string_list(
                         chunk_metadata.get("labels") or _value(result, "labels")
@@ -571,6 +656,292 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 )
         return hits
 
+    async def search_many(
+        self,
+        database: Path,
+        requests: list[SearchManyRequest] | list[str],
+        limit: int | None = None,
+        *,
+        document_filter: str | None = None,
+        search_type: str = "hybrid",
+        rerank: bool = True,
+        hydrate_chunk_ids: list[str] | None = None,
+    ) -> SearchManyResult:
+        requests = normalize_search_many_requests(
+            requests,
+            limit,
+            document_filter=document_filter,
+            search_type=search_type,
+            rerank=rerank,
+        )
+        try:
+            return await self._search_many_native(
+                database,
+                requests,
+                hydrate_chunk_ids=hydrate_chunk_ids,
+            )
+        except Exception as exc:
+            failure = SearchManyFailure.from_exception(exc)
+            return SearchManyResult(
+                items=[
+                    SearchManyItem(key=request.key, hits=[], failure=failure)
+                    for request in requests
+                ],
+                hydrated_chunks=[],
+                stats=SearchManyStats(
+                    search_requests=len(requests),
+                    requested_chunk_hydrations=len(hydrate_chunk_ids or []),
+                    backend_sessions=0,
+                    native_batch=True,
+                    fallback_reason="batch_request_failed",
+                ),
+                hydration_failure=failure if hydrate_chunk_ids else None,
+            )
+
+    async def _search_many_native(
+        self,
+        database: Path,
+        requests: list[SearchManyRequest],
+        *,
+        hydrate_chunk_ids: list[str] | None = None,
+    ) -> SearchManyResult:
+        """Search and hydrate a complete retrieval request in one public client.
+
+        Haiku does not currently expose a public batch-search method. Reusing
+        one documented ``HaikuRAG`` context and its public lookup methods still
+        removes repeated client setup and lets duplicate evidence be hydrated
+        exactly once across facets and routed chunks.
+        """
+        requested_route_ids = hydrate_chunk_ids or []
+        route_ids = list(dict.fromkeys(requested_route_ids))
+        if not requests and not route_ids:
+            return SearchManyResult(
+                items=[],
+                hydrated_chunks=[],
+                stats=SearchManyStats(backend_sessions=0, native_batch=True),
+            )
+
+        rerank_settings = {request.rerank for request in requests}
+        if len(rerank_settings) > 1:
+            result = await super().search_many(
+                database,
+                requests,
+                hydrate_chunk_ids=requested_route_ids,
+            )
+            sessions = len(requests) + int(bool(route_ids))
+            return replace(
+                result,
+                stats=replace(
+                    result.stats,
+                    backend_sessions=sessions,
+                    fallback_reason="mixed_rerank_settings",
+                ),
+            )
+
+        await self.ensure_database(database)
+        config = None
+        if requests and not requests[0].rerank:
+            config = copy.deepcopy(self._config(database))
+            config.reranking.model = None
+
+        async def optional(call: Any) -> Any:
+            try:
+                return await call
+            except Exception:
+                return None
+
+        async with self._client(database, config=config) as rag:
+            try:
+                supports_images = "include_images" in inspect.signature(rag.search).parameters
+            except (TypeError, ValueError):
+                supports_images = False
+
+            search_rows: list[list[Any]] = []
+            failures: list[SearchManyFailure | None] = []
+            result_chunk_ids: list[list[str | None]] = []
+            lookup_ids: list[str] = []
+            for request in requests:
+                search_kwargs: dict[str, Any] = {
+                    "limit": request.limit,
+                    "search_type": request.search_type,
+                    "filter": request.document_filter,
+                }
+                if supports_images:
+                    search_kwargs["include_images"] = False
+                try:
+                    rows = list(await rag.search(request.query, **search_kwargs))
+                    failure = None
+                except Exception as exc:
+                    rows = []
+                    failure = SearchManyFailure.from_exception(exc)
+                ids: list[str | None] = []
+                for row in rows:
+                    raw_id = _value(row, "chunk_id", "id")
+                    chunk_id = str(raw_id) if raw_id is not None else None
+                    ids.append(chunk_id)
+                    if chunk_id is not None:
+                        lookup_ids.append(chunk_id)
+                search_rows.append(rows)
+                failures.append(failure)
+                result_chunk_ids.append(ids)
+
+            requested_chunk_hydrations = len(lookup_ids) + len(route_ids)
+            unique_lookup_ids = list(dict.fromkeys([*lookup_ids, *route_ids]))
+            chunk_rows = await asyncio.gather(
+                *(optional(rag.get_chunk_by_id(chunk_id)) for chunk_id in unique_lookup_ids)
+            )
+            chunk_cache = dict(zip(unique_lookup_ids, chunk_rows, strict=True))
+
+            document_lookup_ids: list[str] = []
+            requested_document_hydrations = 0
+            for rows, chunk_ids in zip(search_rows, result_chunk_ids, strict=True):
+                request_document_ids: list[str] = []
+                for row, chunk_id in zip(rows, chunk_ids, strict=True):
+                    stored_chunk = chunk_cache.get(chunk_id) if chunk_id is not None else None
+                    document_id = _value(row, "document_id") or _value(stored_chunk, "document_id")
+                    if document_id and not dict(_value(row, "document_meta", default={}) or {}):
+                        request_document_ids.append(str(document_id))
+                request_document_ids = list(dict.fromkeys(request_document_ids))
+                requested_document_hydrations += len(request_document_ids)
+                document_lookup_ids.extend(request_document_ids)
+
+            route_document_ids: list[str] = []
+            for chunk_id in route_ids:
+                chunk = chunk_cache.get(chunk_id)
+                document_id = str(_value(chunk, "document_id", default="") or "")
+                if document_id:
+                    route_document_ids.append(document_id)
+            route_document_ids = list(dict.fromkeys(route_document_ids))
+            requested_document_hydrations += len(route_document_ids)
+            document_lookup_ids.extend(route_document_ids)
+            unique_document_ids = list(dict.fromkeys(document_lookup_ids))
+            document_rows = await asyncio.gather(
+                *(
+                    optional(rag.get_document_by_id(document_id))
+                    for document_id in unique_document_ids
+                )
+            )
+            document_cache = dict(zip(unique_document_ids, document_rows, strict=True))
+
+            items: list[SearchManyItem] = []
+            for request, rows, chunk_ids, failure in zip(
+                requests,
+                search_rows,
+                result_chunk_ids,
+                failures,
+                strict=True,
+            ):
+                hits: list[SearchHit] = []
+                for row_index, (row, chunk_id) in enumerate(zip(rows, chunk_ids, strict=True)):
+                    stored_chunk = chunk_cache.get(chunk_id) if chunk_id is not None else None
+                    chunk_metadata = dict(_value(stored_chunk, "metadata", default={}) or {})
+                    result_metadata = dict(_value(row, "metadata", default={}) or {})
+                    document_id = _value(row, "document_id") or _value(stored_chunk, "document_id")
+                    document = document_cache.get(str(document_id)) if document_id else None
+                    document_meta = dict(_value(document, "metadata", default={}) or {})
+                    document_meta.update(
+                        dict(_value(stored_chunk, "document_meta", default={}) or {})
+                    )
+                    document_meta.update(dict(_value(row, "document_meta", default={}) or {}))
+                    pages = _absolute_pages(
+                        chunk_metadata.get("page_numbers")
+                        or _value(row, "page_numbers", "pages", default=[]),
+                        document_meta,
+                    )
+                    citation_headings = _string_list(
+                        chunk_metadata.get("citation_headings") or _value(row, "headings")
+                    )
+                    hits.append(
+                        SearchHit(
+                            chunk_id=chunk_id or f"chunk-{row_index}",
+                            content=str(_value(row, "content", "text", default="")),
+                            score=_value(row, "score"),
+                            pages=pages,
+                            document_id=document_id,
+                            document_title=_value(row, "document_title", "title")
+                            or _value(document, "title"),
+                            metadata={
+                                **result_metadata,
+                                **chunk_metadata,
+                                "source_uri": _public_source_uri(
+                                    document_id, document_meta, chunk_metadata
+                                ),
+                                "headings": citation_headings,
+                                "labels": _string_list(
+                                    chunk_metadata.get("labels") or _value(row, "labels")
+                                ),
+                                "doc_item_refs": _string_list(
+                                    chunk_metadata.get("doc_item_refs")
+                                    or _value(row, "doc_item_refs")
+                                ),
+                                "chunk_ids": _string_list(_value(row, "chunk_ids")),
+                                "document_meta": document_meta,
+                                "logical_document_id": document_meta.get("logical_document_id"),
+                                "generation_id": document_meta.get("generation_id"),
+                                "raw_evidence": True,
+                            },
+                            search_type=request.search_type,
+                        )
+                    )
+                items.append(SearchManyItem(key=request.key, hits=hits, failure=failure))
+
+            hydrated_chunks: list[SearchHit] = []
+            for chunk_id in route_ids:
+                chunk = chunk_cache.get(chunk_id)
+                if chunk is None:
+                    continue
+                chunk_metadata = dict(_value(chunk, "metadata", default={}) or {})
+                document_id = str(_value(chunk, "document_id", default="") or "")
+                document = document_cache.get(document_id)
+                document_meta = dict(
+                    _value(document, "metadata", default=None)
+                    or _value(chunk, "document_meta", default={})
+                    or {}
+                )
+                hydrated_chunks.append(
+                    SearchHit(
+                        chunk_id=str(_value(chunk, "id", default=chunk_id) or chunk_id),
+                        content=str(_value(chunk, "content", default="")),
+                        pages=_absolute_pages(chunk_metadata.get("page_numbers"), document_meta),
+                        document_id=document_id or None,
+                        document_title=_value(chunk, "document_title") or _value(document, "title"),
+                        metadata={
+                            **chunk_metadata,
+                            "source_uri": _public_source_uri(
+                                document_id, document_meta, chunk_metadata
+                            ),
+                            "document_meta": document_meta,
+                            "logical_document_id": document_meta.get("logical_document_id"),
+                            "generation_id": document_meta.get("generation_id"),
+                            "raw_evidence": True,
+                        },
+                        search_type="lookup",
+                    )
+                )
+
+        unique_chunk_hydrations = len(unique_lookup_ids)
+        unique_document_hydrations = len(unique_document_ids)
+        stats = SearchManyStats(
+            search_requests=len(requests),
+            successful_searches=sum(failure is None for failure in failures),
+            result_rows=sum(len(rows) for rows in search_rows),
+            requested_chunk_hydrations=requested_chunk_hydrations,
+            unique_chunk_hydrations=unique_chunk_hydrations,
+            chunk_hydrations_saved=max(0, requested_chunk_hydrations - unique_chunk_hydrations),
+            requested_document_hydrations=requested_document_hydrations,
+            unique_document_hydrations=unique_document_hydrations,
+            document_hydrations_saved=max(
+                0, requested_document_hydrations - unique_document_hydrations
+            ),
+            backend_sessions=1,
+            native_batch=True,
+        )
+        return SearchManyResult(
+            items=items,
+            hydrated_chunks=hydrated_chunks,
+            stats=stats,
+        )
+
     async def get_chunk(self, database: Path, chunk_id: str) -> SearchHit | None:
         """Return unexpanded raw evidence via Haiku's public chunk lookup."""
         await self.ensure_database(database)
@@ -591,7 +962,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         )
         metadata_payload = {
             **chunk_metadata,
-            "source_uri": _value(chunk, "document_uri") or _value(document, "uri"),
+            "source_uri": _public_source_uri(document_id, document_meta, chunk_metadata),
             "document_meta": document_meta,
             "logical_document_id": document_meta.get("logical_document_id"),
             "generation_id": document_meta.get("generation_id"),
@@ -659,7 +1030,9 @@ class VanillaHaikuAdapter(HaikuAdapter):
                         document_title=_value(chunk, "document_title") or _value(document, "title"),
                         metadata={
                             **chunk_metadata,
-                            "source_uri": _value(chunk, "document_uri") or _value(document, "uri"),
+                            "source_uri": _public_source_uri(
+                                document_id, document_meta, chunk_metadata
+                            ),
                             "document_meta": document_meta,
                             "logical_document_id": document_meta.get("logical_document_id"),
                             "generation_id": document_meta.get("generation_id"),
@@ -674,13 +1047,36 @@ class VanillaHaikuAdapter(HaikuAdapter):
         self, database: Path, question: str, candidates: list[SearchHit]
     ) -> list[float]:
         """Run one persistent CPU cross-encoder inside the query worker."""
-        del database
         if not candidates:
             return []
-        if self._persistent_reranker is None:
-            from ..services.reranker_service import PersistentCrossEncoder
+        from ..services.reranker_service import (
+            DEFAULT_RERANKER,
+            DEFAULT_RERANKER_REVISION,
+            PersistentCrossEncoder,
+        )
 
-            self._persistent_reranker = PersistentCrossEncoder()
+        config = self._config(database)
+        reranking = _value(config, "reranking", default=None)
+        configured = _value(reranking, "model", default=None)
+        model_name = str(_value(configured, "name", default="") or DEFAULT_RERANKER)
+        provider = str(_value(configured, "provider", default="cross-encoder") or "")
+        if provider != "cross-encoder":
+            raise RuntimeError(f"Unsupported adaptive reranker provider: {provider}")
+        configured_revision = _raw_reranker_revision(database, model_name, provider) or (
+            str(_value(configured, "revision", default="") or "") or None
+        )
+        revision = configured_revision or (
+            DEFAULT_RERANKER_REVISION if model_name == DEFAULT_RERANKER else None
+        )
+        if revision is None:
+            raise RuntimeError("Configured adaptive reranker has no immutable local revision pin")
+        reranker_key = (model_name, revision)
+        if self._persistent_reranker is None or self._persistent_reranker_key != reranker_key:
+            self._persistent_reranker = PersistentCrossEncoder(
+                model_name=model_name,
+                revision=revision,
+            )
+            self._persistent_reranker_key = reranker_key
         from ..services.query_v2 import FusedCandidate, RetrievalCandidate
 
         fused = []
@@ -730,8 +1126,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
             chunk_ids=chunk_ids,
             document_id=document_id,
             logical_document_id=str(logical_id) if logical_id else None,
-            source_uri=document_meta.get("source_uri")
-            or _value(cite, "document_uri", "source_uri"),
+            source_uri=_public_source_uri(document_id, document_meta),
             document_title=_value(cite, "document_title", "title"),
             pages=list(dict.fromkeys(pages)),
             headings=_string_list(_value(cite, "headings")),

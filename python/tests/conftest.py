@@ -13,20 +13,40 @@ from omarag_bridge.app import create_app
 from omarag_bridge.config import Settings
 from omarag_bridge.models.domain import (
     CapabilitySet,
+    CatalogRole,
     Citation,
+    HardwareBenchmark,
+    HardwareClassification,
     HardwareInfo,
     HardwareProfile,
+    HardwareProfileView,
+    HardwareReadiness,
+    HardwareTier,
+    ModelAssignment,
     ModelCatalogEntry,
+    ModelCatalogManifest,
     ModelCatalogResponse,
     ModelCategory,
     ModelFit,
+    ModelInstallState,
     ModelOperationResult,
+    ModelProfilePreflight,
     ModelResidency,
     ModelRoleRuntime,
     ModelRuntime,
     ModelRuntimeResponse,
     ModelSource,
+    ModelStackRecommendation,
+    PerformanceProfile,
     SearchHit,
+    SimpleModelRecommendation,
+)
+from omarag_bridge.services.model_service import ModelService
+from omarag_bridge.services.ollama_stream import OllamaModelIdentity
+from omarag_bridge.services.reranker_service import (
+    DEFAULT_RERANKER,
+    DEFAULT_RERANKER_REVISION,
+    _model_digest,
 )
 
 
@@ -44,6 +64,7 @@ class FakeHaikuAdapter:
         self.ask_calls = 0
         self.analyze_calls = 0
         self.ingest_calls = 0
+        self.ingest_options: list[dict[str, Any]] = []
 
     async def ensure_database(self, database: Path) -> None:
         database.mkdir(parents=True, exist_ok=True)
@@ -53,6 +74,7 @@ class FakeHaikuAdapter:
 
     async def ingest(self, database: Path, source: str, **options: Any) -> dict[str, Any]:
         self.ingest_calls += 1
+        self.ingest_options.append(dict(options))
         await self.ensure_database(database)
         metadata = options.get("metadata")
         return {
@@ -111,6 +133,185 @@ class FakeHaikuAdapter:
 
 class FakeModelService:
     imported_gguf: tuple[str, str, ModelCategory, str] | None = None
+
+    def __init__(self) -> None:
+        self.installed_assignments: list[ModelAssignment] = []
+
+    def curated_catalog(self) -> ModelCatalogManifest:
+        return ModelService.curated_catalog()
+
+    def hardware(self, _: Path) -> HardwareInfo:
+        memory = 16 * 1024**3
+        return HardwareInfo(
+            cpu_model="Test CPU",
+            logical_cores=8,
+            physical_cores=4,
+            memory_total=memory,
+            memory_capacity=memory,
+            memory_available=12 * 1024**3,
+            storage_total=512 * 1024**3,
+            storage_available=256 * 1024**3,
+            capacity_tier=HardwareTier.TIER_4,
+            readiness_tier=HardwareTier.TIER_4,
+            readiness=HardwareReadiness.READY,
+        )
+
+    async def recommend(
+        self,
+        profile: PerformanceProfile | HardwareProfile | str = PerformanceProfile.NORMAL,
+        *,
+        hardware: HardwareInfo | None = None,
+        benchmark: HardwareBenchmark | None = None,
+        tier_override: HardwareTier | int | None = None,
+    ) -> ModelStackRecommendation:
+        del hardware, benchmark
+        selected_profile = ModelService.performance_profile(profile)
+        tier = HardwareTier(tier_override or HardwareTier.TIER_4)
+        catalog = self.curated_catalog()
+        definition = next(item for item in catalog.tiers if item.tier == tier)
+        artifacts = {item.id: item for item in catalog.artifacts}
+        selected = [
+            (CatalogRole.CHAT, definition.generator),
+            (CatalogRole.VL, definition.generator),
+            (CatalogRole.EMBEDDING, definition.embedding),
+            (CatalogRole.RERANK, definition.reranker),
+        ]
+        if definition.visual_embedding is not None:
+            selected.append((CatalogRole.VISUAL_EMBEDDING, definition.visual_embedding))
+        assignments = [
+            ModelAssignment(
+                role=role,
+                artifact_id=artifact_id,
+                provider=artifacts[artifact_id].provider,
+                model=artifacts[artifact_id].model,
+                revision=artifacts[artifact_id].revision,
+                digest=artifacts[artifact_id].digest,
+                quantization=artifacts[artifact_id].quantization,
+                install_state=ModelInstallState.INSTALLED,
+                installed_digest=artifacts[artifact_id].digest,
+                download_bytes=artifacts[artifact_id].download_bytes,
+            )
+            for role, artifact_id in selected
+        ]
+        return ModelStackRecommendation(
+            recommendation_id=f"rec-test-{tier.value}-{selected_profile.value}",
+            catalog_id=catalog.catalog_id,
+            catalog_release=catalog.release,
+            catalog_as_of=catalog.as_of,
+            profile=selected_profile,
+            classification=HardwareClassification(
+                capacity_tier=tier,
+                readiness_tier=tier,
+                effective_tier=tier,
+                readiness=HardwareReadiness.READY,
+                benchmark_required=False,
+            ),
+            stack_tier=tier,
+            assignments=assignments,
+            context_tokens=min(
+                definition.max_context_tokens,
+                catalog.performance_profiles[selected_profile].context_ceiling_tokens,
+            ),
+            residency_slots=definition.residency_slots,
+            retrieval_budgets=catalog.performance_profiles[selected_profile].budgets,
+            ready_now=True,
+            fallback_tiers=[HardwareTier(value) for value in range(tier.value - 1, 0, -1)],
+        )
+
+    async def profile_preflight(
+        self,
+        profile: PerformanceProfile | HardwareProfile | str,
+        *,
+        current_roles: dict[str, str | None] | None = None,
+        current_vector_dimension: int | None = None,
+        current_embedding_provider: str | None = None,
+        current_embedding_digest: str | None = None,
+        current_visual_embedding: str | None = None,
+        hardware: HardwareInfo | None = None,
+        benchmark: HardwareBenchmark | None = None,
+        index_has_documents: bool = True,
+    ) -> ModelProfilePreflight:
+        del (
+            current_embedding_digest,
+            current_embedding_provider,
+            current_visual_embedding,
+            hardware,
+            benchmark,
+        )
+        recommendation = await self.recommend(profile)
+        roles = current_roles or {}
+        expected = {
+            item.role.value: item.model
+            for item in recommendation.assignments
+            if item.role != CatalogRole.VISUAL_EMBEDDING
+        }
+        changes = {role: model for role, model in expected.items() if roles.get(role) != model}
+        definition = next(
+            item for item in self.curated_catalog().tiers if item.tier == recommendation.stack_tier
+        )
+        requires_reindex = index_has_documents and bool(
+            (roles.get("embedding") and roles.get("embedding") != expected["embedding"])
+            or (
+                current_vector_dimension
+                and current_vector_dimension != definition.embedding_dimension
+            )
+        )
+        return ModelProfilePreflight(
+            recommendation=recommendation,
+            changes=changes,
+            requires_reindex=requires_reindex,
+            can_apply=True,
+        )
+
+    async def benchmark(
+        self,
+        profile: PerformanceProfile | HardwareProfile | str = PerformanceProfile.NORMAL,
+        *,
+        tier: HardwareTier | int | None = None,
+        hardware: HardwareInfo | None = None,
+    ) -> HardwareBenchmark:
+        del hardware
+        recommendation = await self.recommend(profile, tier_override=tier)
+        return HardwareBenchmark(
+            tested_tier=recommendation.stack_tier,
+            performance_tier=recommendation.stack_tier,
+            stack_id=recommendation.recommendation_id,
+            passed=True,
+            not_measured=["rerank", "visual-embedding"],
+        )
+
+    def recommendation_view(
+        self,
+        recommendation: ModelStackRecommendation,
+        *,
+        scanned_at: Any = None,
+        expert_mode: bool = False,
+    ) -> HardwareProfileView:
+        definition = next(
+            item for item in self.curated_catalog().tiers if item.tier == recommendation.stack_tier
+        )
+        return HardwareProfileView(
+            tier=recommendation.stack_tier,
+            tier_label=definition.label,
+            limiting_factor="balanced capacity",
+            catalog_version=recommendation.catalog_release,
+            scanned_at=scanned_at,
+            profile=recommendation.profile,
+            expert_mode=expert_mode,
+            recommendations=[
+                SimpleModelRecommendation(
+                    role=item.role.value,
+                    model=item.model,
+                    reason="deterministic test recommendation",
+                    required_bytes=0,
+                    context_tokens=recommendation.context_tokens,
+                )
+                for item in recommendation.assignments
+            ],
+        )
+
+    async def install_assignments(self, assignments: list[ModelAssignment]) -> None:
+        self.installed_assignments.extend(assignments)
 
     async def catalog(
         self,
@@ -222,6 +423,54 @@ def app(tmp_path: Path) -> FastAPI:
     result.state.services.jobs.adapter = adapter
     result.state.services.runs.adapter = adapter
     result.state.services.runs.query.adapter = adapter
+
+    async def pinned_test_runtime(
+        workspace_id: str, **options: object
+    ) -> tuple[OllamaModelIdentity | None, dict[str, object]]:
+        del options
+        roles = result.state.services.features.configured_model_roles(workspace_id)
+        chat = str(roles.get("chat") or "test-chat")
+        embedding = str(roles.get("embedding") or "test-embedding")
+        generator = OllamaModelIdentity(chat, f"test-digest:{chat}", 1)
+        identities = {
+            "generator": {
+                "provider": "ollama",
+                "model": chat,
+                "revision": "test",
+                "digest": generator.digest,
+                "status": "pinned",
+            },
+            "embedding": {
+                "provider": "ollama",
+                "model": embedding,
+                "revision": "test",
+                "digest": f"test-digest:{embedding}",
+                "status": "pinned",
+            },
+            "reranker": {
+                "provider": "cross-encoder",
+                "model": DEFAULT_RERANKER,
+                "revision": DEFAULT_RERANKER_REVISION,
+                "digest": DEFAULT_RERANKER_REVISION,
+                "status": "pinned",
+            },
+        }
+        return generator, {
+            "readiness_status": "ready",
+            "model_identities": identities,
+            "model_digests": {
+                "generator": generator.digest,
+                "embedding": f"test-digest:{embedding}",
+                "reranker": _model_digest(DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION),
+            },
+        }
+
+    result.state.services.runs.runtime_identity_resolver = pinned_test_runtime
+
+    async def verified_test_retrieval(_: str, **_options: object) -> dict[str, object]:
+        return {}
+
+    result.state.services.runs.verify_retrieval_identity = verified_test_retrieval
     result.state.services.search.adapter = adapter
     result.state.services.features.adapter = adapter
     result.state.services.textbooks.adapter = adapter

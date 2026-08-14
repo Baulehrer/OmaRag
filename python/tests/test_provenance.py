@@ -127,7 +127,8 @@ async def test_adapter_keeps_rich_citation_metadata(docling_document) -> None:
     result = await HaikuV070Adapter()._citation(Rag(), cite, 0)
 
     assert result.logical_document_id == "book-1"
-    assert result.source_uri == "file:///tmp/Fachbuch%20Betonbau.pdf"
+    assert result.source_uri == "omarag://documents/book-1/generations/legacy"
+    assert "/tmp/" not in result.source_uri
     assert result.pages == [102]
     assert result.headings == ["Betonbau", "Querkraft"]
     assert result.element_types == ["paragraph"]

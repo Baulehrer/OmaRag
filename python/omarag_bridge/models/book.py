@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 
 from .domain import StrictModel
+from .media import BookMediaSnapshot
 
 NavigationRole = Literal[
     "toc",
@@ -162,6 +163,16 @@ class EvidenceRecord(StrictModel):
     context_hash: str | None = None
     previous_evidence_id: str | None = None
     next_evidence_id: str | None = None
+    evidence_kind: Literal[
+        "prose",
+        "table",
+        "formula",
+        "figure",
+        "navigation",
+        "ocr",
+        "unknown",
+    ] = "unknown"
+    provenance_kind: Literal["element", "page-fallback", "synthetic", "legacy"] = "legacy"
     quality_flags: list[str] = Field(default_factory=list)
 
 
@@ -216,9 +227,13 @@ class BookRagGraph(StrictModel):
 
 
 class BookKnowledgeSnapshot(StrictModel):
-    """Portable deterministic Core sidecar. ``schema_version`` is always v2."""
+    """Portable deterministic Core sidecar.
 
-    schema_version: Literal["2"] = "2"
+    Schema v3 adds first-class media. Pydantic defaults let existing v2 JSON
+    load unchanged with an empty media block.
+    """
+
+    schema_version: Literal["2", "3"] = "2"
     logical_document_id: str
     generation_id: str
     fingerprint: str
@@ -227,4 +242,5 @@ class BookKnowledgeSnapshot(StrictModel):
     structure: BookStructure
     evidence: list[EvidenceRecord] = Field(default_factory=list)
     graph: BookRagGraph = Field(default_factory=BookRagGraph)
+    media: BookMediaSnapshot = Field(default_factory=BookMediaSnapshot)
     stats: dict[str, Any] = Field(default_factory=dict)

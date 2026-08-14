@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
@@ -8,13 +9,22 @@ from omarag_bridge.services.query_v2 import (
     ClaimBlock,
     ClaimBlockParser,
     ClaimParseError,
+    ClaimVerification,
+    EvidenceKind,
     PlattCalibrator,
+    ProgressiveRetrievalPolicy,
+    ProvenanceKind,
     QueryComplexity,
+    RerankedCandidate,
     RetrievalCandidate,
+    SelectiveVerifierPolicy,
     adaptive_select,
+    canonical_performance_profile,
     classify_query,
     extract_evidence_window,
     pack_evidence_windows,
+    performance_budget,
+    performance_context_tokens,
     validate_claim,
     weighted_rrf,
 )
@@ -54,6 +64,50 @@ def test_classifier_assigns_fixed_budgets_and_bounded_facets() -> None:
     assert 2 <= len(comparison.facets) <= 4
     assert any("Beton" in facet.query for facet in comparison.facets)
     assert any("Stahl" in facet.query for facet in comparison.facets)
+
+
+def test_v11_performance_profiles_keep_complexity_but_change_bounded_work() -> None:
+    assert canonical_performance_profile("balanced") == "normal"
+    assert canonical_performance_profile("deep") == "quality"
+    assert canonical_performance_profile("auto") == "normal"
+
+    assert performance_budget(QueryComplexity.SIMPLE, "fast").candidate_cap == 16
+    assert performance_budget(QueryComplexity.STANDARD, "normal").final_max == 8
+    quality = performance_budget(QueryComplexity.COMPLEX, "quality")
+    assert quality.candidate_cap == 96
+    assert quality.final_min == 5
+    assert quality.final_max == 18
+    assert quality.evidence_tokens == 4_500
+    assert performance_context_tokens(QueryComplexity.SIMPLE, "fast") == 4_096
+    assert performance_context_tokens(QueryComplexity.STANDARD, "normal") == 8_192
+    assert performance_context_tokens(QueryComplexity.COMPLEX, "quality") == 24_576
+
+
+def test_progressive_policy_escalates_for_missing_explicit_evidence_kind() -> None:
+    policy = ProgressiveRetrievalPolicy()
+    prose = RerankedCandidate(candidate("prose", "Der Wert wird erläutert."), 2.0, 0.88)
+    missing = policy.missing_evidence_requirements(
+        "Welcher Wert steht in der Tabelle?",
+        (prose,),
+    )
+    assert missing == ("table-evidence",)
+    assert policy.should_escalate(
+        selected_count=1,
+        missing_facets=(),
+        top_relevance=0.88,
+        second_relevance=None,
+        optional_facets_available=True,
+        missing_evidence_requirements=missing,
+    )
+
+    table_candidate = replace(
+        candidate("table", "| Kennwert | 42 |\n|---|---|"),
+        evidence_kind=EvidenceKind.TABLE,
+    )
+    table = RerankedCandidate(table_candidate, 2.1, 0.89)
+    assert (
+        policy.missing_evidence_requirements("Welcher Wert steht in der Tabelle?", (table,)) == ()
+    )
 
 
 def test_classifier_accounts_for_discovered_session_and_corpus_scope() -> None:
@@ -117,6 +171,151 @@ def test_adaptive_selection_uses_calibration_gap_facets_and_exact_dedup() -> Non
     assert result.cutoff_reason == "score_gap"
     assert result.eligible_count == 3
     assert result.cutoff_score == pytest.approx(1 / (1 + math.exp(-2)))
+
+
+def test_platt_fit_is_empirical_and_digest_bound() -> None:
+    calibrator = PlattCalibrator.fit(
+        model_digest="reranker-sha256",
+        dataset_digest="gold-v1",
+        policy_digest="retrieval-v3-sparse-dense-book-2026.08.1",
+        scores=(-3.0, -1.0, 0.0, 1.0, 3.0, 4.0),
+        labels=(0, 0, 0, 1, 1, 1),
+    )
+
+    assert calibrator.model_digest == "reranker-sha256"
+    assert calibrator.dataset_digest == "gold-v1"
+    assert calibrator.policy_digest == "retrieval-v3-sparse-dense-book-2026.08.1"
+    assert calibrator.digest not in {"identity-logit-v1", "test"}
+    assert calibrator.scale > 0
+    assert calibrator.probability(-3.0) < 0.5
+    assert calibrator.probability(3.0) > 0.5
+    assert calibrator.probability(3.0) > calibrator.probability(1.0)
+
+
+def test_selection_fails_closed_on_calibrator_digest_mismatch() -> None:
+    calibrator = PlattCalibrator.fit(
+        model_digest="reranker-a",
+        dataset_digest="gold-v1",
+        policy_digest="retrieval-v3-sparse-dense-book-2026.08.1",
+        scores=(-2.0, -1.0, 1.0, 2.0),
+        labels=(0, 0, 1, 1),
+    )
+    result = adaptive_select(
+        [(candidate("a", "Beleg"), 2.0)],
+        complexity=QueryComplexity.SIMPLE,
+        calibrator=calibrator,
+        reranker_digest="reranker-b",
+    )
+
+    assert result.selected == ()
+    assert result.cutoff_reason == "calibration_mismatch"
+
+
+def test_typed_evidence_packing_skips_navigation_and_returns_support_spans() -> None:
+    navigation = candidate("nav", "Inhaltsverzeichnis: Grenzwert", facets=("F1",))
+    navigation = replace(navigation, evidence_kind=EvidenceKind.NAVIGATION)
+    table = candidate(
+        "table",
+        "Tabelle 4: Grenzwerte in mm\n| Klasse | Grenzwert |\n|---|---|\n| A | 42 mm |",
+        facets=("F1",),
+    )
+    table = replace(table, evidence_kind=EvidenceKind.TABLE)
+
+    windows = pack_evidence_windows(
+        [navigation, table],
+        "Grenzwert Klasse A",
+        total_token_budget=64,
+        per_window_tokens=32,
+    )
+    assert [window.chunk_id for window in windows] == ["table"]
+    assert windows[0].evidence_kind is EvidenceKind.TABLE
+    assert windows[0].text.startswith("Tabelle 4")
+    assert "| Klasse | Grenzwert |" in windows[0].text
+
+    validation = validate_claim(
+        ClaimBlock("C1", "Der Grenzwert beträgt 42 mm.", ("E1",), "F1"),
+        {"E1": windows[0]},
+        allowed_facets=("F1",),
+    )
+    assert validation.valid
+    assert validation.support_spans
+    assert validation.support_spans[0].evidence_id == "E1"
+
+
+def test_formula_window_keeps_adjacent_variable_definition_and_drops_synthetic() -> None:
+    synthetic = replace(
+        candidate("summary", "Generierte Zusammenfassung"),
+        provenance_kind=ProvenanceKind.SYNTHETIC,
+    )
+    formula = replace(
+        candidate(
+            "formula",
+            "Dabei ist E der Elastizitätsmodul.\nσ = E · ε\nε bezeichnet die Dehnung.",
+        ),
+        evidence_kind=EvidenceKind.FORMULA,
+        provenance_kind=ProvenanceKind.ELEMENT,
+    )
+
+    windows = pack_evidence_windows(
+        [synthetic, formula],
+        "Wie lautet die Formel für Spannung und Dehnung?",
+        total_token_budget=80,
+        per_window_tokens=48,
+    )
+
+    assert [window.chunk_id for window in windows] == ["formula"]
+    assert "Elastizitätsmodul" in windows[0].text
+    assert "σ = E · ε" in windows[0].text
+    assert "Dehnung" in windows[0].text
+
+
+def test_progressive_policy_escalates_only_for_missing_facets_or_low_margin() -> None:
+    policy = ProgressiveRetrievalPolicy()
+    assert (
+        policy.should_escalate(
+            selected_count=2,
+            missing_facets=(),
+            top_relevance=0.91,
+            second_relevance=0.70,
+            optional_facets_available=True,
+        )
+        is False
+    )
+    assert (
+        policy.should_escalate(
+            selected_count=2,
+            missing_facets=("F2",),
+            top_relevance=0.91,
+            second_relevance=0.70,
+            optional_facets_available=True,
+        )
+        is True
+    )
+    assert (
+        policy.should_escalate(
+            selected_count=1,
+            missing_facets=(),
+            top_relevance=0.61,
+            second_relevance=0.59,
+            optional_facets_available=True,
+        )
+        is True
+    )
+
+
+def test_selective_verifier_policy_is_typed_and_fail_closed() -> None:
+    policy = SelectiveVerifierPolicy()
+    evidence = extract_evidence_window(
+        candidate("formula", "f = m · a = 42 N"),
+        "Formel",
+        evidence_id="E1",
+    )
+    evidence = replace(evidence, evidence_kind=EvidenceKind.FORMULA)
+    assert policy.should_verify(
+        ClaimBlock("C1", "Die Formel ergibt 42 N.", ("E1",), "F1"),
+        (evidence,),
+    )
+    assert policy.fail_closed(None) == ClaimVerification("unknown", "verifier-unavailable")
 
 
 def test_adaptive_selection_never_fills_below_evidence_threshold() -> None:

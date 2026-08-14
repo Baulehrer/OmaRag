@@ -58,6 +58,17 @@ async def test_citation_preview_renders_grounded_pdf_region(tmp_path: Path) -> N
     assert payload.startswith(b"\x89PNG")
     assert list((tmp_path / "cache").glob("*.png"))
 
+    opaque = citation.model_copy(
+        update={"source_uri": "omarag://documents/book-1/generations/gen-1"}
+    )
+    opaque_payload = await render_citation_preview(
+        opaque,
+        tmp_path / "opaque-cache",
+        800,
+        managed_source=pdf_path,
+    )
+    assert opaque_payload.startswith(b"\x89PNG")
+
 
 async def test_failed_import_resumes_after_last_committed_segment(
     client: httpx2.AsyncClient,

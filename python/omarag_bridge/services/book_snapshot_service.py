@@ -11,6 +11,7 @@ from ..models.book import (
     EvidenceAnchor,
     EvidenceRecord,
 )
+from ..models.media import BookMediaSnapshot
 
 
 def _canonical_json(value: object) -> bytes:
@@ -71,8 +72,9 @@ def build_book_knowledge_snapshot(
     structure: BookStructure,
     evidence: Sequence[EvidenceRecord],
     graph: BookRagGraph,
+    media: BookMediaSnapshot | None = None,
 ) -> BookKnowledgeSnapshot:
-    """Validate and freeze the complete deterministic Core sidecar as v2 JSON."""
+    """Validate and freeze the deterministic Core sidecar as v2 or media-aware v3."""
 
     if structure.logical_document_id != logical_document_id:
         raise ValueError("Structure belongs to a different logical document")
@@ -164,8 +166,52 @@ def build_book_knowledge_snapshot(
         expected_ids = node_ids if edge.relation in {"parent_of", "next_section"} else term_ids
         if edge.source_id not in expected_ids or edge.target_id not in expected_ids:
             raise ValueError(f"Graph edge {edge.edge_id} has invalid endpoint kinds")
+    media_snapshot = media or BookMediaSnapshot()
+    media_ids = {asset.media_id for asset in media_snapshot.assets}
+    if len(media_ids) != len(media_snapshot.assets):
+        raise ValueError("Media snapshot contains duplicate media ids")
+    for asset in media_snapshot.assets:
+        if asset.logical_document_id != logical_document_id:
+            raise ValueError(f"Media asset {asset.media_id} belongs to a different document")
+        if asset.generation_id != generation_id:
+            raise ValueError(f"Media asset {asset.media_id} belongs to a different generation")
+        if asset.source_fingerprint != fingerprint:
+            raise ValueError(f"Media asset {asset.media_id} belongs to a different source")
+        if asset.page_no > structure.total_pages:
+            raise ValueError(f"Media asset {asset.media_id} has an invalid page")
+        if asset.section_node_id not in node_ids:
+            raise ValueError(f"Media asset {asset.media_id} has an unknown section")
+        if any(item not in evidence_ids for item in asset.evidence_ids):
+            raise ValueError(f"Media asset {asset.media_id} has unknown evidence")
+    media_link_ids: set[str] = set()
+    for link in media_snapshot.links:
+        if link.link_id in media_link_ids:
+            raise ValueError(f"Duplicate media link id: {link.link_id}")
+        media_link_ids.add(link.link_id)
+        if any(item not in evidence_ids for item in link.evidence_ids):
+            raise ValueError(f"Media link {link.link_id} has unknown evidence")
+        valid_endpoints = {
+            "section_contains_media": (node_ids, media_ids),
+            "evidence_depicts_media": (evidence_ids, media_ids),
+            "evidence_context_for_media": (evidence_ids, media_ids),
+            "media_mentions_term": (media_ids, term_ids),
+            "media_duplicate_of": (media_ids, media_ids),
+            "media_variant_of": (media_ids, media_ids),
+        }
+        source_ids, target_ids = valid_endpoints[link.relation]
+        if link.source_id not in source_ids or link.target_id not in target_ids:
+            raise ValueError(f"Media link {link.link_id} has invalid endpoint kinds")
+        if link.source_id == link.target_id:
+            raise ValueError(f"Media link {link.link_id} links an asset to itself")
+    for group in media_snapshot.duplicate_groups:
+        members = set(group.member_media_ids)
+        if group.canonical_media_id not in members or not members <= media_ids:
+            raise ValueError("Media duplicate group contains an unknown member")
+        if len(members) != len(group.member_media_ids):
+            raise ValueError("Media duplicate group contains duplicate members")
+    schema_version = "3" if media is not None else "2"
     payload = {
-        "schema_version": "2",
+        "schema_version": schema_version,
         "logical_document_id": logical_document_id,
         "generation_id": generation_id,
         "fingerprint": fingerprint,
@@ -174,8 +220,11 @@ def build_book_knowledge_snapshot(
         "evidence": [item.model_dump(mode="json") for item in evidence],
         "graph": graph.model_dump(mode="json"),
     }
+    if media is not None:
+        payload["media"] = media_snapshot.model_dump(mode="json")
     content_hash = hashlib.sha256(_canonical_json(payload)).hexdigest()
     return BookKnowledgeSnapshot(
+        schema_version=schema_version,
         logical_document_id=logical_document_id,
         generation_id=generation_id,
         fingerprint=fingerprint,
@@ -184,6 +233,7 @@ def build_book_knowledge_snapshot(
         structure=structure,
         evidence=list(evidence),
         graph=graph,
+        media=media_snapshot,
         stats={
             "structure_nodes": len(structure.nodes),
             "evidence_chunks": len(evidence),
@@ -191,5 +241,8 @@ def build_book_knowledge_snapshot(
             "aliases": len(graph.aliases),
             "targets": len(graph.targets),
             "edges": len(graph.edges),
+            "media_assets": len(media_snapshot.assets),
+            "media_links": len(media_snapshot.links),
+            "media_duplicate_groups": len(media_snapshot.duplicate_groups),
         },
     )

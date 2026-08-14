@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gzip
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,18 +13,31 @@ import pytest
 
 from omarag_bridge.adapters import book_v2
 from omarag_bridge.adapters.book_v2 import (
-    BOOK_V2_PIPELINE,
+    BOOK_V3_PIPELINE,
     HeadingManifest,
     PdfBookPreflight,
     RangeCache,
+    _parse_navigation,
     _plan_ranges,
+    build_evidence_record,
     ingest_pdf_book_v2,
 )
 from omarag_bridge.adapters.haiku_v070 import VanillaHaikuAdapter
 from omarag_bridge.adapters.isolated import IsolatedHaikuAdapter
-from omarag_bridge.models.book import BookBookmark
+from omarag_bridge.models.book import (
+    BookBookmark,
+    BookLine,
+    BookPage,
+    BookStructure,
+    BookStructureNode,
+    NavigationRegion,
+)
 from omarag_bridge.models.domain import SearchHit
 from omarag_bridge.models.errors import ConflictError
+from omarag_bridge.services.structure_fallback_service import (
+    StructureFallbackRequest,
+    StructureRouteSelection,
+)
 
 
 class FakeChunk:
@@ -32,6 +47,20 @@ class FakeChunk:
         self.metadata = metadata
         self.order = order
         self.embedding: list[float] | None = None
+
+
+@pytest.mark.asyncio
+async def test_visual_dense_fails_closed_until_media_gold_gate(tmp_path: Path) -> None:
+    with pytest.raises(ConflictError, match="media quality gate") as captured:
+        await ingest_pdf_book_v2(
+            database=tmp_path / "database",
+            source=tmp_path / "not-read.pdf",
+            config=SimpleNamespace(),
+            client_factory=lambda *_args, **_kwargs: None,
+            haiku_version="0.74.0",
+            indexing_options={"pipeline": "book-v3", "visual_dense": "on"},
+        )
+    assert captured.value.details["fallback"] == "caption-page-graph"
 
 
 class FakeDocument:
@@ -100,6 +129,22 @@ def test_range_cache_key_includes_absolute_page_range(tmp_path: Path) -> None:
     assert cache.key("sha", (1, 10), signature) != cache.key("sha", (11, 20), signature)
 
 
+def test_range_cache_v3_is_compressed_and_keeps_stable_key_namespace(
+    tmp_path: Path,
+) -> None:
+    cache = RangeCache(tmp_path)
+    signature = {"docling": "2.119.0"}
+    key = cache.key("sha", (1, 2), signature)
+
+    cache.store(key, (1, 2), FakeDocument((1, 2)))
+
+    assert cache.path(key).suffixes == [".json", ".gz"]
+    with gzip.open(cache.path(key), mode="rt", encoding="utf-8") as source:
+        payload = json.load(source)
+    assert payload["schema"] == 3
+    assert payload["page_range"] == [1, 2]
+
+
 def test_heading_manifest_carries_global_path_and_keeps_raw_content() -> None:
     manifest = HeadingManifest("book-1")
     first = FakeDocument((1, 1), heading="Inhaltsverzeichnis")
@@ -139,6 +184,114 @@ def test_heading_hook_cannot_rewrite_evidence() -> None:
         manifest.patch(document, [chunk], (5, 5), corrupt)
 
 
+def test_evidence_record_exposes_typed_raw_provenance() -> None:
+    document = FakeDocument((5, 5))
+    chunk = FakeChunk(
+        "| Bauteil | Wert |\n|---|---|\n| Wand | 24 cm |",
+        {
+            "doc_item_refs": ["#/texts/p-5"],
+            "page_numbers": [5],
+            "labels": ["table"],
+            "headings": ["Bemessung"],
+        },
+    )
+    structure = BookStructure(
+        logical_document_id="book-1",
+        mode="body-headings",
+        confidence=0.9,
+        total_pages=5,
+        nodes=[
+            BookStructureNode(
+                node_id="section-1",
+                depth=0,
+                ordinal=0,
+                title="Bemessung",
+                normalized_title="bemessung",
+                page_start=1,
+                page_end=5,
+                source_kind="body-heading",
+                confidence=0.9,
+            )
+        ],
+    )
+
+    record = build_evidence_record(
+        document=document,
+        chunk=chunk,
+        structure=structure,
+        fingerprint="f" * 64,
+        config_hash="c" * 64,
+        previous_evidence_id=None,
+    )
+
+    assert record.evidence_kind == "table"
+    assert record.provenance_kind == "element"
+    assert chunk.metadata["evidence_kind"] == "table"
+    assert chunk.metadata["provenance_kind"] == "element"
+
+
+def test_model_route_depth_never_overwrites_deterministic_high_confidence_entry() -> None:
+    pages = [
+        BookPage(
+            page_no=1,
+            page_label="i",
+            lines=[
+                BookLine(page_no=1, text="Inhaltsverzeichnis", source_ref="#/h"),
+                BookLine(page_no=1, text="Kapitel Alpha ........ 12", source_ref="#/e"),
+            ],
+        )
+    ]
+    deterministic = NavigationRegion(
+        role="toc",
+        page_start=1,
+        page_end=1,
+        score=0.9,
+        accepted=True,
+    )
+    selection = StructureRouteSelection(
+        candidate_id="route-1",
+        page_no=1,
+        source_ref="#/e",
+        substring="Kapitel Alpha",
+        locator="12",
+        role="toc",
+        level=2,
+        parent_id=None,
+        objective=1.0,
+    )
+
+    _, deterministic_entries, *_ = _parse_navigation(
+        pages,
+        {"12": 12},
+        total_pages=20,
+        detected_regions=[deterministic],
+        route_selections=[selection],
+    )
+    assisted_region = deterministic.model_copy(
+        update={
+            "score": 1.0,
+            "metrics": {
+                "llm_objective_baseline": 0.7,
+                "llm_objective_gain": 0.3,
+            },
+        }
+    )
+    _, assisted_entries, *_ = _parse_navigation(
+        pages,
+        {"12": 12},
+        total_pages=20,
+        detected_regions=[assisted_region],
+        route_selections=[selection],
+    )
+
+    assert deterministic_entries[0].depth == 0
+    assert deterministic_entries[0].confidence == 0.92
+    assert assisted_entries[0].depth == 2
+    assert assisted_entries[0].confidence == 0.81
+    assert assisted_entries[0].title == deterministic_entries[0].title
+    assert assisted_entries[0].locator == deterministic_entries[0].locator
+
+
 @pytest.mark.asyncio
 async def test_pdf_v2_uses_one_converter_original_ranges_and_public_haiku_primitives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -153,7 +306,12 @@ async def test_pdf_v2_uses_one_converter_original_ranges_and_public_haiku_primit
         def convert(self, path: Path, *, page_range: tuple[int, int]):
             converter_calls.append((path, page_range))
             heading = "Inhaltsverzeichnis" if page_range[0] == 1 else "Kapitel 1"
-            return SimpleNamespace(document=FakeDocument(page_range, heading))
+            document = FakeDocument(page_range, heading)
+            core_page = 1 if page_range[0] == 1 else 3
+            document.paragraph.self_ref = f"#/texts/p-{core_page}"
+            document.paragraph.prov = [SimpleNamespace(page_no=core_page)]
+            document.core_page = core_page
+            return SimpleNamespace(document=document)
 
     def converter_factory(_config, _profile):
         converter = Converter()
@@ -185,7 +343,7 @@ async def test_pdf_v2_uses_one_converter_original_ranges_and_public_haiku_primit
             return []
 
         async def chunk(self, document: FakeDocument):
-            page = document.page_range[0]
+            page = document.core_page
             return [
                 FakeChunk(
                     f"Rohe Evidenz Seite {page}",
@@ -240,18 +398,25 @@ async def test_pdf_v2_uses_one_converter_original_ranges_and_public_haiku_primit
         document_fingerprint=hashlib.sha256(original).hexdigest(),
         segment_sizer=lambda _preferred, _scanned: 2,
         embed_chunks_fn=embed_chunks,
+        indexing_options={"pipeline": "book-v3"},
     )
 
     assert source.read_bytes() == original
     assert len(converter_instances) == 1
     assert client_calls == 1
-    assert converter_calls == [(source.resolve(), (1, 2)), (source.resolve(), (3, 4))]
+    assert converter_calls == [(source.resolve(), (1, 3)), (source.resolve(), (2, 4))]
     assert [item[1][0].content for item in rag.imported] == [
         "Rohe Evidenz Seite 1",
         "Rohe Evidenz Seite 3",
     ]
+    assert [(item["conversion_start"], item["conversion_end"]) for item in result["segments"]] == [
+        (1, 3),
+        (2, 4),
+    ]
     assert all(item[1][0].embedding for item in rag.imported)
-    assert result["pipeline_version"] == BOOK_V2_PIPELINE
+    assert result["pipeline_version"] == BOOK_V3_PIPELINE
+    assert result["source_uri"].startswith("omarag://documents/book-")
+    assert str(source.resolve()) not in result["source_uri"]
     assert result["pipeline_stats"]["pdf_original_unchanged"] is True
     assert result["pipeline_stats"]["absolute_page_ranges"] is True
     assert result["pipeline_stats"]["two_pass_structure"] is True
@@ -264,6 +429,131 @@ async def test_pdf_v2_uses_one_converter_original_ranges_and_public_haiku_primit
     assert (
         result["chunk_manifest"][0]["next_evidence_id"]
         == result["chunk_manifest"][1]["evidence_id"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_pdf_v2_wires_bounded_local_structure_fallback_as_routing_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "uncertain-index.pdf"
+    source.write_bytes(b"%PDF local structure fallback")
+
+    class IndexDocument(FakeDocument):
+        def __init__(self, page_range: tuple[int, int]) -> None:
+            super().__init__(page_range, "Sachwortverzeichnis")
+            self.paragraph.text = "Alpha, 12\nBeta, 18\nGamma, 24"
+            self.paragraph.prov = [SimpleNamespace(page_no=1)]
+
+    class Converter:
+        def convert(self, _path: Path, *, page_range: tuple[int, int]):
+            return SimpleNamespace(document=IndexDocument(page_range))
+
+    monkeypatch.setattr(
+        book_v2,
+        "build_docling_converter",
+        lambda _config, _profile: Converter(),
+    )
+    monkeypatch.setattr(
+        book_v2,
+        "pdf_preflight",
+        lambda _path: PdfBookPreflight(
+            total_pages=100,
+            scanned_pages=[False] * 100,
+            page_labels={str(page): page for page in range(1, 101)},
+            bookmarks=[BookBookmark(title="Kapitel 1", depth=0, page_no=2)],
+        ),
+    )
+
+    class Rag:
+        embedder = object()
+
+        async def list_documents(self):
+            return []
+
+        async def chunk(self, _document: IndexDocument):
+            return [
+                FakeChunk(
+                    "Alpha, 12\nBeta, 18\nGamma, 24",
+                    {
+                        "doc_item_refs": ["#/texts/p-1"],
+                        "page_numbers": [1],
+                        "labels": ["paragraph"],
+                    },
+                )
+            ]
+
+        async def import_document(self, _document, chunks, **_kwargs):
+            for index, chunk in enumerate(chunks):
+                chunk.id = f"chunk-{index}"
+            return SimpleNamespace(id="range-1")
+
+        async def delete_document(self, _document_id):
+            return True
+
+    rag = Rag()
+
+    class ClientContext:
+        async def __aenter__(self):
+            return rag
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class LocalRunner:
+        def __init__(self) -> None:
+            self.requests: list[StructureFallbackRequest] = []
+
+        async def run(self, request: StructureFallbackRequest) -> dict[str, Any]:
+            self.requests.append(request)
+            candidates = request.payload["candidates"][:3]
+            return {
+                "selections": [
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "substring": candidate["allowed_substrings"][-1],
+                        "locator": candidate["allowed_locators"][0],
+                        "role": "index",
+                        "level": 0,
+                        "parent_id": None,
+                    }
+                    for candidate in candidates
+                ]
+            }
+
+    async def embed(chunks, _embedder, _config):
+        for chunk in chunks:
+            chunk.embedding = [0.25]
+        return chunks
+
+    configuration = _config()
+    configuration.oracle = SimpleNamespace(
+        model_defaults=SimpleNamespace(structure="local-structure:latest")
+    )
+    runner = LocalRunner()
+    result = await ingest_pdf_book_v2(
+        database=tmp_path / "database" / "knowledge.lancedb",
+        source=source,
+        config=configuration,
+        client_factory=lambda *_args, **_kwargs: ClientContext(),
+        haiku_version="0.74.0",
+        segment_sizer=lambda _preferred, _scanned: 100,
+        embed_chunks_fn=embed,
+        indexing_options={"pipeline": "book-v3", "llm_fallback": "auto"},
+        llm_url="http://127.0.0.1:11434",
+        structure_fallback_runner=runner,
+    )
+
+    assert len(runner.requests) == 1
+    assert result["quality"]["llm_fallback_used"] is True
+    assert result["pipeline_stats"]["llm_fallback_calls"] == 1
+    assert result["pipeline_stats"]["llm_fallback_applied_regions"] == 1
+    assert result["pipeline_stats"]["llm_fallback_model"] == "local-structure:latest"
+    assert result["chunk_manifest"][0]["navigation_role"] == "index"
+    assert result["book_knowledge_snapshot"]["graph"]["terms"]
+    assert result["book_knowledge_snapshot"]["evidence"][0]["raw_content"] == (
+        "Alpha, 12\nBeta, 18\nGamma, 24"
     )
 
 
@@ -286,6 +576,10 @@ async def test_pdf_v2_splits_oom_ranges_and_covers_frontmatter(
                 page_range,
                 "Kapitel 1" if page_range[0] == 1 else "Kapitel 2 Fortsetzung",
             )
+            core_page = 1 if page_range[0] == 1 else 5
+            document.paragraph.self_ref = f"#/texts/p-{core_page}"
+            document.paragraph.prov = [SimpleNamespace(page_no=core_page)]
+            document.core_page = core_page
             if page_range[0] == 1:
                 document.heading.label = "paragraph"
             return SimpleNamespace(document=document)
@@ -317,7 +611,7 @@ async def test_pdf_v2_splits_oom_ranges_and_covers_frontmatter(
             return []
 
         async def chunk(self, document: FakeDocument):
-            page = document.page_range[0]
+            page = document.core_page
             return [
                 FakeChunk(
                     f"Evidenz {page}",
@@ -362,13 +656,18 @@ async def test_pdf_v2_splits_oom_ranges_and_covers_frontmatter(
         document_fingerprint=hashlib.sha256(source.read_bytes()).hexdigest(),
         segment_sizer=lambda _preferred, _scanned: 8,
         embed_chunks_fn=embed,
+        indexing_options={"pipeline": "book-v3"},
     )
 
     assert converter_instances == 1
-    assert converter_calls == [(1, 8), (1, 4), (5, 8)]
+    assert converter_calls == [(1, 8), (1, 5), (4, 8)]
     assert [(item["core_start"], item["core_end"]) for item in result["segments"]] == [
         (1, 4),
         (5, 8),
+    ]
+    assert [(item["conversion_start"], item["conversion_end"]) for item in result["segments"]] == [
+        (1, 5),
+        (4, 8),
     ]
     frontmatter = result["book_structure"]["nodes"][0]
     assert (frontmatter["kind"], frontmatter["page_start"], frontmatter["page_end"]) == (
@@ -380,6 +679,122 @@ async def test_pdf_v2_splits_oom_ranges_and_covers_frontmatter(
         result["book_knowledge_snapshot"]["evidence"][0]["section_node_id"]
         == frontmatter["node_id"]
     )
+
+
+@pytest.mark.asyncio
+async def test_book_v3_halo_imports_cross_boundary_evidence_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "boundary.pdf"
+    source.write_bytes(b"%PDF boundary")
+
+    class BoundaryDocument:
+        def __init__(self, page_range: tuple[int, int]) -> None:
+            self.page_range = page_range
+            self.items = [
+                SimpleNamespace(
+                    self_ref=f"#/texts/p-{page}",
+                    label="paragraph",
+                    text=f"P{page}",
+                    prov=[SimpleNamespace(page_no=page)],
+                )
+                for page in range(page_range[0], page_range[1] + 1)
+            ]
+
+        def iterate_items(self):
+            for item in self.items:
+                yield item, 0
+
+        def export_to_dict(self) -> dict[str, Any]:
+            return {"invalid_fake_document": True}
+
+    class Converter:
+        def convert(self, _path: Path, *, page_range: tuple[int, int]):
+            return SimpleNamespace(document=BoundaryDocument(page_range))
+
+    monkeypatch.setattr(book_v2, "build_docling_converter", lambda *_args: Converter())
+    monkeypatch.setattr(
+        book_v2,
+        "pdf_preflight",
+        lambda _path: PdfBookPreflight(
+            total_pages=4,
+            scanned_pages=[False] * 4,
+            page_labels={str(page): page for page in range(1, 5)},
+            bookmarks=[BookBookmark(title="Kapitel", depth=0, page_no=1)],
+        ),
+    )
+
+    class Rag:
+        embedder = object()
+
+        async def list_documents(self):
+            return []
+
+        async def chunk(self, document: BoundaryDocument):
+            if document.page_range == (1, 3):
+                return [
+                    FakeChunk("A", {"doc_item_refs": ["#/texts/p-1"], "page_numbers": [1]}),
+                    FakeChunk(
+                        "Cross",
+                        {
+                            "doc_item_refs": ["#/texts/p-2", "#/texts/p-3"],
+                            "page_numbers": [2, 3],
+                        },
+                    ),
+                    FakeChunk("Halo", {"doc_item_refs": ["#/texts/p-3"], "page_numbers": [3]}),
+                ]
+            return [
+                FakeChunk(
+                    "Cross",
+                    {
+                        "doc_item_refs": ["#/texts/p-2", "#/texts/p-3"],
+                        "page_numbers": [2, 3],
+                    },
+                ),
+                FakeChunk("B", {"doc_item_refs": ["#/texts/p-4"], "page_numbers": [4]}),
+            ]
+
+        async def import_document(self, _document, chunks, **_kwargs):
+            for index, chunk in enumerate(chunks):
+                chunk.id = f"chunk-{id(chunks)}-{index}"
+            return SimpleNamespace(id=f"range-{id(chunks)}")
+
+        async def delete_document(self, _document_id):
+            return True
+
+    rag = Rag()
+
+    class ClientContext:
+        async def __aenter__(self):
+            return rag
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def embed(chunks, _embedder, _config):
+        for chunk in chunks:
+            chunk.embedding = [0.5]
+        return chunks
+
+    result = await ingest_pdf_book_v2(
+        database=tmp_path / "db" / "knowledge.lancedb",
+        source=source,
+        config=_config(),
+        client_factory=lambda *_args, **_kwargs: ClientContext(),
+        haiku_version="0.74.0",
+        document_fingerprint=hashlib.sha256(source.read_bytes()).hexdigest(),
+        segment_sizer=lambda _preferred, _scanned: 2,
+        embed_chunks_fn=embed,
+        indexing_options={"pipeline": "book-v3"},
+    )
+
+    assert [item["raw_content"] for item in result["book_knowledge_snapshot"]["evidence"]] == [
+        "A",
+        "Cross",
+        "B",
+    ]
+    assert result["quality"]["exact_duplicate_count"] == 0
+    assert result["pipeline_stats"]["core_owned_evidence"] is True
 
 
 @pytest.mark.asyncio
@@ -518,6 +933,17 @@ async def test_pdf_v2_resume_is_strict_and_never_deletes_a_foreign_book(
     assert rag.import_count == 2
     assert embed_count == 2
     assert rebuilt["pipeline_stats"]["resumed_ranges"] == 0
+
+    published_document_id = rebuilt["segments"][0]["document_id"]
+    deleted_before_deferred = list(rag.deleted)
+    deferred = await ingest_pdf_book_v2(
+        **(common | {"generation_id": "generation-next"}),
+        indexing_options={"_defer_previous_generation_retirement": True},
+    )
+
+    assert deferred["superseded_segment_document_ids"] == [published_document_id]
+    assert published_document_id in rag.documents
+    assert rag.deleted == deleted_before_deferred
 
 
 @pytest.mark.asyncio
@@ -710,7 +1136,7 @@ async def test_public_search_can_skip_reranker_and_get_raw_chunk(
         metadata={
             "page_numbers": [42],
             "navigation_role": "body",
-            "source_uri": "file:///book.pdf",
+            "source_uri": "omarag://documents/book-1/generations/gen-1",
             "document_meta": {
                 "generation_id": "gen-1",
                 "logical_document_id": "book-1",
@@ -789,7 +1215,7 @@ async def test_public_search_hydrates_chunk_metadata_on_document_meta_fast_path(
                 "citation_headings": ["Canonical heading"],
                 "navigation_role": "body",
                 "evidence_id": "ev-7",
-                "source_uri": "file:///book.pdf",
+                "source_uri": "omarag://documents/book-1/generations/gen-1",
                 "headings": ["Canonical heading"],
                 "labels": [],
                 "doc_item_refs": [],

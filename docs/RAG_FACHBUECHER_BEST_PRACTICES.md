@@ -1,248 +1,109 @@
-# RAG für Fach- und Lehrbücher
+# RAG for technical books
 
-## Leitprinzip
+This document explains the few rules behind OmaRag's book search.
 
-Die Antwortqualität entsteht entlang der gesamten Kette:
+## The basic idea
 
-> strukturtreue Extraktion → hierarchisches Chunking → hybride Suche → Reranking →
-> gezielter Kontext → quellgebundene Antwort → Evaluation
+A good answer starts with a good source passage. A larger language model cannot reliably repair a
+misread table, a missing page, or the wrong edition.
 
-Ein größeres Sprachmodell kann eine falsch gelesene Tabelle oder eine fehlende Fundstelle nicht
-zuverlässig reparieren. Deshalb wird zuerst die richtige, vollständige Originalstelle gefunden und
-erst danach eine Antwort erzeugt.
-
-## Zielarchitektur
+OmaRag therefore follows this order:
 
 ```text
-PDF / Scan
-  → PDF-Preflight: Fingerprint, Seitenlabels, Bookmarks, Text-/Scan-Seiten
-  → Docling-Pass 1: Layout, Lesereihenfolge, Überschriften, Tabellen, Formeln, Bilder
-  → globale Buchstruktur aus Bookmarks, Inhaltsverzeichnis und Body-Headings
-  → Chunk-/Import-Pass 2: strukturorientierte Raw-Chunks mit Seiten-/Elementprovenienz
-  → BookRAG-lite: abgeleitete Baum-, Register- und Glossarrouten zu Raw-Chunks
-  → parallele hybride Facettensuche + gewichtete Reciprocal Rank Fusion
-  → dedizierter Cross-Encoder-Reranker + adaptive Evidenzauswahl
-  → claimweise Antwort aus Originalbelegen mit Buch, Auflage und Seite
+PDF or scan
+  -> preserve layout, pages, headings, tables, formulas, and figures
+  -> recover the book structure
+  -> create small, source-linked evidence chunks
+  -> search text, meaning, book structure, and index terms
+  -> rerank and remove duplicates
+  -> answer only from the selected source passages
 ```
 
-Oracle hält Haiku RAG dabei unverändert. Die Anwendung nutzt ausschließlich dessen öffentliche
-APIs und ergänzt die Betriebs-, Metadaten-, Vertrauens- und Evaluationsschicht außerhalb Haikus.
-Der geprüfte Book-v2-Vertrag ist auf Haiku RAG Slim `0.74.0` und Docling `2.119.0` festgesetzt;
-die Pipelinekennung lautet `book-index-v2`. Ein Upgrade dieser beiden Versionen ist kein
-transparentes Patch-Update, sondern benötigt einen erneuten Kompatibilitätslauf und gegebenenfalls
-einen vollständigen Rebuild.
+## Preparing a book
 
-## Dokumentaufbereitung
+OmaRag keeps the original PDF immutable and identifies it by SHA-256. It uses embedded text when
+possible and OCR only where the text layer is unusable.
 
-Erhalten werden müssen:
+Book Index V3 uses the table of contents, PDF bookmarks, subject index, glossary, captions, and
+body headings as independent structure signals. If these are missing, deterministic page windows
+still cover the full book. A small local fallback may classify existing headings and page labels,
+but it may not invent text or page references.
 
-- Überschriftenhierarchie und Lesereihenfolge;
-- echte PDF-Seiten und Bounding Boxes;
-- Absätze, Listen, Definitionen und Merksätze;
-- Tabellenstruktur einschließlich Überschriften und Einheiten;
-- Formeln samt Variablenerklärung;
-- Bildunterschriften, Abbildungsverweise und Seitenbilder;
-- der unveränderte Originaltext für Zitate.
+Each evidence chunk keeps:
 
-Eingebetteter Text hat Vorrang. OCR wird nur für Seiten ohne brauchbare Textebene aktiviert und
-mit Deutsch und Englisch konfiguriert. Kopf- und Fußzeilen werden nicht als eigenständige
-Wissens-Chunks indexiert. Jede Originaldatei wird vor der Verarbeitung SHA-256-adressiert und
-unveränderlich im Workspace archiviert.
+- the unchanged source text;
+- the physical page and element location;
+- the book, edition, and section;
+- its evidence type, such as prose, table, formula, or figure caption;
+- stable previous and next links.
 
-Book-v2 übergibt Docling immer die unveränderte Originaldatei und einen absoluten, 1-basierten,
-inklusiven Seitenbereich. Es erzeugt weder PDF-Slices noch zusammengefügte Zwischen-PDFs und nutzt
-pro Buch genau einen Converter. Der erste Pass sammelt globale Signale und cached das Konvertat;
-erst nach der Reconciliation der vollständigen Buchstruktur werden im zweiten Pass Chunks erzeugt,
-kontextualisiert, eingebettet und importiert.
+Tables, formulas, and figures are not mixed blindly into prose. Navigation pages help routing but
+do not become answer evidence.
 
-Die Strukturreihenfolge ist:
+## Finding evidence
 
-1. PDF-Bookmarks und ein erkanntes gedrucktes Inhaltsverzeichnis werden miteinander und mit den
-   Überschriften im Buchkörper abgeglichen;
-2. ist nur eines dieser Signale vorhanden, wird es mit den Body-Headings ergänzt;
-3. ohne Bookmarks oder Inhaltsverzeichnis dienen ausreichend belastbare Body-Headings als Struktur;
-4. fehlt auch dieses Signal, decken deterministische Fenster das gesamte Buch ab (acht Textseiten
-   beziehungsweise vier Scan-Seiten je Fenster); ein Vorspann vor dem ersten Kapitel erhält ein
-   eigenes Fenster.
+Retrieval V3 combines several bounded routes:
 
-Sachregister, Glossar, Abkürzungs- und Symbolverzeichnis liefern Begriffe, Aliase und Seitenziele.
-Abbildungs-, Tabellen- und Formelverzeichnisse liefern Caption-/Seitenrouten, werden aber nicht als
-Kapitelanker missverstanden. Unsichere Navigationsregionen werden derzeit deterministisch verworfen.
-`llm_fallback=auto` schaltet noch keinen lokalen Modellparser ein; Qualitätsbericht und Statistiken
-weisen deshalb ehrlich `llm_fallback_used=false` aus. Gleiches gilt für angeforderte VLM-Anreicherung.
+- exact text search for terms, symbols, standards, and numbers;
+- semantic search for paraphrases;
+- the recovered chapter tree and subject index;
+- limited alias and related-term links;
+- one dedicated cross-encoder reranker.
 
-## Buchidentität und Auflagen
+Simple questions use a small candidate set. Comparisons and multi-part questions get more facets,
+sources, and context. Fast, Normal, and Quality change the available budget, but the adaptive
+selection remains active in every profile.
 
-Vor dem Indexieren findet ein Preflight statt. Erkannte Daten werden als Vorschläge mit Quelle und
-Konfidenz geliefert und müssen bestätigt werden. Pro Buch werden mindestens gespeichert:
+The final evidence set is thresholded, deduplicated, diversified, and limited by the actual model
+context. A failed or unpinned reranker is never presented as calibrated confidence.
 
-- Werk-ID, Titel und Autoren;
-- Auflage, Ausgabejahr und ISBN;
-- Sprache, Curriculum und Tags;
-- Status `active`, `superseded` oder `reference`;
-- Gültigkeitszeitraum;
-- Original- und verwalteter Quellpfad;
-- Fingerprint, Pipeline-Version und Extraktionsqualität.
+## Writing the answer
 
-Alle Segmente eines Buches tragen dieselbe Identität. Standardmäßig durchsucht Oracle nur die
-höchste aktive Auflage eines Werks. Explizite Filter können Werk, Titel, Autor, Auflage, Jahr,
-ISBN, Sprache, Tags und Status wählen.
+All public answer modes are source-bound. Important claims carry exact support spans and stable
+evidence identifiers. Numbers, units, comparisons, negations, and multi-source conclusions receive
+extra checks. If required support is missing, OmaRag says so instead of filling the gap with model
+knowledge.
 
-## Chunking und Evidenz
+The answer inspector shows cited pages first. It can then show up to four relevant, real crops from
+figures or tables. Full-page previews are never mislabeled as extracted figures.
 
-Strukturgrenzen haben Vorrang vor Tokenlängen. Der Startpunkt für neue Workspaces ist:
+## Editions and filters
 
-| Einstellung | Startwert |
-|---|---:|
-| Such-Chunk | 384 Tokens |
-| sinnvoller Testbereich | 250 / 400 / 600 Tokens |
-| Abschnittskontext | kanonischer globaler Heading-Pfad plus begrenzte Aliase |
-| Range-Überlappung | keine; absolute Kernbereiche decken jede Seite genau einmal ab |
-| Tabellen | Kopfzeilen und Einheiten erhalten |
-| Überschriften | getrennt für Zitat und Embedding-Kontext erhalten |
+OmaRag stores title, authors, edition, year, ISBN, language, status, and validity information when
+available. It searches the newest active edition by default. Explicit filters can select a work,
+edition, year, ISBN, language, tag, or status.
 
-Doclings `HybridChunker` führt kleine, zusammengehörige Peers zusammen und teilt übergroße
-Strukturelemente tokenbewusst. Tabellen, Formeln und Abbildungen behalten ihre Elementreferenzen.
-Chunks, die ausschließlich Seitenkopf oder Seitenfuß enthalten, werden verworfen.
+## Measuring quality
 
-Der Text eines Raw-Chunks wird durch Struktur- oder Heading-Hooks nicht verändert. Für Dense/FTS
-wird lediglich ein abgeleiteter Kontext aus kanonischem Heading-Pfad und höchstens 24 priorisierten
-Register-/Glossaraliasen (ungefähr 96 Tokens) verwendet; alle Aliase bleiben unabhängig davon im
-Snapshot erhalten. Der Hash wird über genau diesen begrenzten Embedding-Kontext gebildet.
+Retrieval and answer quality must be measured separately. Useful release metrics include:
 
-Jeder Chunk erhält eine stabile Evidence-ID, absolute Seiten, Elementreferenzen beziehungsweise
-einen explizit markierten Seiten-Fallback, einen kanonischen Abschnitt sowie Previous/Next-Links.
-Diese EvidenceRecords bilden zusammen mit Baum, Register, Glossar und Caption-Zielen einen
-validierten Book-Knowledge-Snapshot. BookRAG-lite erzeugt daraus nur provenancegebundene Struktur-,
-Alias-, Ziel- und begrenzte Ko-Okkurrenzkanten; es generiert keine fachlichen Tatsachentripel.
-Raw-Chunks in Haiku bleiben die alleinige Belegquelle.
+- Recall@10 and nDCG@10;
+- correct-page rate;
+- required-facet coverage;
+- citation and support-span correctness;
+- unsupported-claim and false-abstention rates;
+- latency, memory use, and index size.
 
-## Retrieval
+The repository contains deterministic evaluation plumbing and CI cases. The planned private
+300-case, human-reviewed technical-book gold set is not distributed, so OmaRag does not claim a
+universal quality win from that dataset yet.
 
-Query-v2 nutzt Haikus öffentliche Hybridsuche als Kandidatenquelle:
+## Privacy and speed
 
-- FTS/BM25 für Normen, Fachzeichen, Zahlen, Formeln und exakte Bezeichnungen;
-- Dense Retrieval für Synonyme und bedeutungsgleiche Schülerfragen;
-- parallele Facetten für Vergleiche, Mehrfachfragen und buchweite Zusammenhänge;
-- zusätzliche Tree-/Register-/BookRAG-lite-Routen, die immer zu Raw-Chunks zurückführen;
-- gewichtete RRF zur score-unabhängigen Fusion;
-- genau ein dediziertes Cross-Encoder-Reranking für die endgültige Reihenfolge;
-- kalibrierte Schwellen, Score-Gap/Top-Delta, Deduplizierung und MMR-Diversität;
-- tokenbegrenzte Evidenzfenster um die ausgewählten Raw-Chunks.
+OmaRag defaults to device-only processing. Remote content endpoints require a visible policy and
+consent. Questions, source paths, and book content are not telemetry. URL imports are copied into
+private managed storage and their original secret-bearing URLs are replaced with opaque references.
 
-Dokument- und Auflagenfilter werden vor der Suche in konkrete Haiku-Dokument-IDs aufgelöst und als
-öffentlicher Suchfilter übergeben. Haikus interner Reranker bleibt in dieser Kandidatenphase aus;
-dadurch werden Facetten erst fusioniert und anschließend gemeinsam einmal gererankt.
+Search facets share one worker call, model residency adapts to repeated use and memory pressure,
+media crops are generated lazily, and derived caches are bounded. These optimizations must not
+change the cited raw evidence.
 
-Die Komplexität wird ohne LLM aus Signalen wie direktem Lookup, Vergleich, Mehrfachfrage,
-Multi-Hop-, Global- und Berechnungsformulierung bestimmt. Die Basisbudgets sind verbindlich
-begrenzt:
+## Current boundaries
 
-| Komplexität | Kandidaten | finale Evidenz | Facetten | Evidenztokens | Antworttokens | absolute RAG-Deadline |
-|---|---:|---:|---:|---:|---:|---:|
-| einfach | 24 | 1–5 | 1 | 320 | 256 | 15 s |
-| standard | 40 | 2–8 | 2 | 1.200 | 384 | 25 s |
-| komplex | 72 | 4–14 | 4 | 2.400 | 512 | 35 s |
-
-`fast`, `balanced` und `deep` begrenzen beziehungsweise erweitern diese Budgets innerhalb der
-harten Obergrenzen; `max_sources` kann die finale Auswahl zusätzlich bis maximal 14 begrenzen.
-Die Deadline umfasst nicht nur das Modell, sondern Readiness, Cacheprüfung, Ressourcenzulassung,
-Retrieval, Generierung und Persistenz. Mehr Kontext ist daher eine bewusste Qualitäts-/Latenzwahl.
-
-Schlägt eine einzelne Facette oder der Buchrouter fehl, laufen verbleibende Retrievalpfade weiter
-und die Degradation erscheint im Receipt. Ohne kalibrierten Reranker erzeugt Query-v2 keine
-scheinbar belegte Antwort, sondern meldet unzureichende Evidenz. Nur der Retrieval-Inspector zeigt
-in diesem Fall bis zu drei fusionierte Treffer ausdrücklich als unkalibriert an.
-
-## Antwortmodi
-
-### Strict
-
-- ausschließlich aus bereitgestellten Quellen;
-- jede wesentliche Aussage benötigt Evidenz;
-- Zahlen, Einheiten, Normen und Formelzeichen müssen in den Belegen vorkommen;
-- fehlen Belege, lautet die Antwort: „In den bereitgestellten Quellen nicht ausreichend belegt.“
-
-### Normal
-
-Quellen haben Vorrang. Nachvollziehbare Schlussfolgerungen werden ausdrücklich gekennzeichnet.
-
-### Explore
-
-Ergänzendes Modellwissen ist erlaubt, muss aber sichtbar von Quellen und Schlussfolgerungen
-getrennt werden.
-
-Jeder für eine Antwort ausgewählte Beleg erhält eine kompakte Prompt-/Anzeige-ID (`E1`, `E2`, …),
-die nur innerhalb dieser Antwort gilt. Für Audit, Cachebindung und Joins trägt derselbe Beleg
-zusätzlich seine stabile `ev-…`-Evidence-ID. Titel, Auflage und Seite stammen aus
-Anwendungsmetadaten und nicht aus frei erzeugten Seitenangaben des Sprachmodells.
-
-## Evaluation
-
-Retriever und Generator werden getrennt beurteilt. Oracle erzeugt zunächst reproduzierbare
-Silver-Fragen aus Überschriften, Seiten und Chunk-Provenienz. Dieselben Fälle laufen als A/B-Test
-über `fts`, `vector` und `hybrid`.
-
-Gemessen werden:
-
-- Recall@5 und Recall@10;
-- MRR und nDCG@10;
-- Trefferquote der richtigen Seite.
-
-Für belastbare fachliche Freigaben wird der Silver-Satz anschließend zu einem manuell geprüften
-Goldstandard ausgebaut. Er sollte Definitionen, Zahlen, Formeln, Tabellen, Bilder, Vergleiche,
-mehrstufige Fragen, Auflagenkonflikte sowie beantwortbare und unbeantwortbare Fälle enthalten.
-
-## Ressourcen- und Latenzprofil
-
-Indexierungsranges und Worker-Residency reagieren auf Arbeitsspeicher und Chat-Priorität. Die
-Querybudgets richten sich dagegen nach Fragekomplexität und dem gewählten Profil; sie werden nicht
-als unkontrollierter RAM-Prozentsatz skaliert. Der Cross-Encoder bleibt ein eigener, persistenter
-Query-Worker-Baustein und wird nicht pro Facette neu geladen.
-
-Die globale `/v1/readiness` bestätigt Prozess, SQLite und kompatiblen Adapter, aber keine warme
-Antwortlatenz. Die Workspace-Readiness prüft zusätzlich eine abfragbare Indexgeneration sowie
-Generator und Embeddingmodell. Nicht residente Modelle ergeben `latency_degraded` und benötigen
-Warm-up; ein falscher residenter Modelldigest oder ein Embeddingdigest, der nicht zur READY-
-Generation passt, ist dagegen ein harter Fehler. Rerankerfehler werden wie oben beschrieben nicht
-als normale Relevanzbewertung kaschiert.
-
-Ein Full-Rebuild beginnt nur nach gespeichertem Preflight und explizitem `REINDEX`. Geprüft werden
-immutable Originale samt SHA-256, freier Speicher, schreibbarer Cache, die exakten Haiku-/Docling-
-Versionen, Workspace-Konfigurationshash und Embeddingdigest. Diese Werte sowie der Katalogzustand
-werden unmittelbar vor destruktiven Schritten und am exklusiven Rebuild-Gate erneut geprüft. Der
-Rebuild ist in-place und besitzt keinen Live-Rollback, bleibt aber über Checkpoints fortsetzbar.
-Während `maintenance` und nach `maintenance_failed` sind Fragen blockiert. Erst die Validierung von
-Seitenabdeckung, Manifesten, Evidence-Kette, Struktur, Snapshot und Graph veröffentlicht `ready`.
-
-Vollständiges generatives GraphRAG, flächendeckende visuelle Seitensuche und Late Chunking sind
-nicht aktiv. Vorhanden ist ausschließlich das kleine deterministische BookRAG-lite-Routing; weitere
-Verfahren benötigen einen messbaren Vorteil im eigenen Evaluationssatz.
-
-## Typische Fehlkonfigurationen
-
-| Fehlkonfiguration | Folge |
-|---|---|
-| PDF nur als Fließtext | Tabellen, Seiten und Lesereihenfolge gehen verloren |
-| starre Zeichen-Chunks | fachliche Einheiten werden getrennt |
-| große pauschale Überlappung | redundanter Index und mehrfacher Kontext |
-| nur Vektorsuche | Normen, Kennwerte und Kurzzeichen werden schlechter gefunden |
-| nur BM25 | sinngleiche Fragen werden übersehen |
-| zu kleiner Kandidatenpool | relevante Quelle fehlt schon vor dem Reranking |
-| allgemeines LLM als Reranker | instabile Reihenfolge und erfundene Fundstellen |
-| möglichst viel Kontext | Rauschen verdrängt die Belege |
-| Auflagen vermischen | widersprüchliche oder veraltete Antworten |
-| keine unbeantwortbaren Tests | das System lernt nie, begründet nicht zu antworten |
-
-## Prioritäten
-
-1. korrekte strukturierte Dokumentextraktion;
-2. repräsentativer Evaluationsdatensatz;
-3. strukturorientiertes Chunking und Provenienz;
-4. BM25 plus Dense Retrieval;
-5. dedizierter Cross-Encoder-Reranker;
-6. Tabellen- und Formelqualität;
-7. gezielte Kontextrekonstruktion und Deduplizierung;
-8. verbindliche Seiten- und Auflagenmetadaten;
-9. Quellenbindung und Nichtantwort;
-10. Spezialverfahren erst nach gemessenem Bedarf.
+- Haiku RAG Slim `0.74.0` and Docling `2.119.0` are the verified public-API pair.
+- A production NLI verifier is not bundled; risky claims fail closed when no approved verifier is
+  available.
+- Visual Dense and Late Chunking remain measured experiments, not silent defaults.
+- OmaRag retrieves formulas and table values but does not perform domain calculations in V1.2.
+- User-attached image questions remain disabled until they have the same evidence and generation
+  guarantees as indexed book crops.

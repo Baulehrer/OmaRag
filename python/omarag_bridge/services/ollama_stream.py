@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -98,6 +99,9 @@ class OllamaStreamEvent:
 
 @dataclass(slots=True)
 class OllamaStreamClient:
+    _inventory_cache: ClassVar[dict[str, tuple[float, tuple[OllamaModelIdentity, ...]]]] = {}
+    _inventory_cache_seconds: ClassVar[float] = 2.0
+
     base_url: str = "http://127.0.0.1:11434"
     timeout: httpx.Timeout = field(
         default_factory=lambda: httpx.Timeout(connect=2.0, read=None, write=10.0, pool=2.0)
@@ -105,11 +109,22 @@ class OllamaStreamClient:
     client: httpx.AsyncClient | None = None
     inventory_timeout_seconds: float = 5.0
     _owns_client: bool = field(default=False, init=False, repr=False)
+    _uses_shared_inventory_cache: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.base_url = self.base_url.rstrip("/")
+        self._uses_shared_inventory_cache = self.client is None
         if self.client is None:
-            self.client = httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
+            # Content-bearing local requests must never inherit HTTP(S)_PROXY
+            # or follow a redirect to an endpoint outside the approved egress
+            # boundary. Remote endpoints, when explicitly allowed, are still
+            # contacted directly.
+            self.client = httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                trust_env=False,
+                follow_redirects=False,
+            )
             self._owns_client = True
 
     async def aclose(self) -> None:
@@ -122,7 +137,20 @@ class OllamaStreamClient:
     async def __aexit__(self, *_: object) -> None:
         await self.aclose()
 
+    @classmethod
+    def invalidate_inventory(cls, base_url: str | None = None) -> None:
+        """Invalidate the short-lived read cache after a consented model mutation."""
+
+        if base_url is None:
+            cls._inventory_cache.clear()
+            return
+        cls._inventory_cache.pop(base_url.rstrip("/"), None)
+
     async def list_models(self) -> tuple[OllamaModelIdentity, ...]:
+        if self._uses_shared_inventory_cache:
+            cached = self._inventory_cache.get(self.base_url)
+            if cached is not None and cached[0] > time.monotonic():
+                return cached[1]
         response = await self._request("GET", "/api/tags")
         payload = _json_object(response)
         models = payload.get("models", [])
@@ -150,7 +178,13 @@ class OllamaStreamClient:
                     quantization=_optional_str(details.get("quantization_level")),
                 )
             )
-        return tuple(result)
+        identities = tuple(result)
+        if self._uses_shared_inventory_cache:
+            self._inventory_cache[self.base_url] = (
+                time.monotonic() + self._inventory_cache_seconds,
+                identities,
+            )
+        return identities
 
     async def resolve_model(
         self, model: str, *, expected_digest: str | None = None

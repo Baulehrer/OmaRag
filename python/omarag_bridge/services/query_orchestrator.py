@@ -5,17 +5,18 @@ import json
 import math
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ..adapters.base import HaikuAdapter
+from ..adapters.base import HaikuAdapter, SearchManyRequest, SearchManyResult
 from ..models.domain import (
     AnswerClaim,
     BookMetadata,
     Citation,
     ClaimStatus,
+    ClaimSupportSpan,
     EvidenceMode,
     SearchHit,
 )
@@ -27,23 +28,41 @@ from .ollama_stream import (
     OllamaStreamEvent,
 )
 from .query_v2 import (
+    DEFAULT_RERANKER_CALIBRATOR,
     ClaimBlockParser,
     ClaimParseError,
+    ClaimVerifier,
+    EvidenceKind,
     EvidenceWindow,
     FusedCandidate,
+    PlattCalibrator,
+    ProgressiveRetrievalPolicy,
+    ProvenanceKind,
+    QueryBudget,
     QueryComplexity,
     QueryFacet,
     RerankedCandidate,
     RetrievalCandidate,
+    SelectiveVerifierPolicy,
     adaptive_select,
     classify_query,
     pack_evidence_windows,
+    performance_budget,
+    performance_context_tokens,
     validate_claim,
     weighted_rrf,
 )
 from .reranker_service import DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION, _model_digest
 
 EmitClaim = Callable[[AnswerClaim, list[Citation]], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _FacetSearchBatch:
+    rows: dict[str, Any]
+    hydrated_chunks: list[SearchHit]
+    hydration_failed: bool = False
+
 
 _FOLLOWUP = re.compile(
     r"(?i)\b(?:dazu|davon|dies(?:e[rmns]?)?|diese frage|vorher|oben|erstere|letztere|"
@@ -74,6 +93,13 @@ class OrchestratedAnswer:
     rejected_claims: int
     abstention: str
     done_reason: str
+    retrieval_stages: tuple[str, ...] = ("stage-a",)
+    escalation_reasons: tuple[str, ...] = ()
+    calibrator_digest: str | None = None
+    calibrator_status: str = "unknown"
+    verifier_digest: str | None = None
+    verifier_status: str = "not-run"
+    typed_evidence_status: str = "unknown"
 
 
 @dataclass
@@ -81,6 +107,14 @@ class QueryOrchestrator:
     store: StateStore
     adapter: HaikuAdapter
     ollama_url: str
+    claim_verifier: ClaimVerifier | None = None
+    claim_verifier_policy: SelectiveVerifierPolicy = field(default_factory=SelectiveVerifierPolicy)
+    reranker_calibrator: PlattCalibrator = field(
+        default_factory=lambda: DEFAULT_RERANKER_CALIBRATOR
+    )
+    reranker_digest: str = field(
+        default_factory=lambda: _model_digest(DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION)
+    )
     _generation_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def answer(
@@ -102,10 +136,14 @@ class QueryOrchestrator:
         memory_enabled: bool = True,
         allowed_document_ids: set[str] | None = None,
         keep_alive: str | int = "120s",
+        reranker_digest: str | None = None,
     ) -> OrchestratedAnswer:
         started = time.perf_counter()
         timings: dict[str, float] = {}
         fallbacks: list[str] = []
+        retrieval_stages = ["stage-a"]
+        escalation_reasons: list[str] = []
+        effective_reranker_digest = reranker_digest or self.reranker_digest
 
         phase = time.perf_counter()
         standalone, session_reference = self.standalone_question(
@@ -116,7 +154,12 @@ class QueryOrchestrator:
             memory_enabled=memory_enabled,
         )
         try:
-            routes = self.store.route_book_knowledge(workspace_id, standalone, limit=36)
+            routes = self.store.route_book_knowledge(
+                workspace_id,
+                standalone,
+                limit=36,
+                allowed_segment_ids=allowed_document_ids,
+            )
         except Exception:
             routes = []
             fallbacks.append("book_router_failed")
@@ -126,46 +169,55 @@ class QueryOrchestrator:
             has_session_reference=session_reference,
             register_entity_count=register_entities,
         )
-        budget = self._bounded_budget(plan.budget, options)
+        try:
+            routes = self.store.route_book_knowledge(
+                workspace_id,
+                standalone,
+                limit=36,
+                allowed_segment_ids=allowed_document_ids,
+                expand_sections=True,
+                global_query="global" in plan.reasons,
+                include_adjacency=session_reference,
+            )
+        except Exception:
+            # The direct, already filtered routes remain a safe degradation if
+            # optional graph expansion is unavailable.
+            fallbacks.append("book_graph_expansion_failed")
+        budget = self._bounded_budget(plan.complexity, options)
         timings["plan"] = (time.perf_counter() - phase) * 1000
 
         phase = time.perf_counter()
         rankings: dict[str, list[RetrievalCandidate]] = {}
         weights: dict[str, float] = {}
-        search_jobs: list[tuple[str, Any]] = []
-        per_facet_limit = max(8, math.ceil(budget["candidate_cap"] / max(1, len(plan.facets))))
-        for facet in plan.facets:
-            path = "hybrid" if facet.id == "F1" else f"facet:{facet.id}"
-            search_jobs.append(
-                (
-                    path,
-                    self.adapter.search(
-                        database,
-                        facet.query,
-                        per_facet_limit,
-                        document_filter=document_filter,
-                        search_type="hybrid",
-                        rerank=False,
-                    ),
-                )
-            )
-            weights[path] = 1.0 if facet.id == "F1" else 0.9
-        search_results = await asyncio.gather(
-            *(job for _, job in search_jobs), return_exceptions=True
+        stage_a_cap = max(12, math.ceil(budget["candidate_cap"] / 2))
+        search_facets = tuple(facet for facet in plan.facets if facet.required)
+        optional_facets = tuple(facet for facet in plan.facets if not facet.required)
+        per_channel_limit = max(
+            4,
+            math.ceil(stage_a_cap / max(1, len(search_facets) * 2)),
         )
-        for (path, _), result in zip(search_jobs, search_results, strict=True):
-            if isinstance(result, BaseException):
-                fallbacks.append(f"{path}_failed")
-                continue
-            facet_id = "F1" if path == "hybrid" else path.rsplit(":", 1)[-1]
-            rankings[path] = [self._candidate(hit, (facet_id,)) for hit in result]
+        route_chunk_ids = [str(route["chunk_id"]) for route in routes if route.get("chunk_id")]
+        search_batch = await self._search_facets(
+            database,
+            search_facets,
+            per_channel_limit,
+            document_filter=document_filter,
+            hydrate_chunk_ids=route_chunk_ids,
+        )
+        for facet in search_facets:
+            for channel, channel_weight in (("fts", 0.85), ("vector", 1.0)):
+                key = f"{facet.id}:{channel}"
+                path = f"{channel}:facet:{facet.id}"
+                result = search_batch.rows.get(key, RuntimeError(f"missing {key}"))
+                weights[path] = channel_weight * (1.0 if facet.id == "F1" else 0.9)
+                if isinstance(result, BaseException):
+                    fallbacks.append(f"{path}_failed")
+                    continue
+                rankings[path] = [self._candidate(hit, (facet.id,)) for hit in result]
 
         sidecar: list[RetrievalCandidate] = []
-        route_chunk_ids = [str(route["chunk_id"]) for route in routes if route.get("chunk_id")]
-        try:
-            hydrated_routes = await self.adapter.get_chunks(database, route_chunk_ids)
-        except Exception:
-            hydrated_routes = []
+        hydrated_routes = search_batch.hydrated_chunks
+        if search_batch.hydration_failed:
             fallbacks.append("book_route_hydration_failed")
         routed_hits = {
             hit.chunk_id: hit
@@ -228,14 +280,24 @@ class QueryOrchestrator:
             raw_scores = [
                 (item.candidate, score) for item, score in zip(fused, scores, strict=True)
             ]
+            raw_score_by_chunk = {candidate.chunk_id: score for candidate, score in raw_scores}
             selection = adaptive_select(
                 raw_scores,
-                complexity=self._profile_complexity(
-                    plan.complexity, str(options.get("profile") or "auto")
-                ),
+                complexity=plan.complexity,
                 evidence_mode=evidence_mode.value,
                 required_facets=(facet.id for facet in plan.facets if facet.required),
                 max_candidates=budget["final_max"],
+                budget=QueryBudget(
+                    candidate_cap=budget["candidate_cap"],
+                    final_min=budget["final_min"],
+                    final_max=budget["final_max"],
+                    max_facets=len(plan.facets),
+                    evidence_tokens=budget["evidence_tokens"],
+                    answer_tokens=budget["answer_tokens"],
+                    deadline_ms=budget["deadline_ms"],
+                ),
+                calibrator=self.reranker_calibrator,
+                reranker_digest=effective_reranker_digest,
             )
             rerank_status = "applied"
         except Exception:
@@ -249,8 +311,119 @@ class QueryOrchestrator:
             )
         timings["rerank"] = (time.perf_counter() - phase) * 1000
 
+        progressive = ProgressiveRetrievalPolicy()
+        top_relevance = selection.selected[0].relevance if selection.selected else None
+        second_relevance = selection.selected[1].relevance if len(selection.selected) > 1 else None
+        missing_evidence_requirements = progressive.missing_evidence_requirements(
+            standalone, selection.selected
+        )
+        if progressive.should_escalate(
+            selected_count=len(selection.selected),
+            missing_facets=selection.missing_facets,
+            top_relevance=top_relevance,
+            second_relevance=second_relevance,
+            optional_facets_available=budget["candidate_cap"] > stage_a_cap,
+            missing_evidence_requirements=missing_evidence_requirements,
+        ):
+            fallbacks.append("retrieval_escalated")
+            retrieval_stages.append("stage-b")
+            if selection.missing_facets:
+                escalation_reasons.append("missing-required-facet")
+            escalation_reasons.extend(
+                f"missing-{requirement}" for requirement in missing_evidence_requirements
+            )
+            if not selection.selected:
+                escalation_reasons.append("no-eligible-evidence")
+            elif top_relevance is not None and top_relevance < progressive.minimum_relevance:
+                escalation_reasons.append("low-top-relevance")
+            if (
+                top_relevance is not None
+                and second_relevance is not None
+                and top_relevance - second_relevance < progressive.minimum_margin
+            ):
+                escalation_reasons.append("uncertain-score-margin")
+            stage_b_facets = tuple(dict.fromkeys((*search_facets, *optional_facets)))
+            stage_b_limit = max(
+                per_channel_limit + 1,
+                math.ceil(budget["candidate_cap"] / max(1, len(stage_b_facets) * 2)),
+            )
+            extra_batch = await self._search_facets(
+                database,
+                stage_b_facets,
+                stage_b_limit,
+                document_filter=document_filter,
+            )
+            for facet in stage_b_facets:
+                for channel, channel_weight in (("fts", 0.85), ("vector", 1.0)):
+                    key = f"{facet.id}:{channel}"
+                    path = f"{channel}:facet:{facet.id}"
+                    result = extra_batch.rows.get(key, RuntimeError(f"missing {key}"))
+                    weights[path] = channel_weight * (1.0 if facet.id == "F1" else 0.9)
+                    if isinstance(result, BaseException):
+                        fallbacks.append(f"{path}_failed")
+                        continue
+                    rankings[path] = [self._candidate(hit, (facet.id,)) for hit in result]
+            fused = weighted_rrf(rankings, weights, limit=budget["candidate_cap"])
+            try:
+                new_items = [
+                    item for item in fused if item.candidate.chunk_id not in raw_score_by_chunk
+                ]
+                rerank_hits = [
+                    SearchHit(
+                        chunk_id=item.candidate.chunk_id,
+                        content=item.candidate.content,
+                        pages=list(item.candidate.pages),
+                        document_id=item.candidate.document_id,
+                        metadata={
+                            "logical_document_id": item.candidate.logical_document_id,
+                            "section_node_id": item.candidate.section_id,
+                            "headings": list(item.candidate.headings),
+                        },
+                        search_type="hybrid",
+                    )
+                    for item in new_items
+                ]
+                scores = (
+                    await self.adapter.rerank(database, standalone, rerank_hits)
+                    if rerank_hits
+                    else []
+                )
+                if len(scores) != len(new_items):
+                    raise RuntimeError("reranker returned a mismatched score count")
+                raw_score_by_chunk.update(
+                    {
+                        item.candidate.chunk_id: score
+                        for item, score in zip(new_items, scores, strict=True)
+                    }
+                )
+                selection = adaptive_select(
+                    [
+                        (item.candidate, raw_score_by_chunk[item.candidate.chunk_id])
+                        for item in fused
+                    ],
+                    complexity=plan.complexity,
+                    evidence_mode=evidence_mode.value,
+                    required_facets=(facet.id for facet in plan.facets if facet.required),
+                    max_candidates=budget["final_max"],
+                    budget=QueryBudget(
+                        candidate_cap=budget["candidate_cap"],
+                        final_min=budget["final_min"],
+                        final_max=budget["final_max"],
+                        max_facets=len(plan.facets),
+                        evidence_tokens=budget["evidence_tokens"],
+                        answer_tokens=budget["answer_tokens"],
+                        deadline_ms=budget["deadline_ms"],
+                    ),
+                    calibrator=self.reranker_calibrator,
+                    reranker_digest=effective_reranker_digest,
+                )
+            except Exception:
+                fallbacks.append("progressive_reranker_failed")
+
         selected = [item.candidate for item in selection.selected]
         if not selected:
+            if selection.cutoff_reason == "calibration_mismatch":
+                fallbacks.append("calibration_mismatch")
             return self._insufficient(
                 plan, budget, timings, fallbacks + ["relevance_threshold"], fused=len(fused)
             )
@@ -281,17 +454,14 @@ class QueryOrchestrator:
             images,
         )
         generation_options = OllamaGenerationOptions(
-            num_ctx={
-                QueryComplexity.SIMPLE: 4096,
-                QueryComplexity.STANDARD: 6144,
-                QueryComplexity.COMPLEX: 8192,
-            }[plan.complexity],
+            num_ctx=budget["context_tokens"],
             num_predict=budget["answer_tokens"],
             temperature={"strict": 0.0, "normal": 0.1, "explore": 0.2}[evidence_mode.value],
         )
         parser = ClaimBlockParser()
         claims: list[AnswerClaim] = []
         rejected = 0
+        verifier_calls = 0
         first_claim_ms: float | None = None
         final_event: OllamaStreamEvent | None = None
         phase = time.perf_counter()
@@ -318,17 +488,73 @@ class QueryOrchestrator:
                     if not validation.valid:
                         rejected += 1
                         continue
+                    claim_evidence = tuple(
+                        evidence[item] for item in block.evidence_ids if item in evidence
+                    )
+                    verification_needed = self.claim_verifier_policy.should_verify(
+                        block, claim_evidence
+                    )
+                    verification = None
+                    if str(options.get("verifier") or "auto") != "off":
+                        verification = await self._verify_claim(
+                            block,
+                            claim_evidence,
+                            calls=verifier_calls,
+                        )
+                        if verification_needed and self.claim_verifier is None:
+                            fallbacks.append("claim_verifier_unavailable")
+                    if verification is not None:
+                        verifier_calls += 1
+                        if verification.verdict != "entailed":
+                            rejected += 1
+                            fallbacks.append(f"claim_verifier_{verification.reason or 'rejected'}")
+                            continue
                     stable_evidence_ids = [
                         citation_by_evidence[evidence_id].evidence_id or evidence_id
                         for evidence_id in block.evidence_ids
                         if evidence_id in citation_by_evidence
                     ]
+                    support_spans = []
+                    for support in validation.support_spans:
+                        window = evidence.get(support.evidence_id)
+                        citation = citation_by_evidence.get(support.evidence_id)
+                        if window is None or citation is None:
+                            continue
+                        support_spans.append(
+                            ClaimSupportSpan(
+                                evidence_id=citation.evidence_id or support.evidence_id,
+                                char_start=window.char_start + support.start,
+                                char_end=window.char_start + support.end,
+                                content_hash=window.content_hash,
+                                kind=support.kind,
+                            )
+                        )
+                    verification_status = (
+                        "verifier-entailed"
+                        if verification is not None
+                        else "insufficient"
+                        if block.status == "insufficient"
+                        else "verifier-off"
+                        if str(options.get("verifier") or "auto") == "off"
+                        else "verifier-unavailable"
+                        if verification_needed and self.claim_verifier is None
+                        else "protocol-literal-checked"
+                        if validation.technical_literals
+                        else "protocol-lexical-aligned"
+                    )
                     claim = AnswerClaim(
                         id=block.id,
                         text=block.text,
                         evidence_ids=stable_evidence_ids,
                         facet_id=block.facet_id,
                         status=ClaimStatus(block.status),
+                        verification_status=verification_status,
+                        verification_score=(
+                            getattr(verification, "score", None)
+                            if verification is not None
+                            else None
+                        ),
+                        support_spans=support_spans,
                     )
                     claims.append(claim)
                     claim_citations = [
@@ -404,6 +630,7 @@ class QueryOrchestrator:
         tps = None
         if final_event and final_event.eval_count and final_event.eval_duration_ns:
             tps = final_event.eval_count / (final_event.eval_duration_ns / 1_000_000_000)
+        verifier_digest = getattr(self.claim_verifier, "digest", None)
         return OrchestratedAnswer(
             answer=answer,
             claims=tuple(claims),
@@ -420,7 +647,7 @@ class QueryOrchestrator:
             phase_timings_ms=timings,
             model_digests={
                 "generator": final_event.model_digest if final_event else "",
-                "reranker": _model_digest(DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION),
+                "reranker": effective_reranker_digest,
             },
             time_to_first_token_ms=first_claim_ms,
             prompt_tokens=final_event.prompt_eval_count if final_event else None,
@@ -429,6 +656,146 @@ class QueryOrchestrator:
             rejected_claims=rejected,
             abstention="partial" if missing else "none",
             done_reason=(final_event.done_reason if final_event else None) or "stop",
+            retrieval_stages=tuple(retrieval_stages),
+            escalation_reasons=tuple(dict.fromkeys(escalation_reasons)),
+            calibrator_digest=self.reranker_calibrator.digest,
+            calibrator_status=(
+                "mismatch"
+                if not self.reranker_calibrator.bound
+                or self.reranker_calibrator.model_digest != effective_reranker_digest
+                else "bootstrap"
+                if str(self.reranker_calibrator.dataset_digest or "").startswith("bootstrap-")
+                else "gold-bound"
+            ),
+            verifier_digest=(str(verifier_digest) if verifier_digest else None),
+            verifier_status=(
+                "applied"
+                if verifier_calls
+                else "disabled"
+                if str(options.get("verifier") or "auto") == "off"
+                else "unavailable"
+                if "claim_verifier_unavailable" in fallbacks
+                else "not-triggered"
+            ),
+            typed_evidence_status=(
+                "typed"
+                if all(
+                    item.evidence_kind is not EvidenceKind.UNKNOWN
+                    and item.provenance_kind is not ProvenanceKind.UNKNOWN
+                    for item in selected
+                )
+                else "mixed-legacy"
+            ),
+        )
+
+    async def _verify_claim(
+        self,
+        claim: Any,
+        evidence: tuple[EvidenceWindow, ...],
+        *,
+        calls: int,
+    ) -> Any | None:
+        if not self.claim_verifier_policy.should_verify(claim, evidence):
+            return None
+        if calls >= self.claim_verifier_policy.max_claims:
+            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
+        if self.claim_verifier is None:
+            # V1.2 never upgrades a high-risk numeric/negative/comparative,
+            # table, formula or multi-evidence claim from lexical alignment to
+            # factual support when the pinned verifier is unavailable.
+            return self.claim_verifier_policy.fail_closed(None)
+        try:
+            result = await self.claim_verifier.verify(claim, evidence)
+        except Exception:
+            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
+        if getattr(result, "verdict", None) not in {"entailed", "contradicted", "unknown"}:
+            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
+        return result
+
+    async def _search_facets(
+        self,
+        database: Path,
+        facets: Sequence[QueryFacet],
+        limit: int,
+        *,
+        document_filter: str | None,
+        hydrate_chunk_ids: Sequence[str] = (),
+    ) -> _FacetSearchBatch:
+        """Use one batched adapter call when available, preserving V1.1 fallback."""
+
+        requests = [
+            SearchManyRequest(
+                key=f"{facet.id}:{channel}",
+                query=facet.query,
+                limit=limit,
+                document_filter=document_filter,
+                search_type=channel,
+                rerank=False,
+            )
+            for facet in facets
+            for channel in ("fts", "vector")
+        ]
+        search_many = getattr(self.adapter, "search_many", None)
+        if callable(search_many):
+            try:
+                result = await search_many(
+                    database,
+                    requests,
+                    hydrate_chunk_ids=list(hydrate_chunk_ids),
+                )
+                if not isinstance(result, SearchManyResult):
+                    raise TypeError("search_many must return SearchManyResult")
+                items = {item.key: item for item in result.items}
+                rows: dict[str, Any] = {}
+                for request in requests:
+                    item = items.get(request.key)
+                    if item is None:
+                        rows[request.key] = RuntimeError(
+                            f"search_many omitted request {request.key}"
+                        )
+                    elif item.failure is not None:
+                        rows[request.key] = RuntimeError(item.failure.message)
+                    else:
+                        rows[request.key] = item.hits
+                return _FacetSearchBatch(
+                    rows=rows,
+                    hydrated_chunks=result.hydrated_chunks,
+                    hydration_failed=result.hydration_failure is not None,
+                )
+            except (AttributeError, NotImplementedError):
+                pass
+        hydrated_chunks: list[SearchHit] = []
+        hydration_failed = False
+        if hydrate_chunk_ids:
+            try:
+                hydrated_chunks = await self.adapter.get_chunks(
+                    database, list(dict.fromkeys(hydrate_chunk_ids))
+                )
+            except Exception:
+                hydration_failed = True
+        return _FacetSearchBatch(
+            rows=dict(
+                zip(
+                    (request.key for request in requests),
+                    await asyncio.gather(
+                        *(
+                            self.adapter.search(
+                                database,
+                                request.query,
+                                request.limit,
+                                document_filter=request.document_filter,
+                                search_type=request.search_type,
+                                rerank=False,
+                            )
+                            for request in requests
+                        ),
+                        return_exceptions=True,
+                    ),
+                    strict=True,
+                )
+            ),
+            hydrated_chunks=hydrated_chunks,
+            hydration_failed=hydration_failed,
         )
 
     def standalone_question(
@@ -458,57 +825,48 @@ class QueryOrchestrator:
 
     @staticmethod
     def _profile_complexity(complexity: QueryComplexity, profile: str) -> QueryComplexity:
-        if profile == "deep":
-            return {
-                QueryComplexity.SIMPLE: QueryComplexity.STANDARD,
-                QueryComplexity.STANDARD: QueryComplexity.COMPLEX,
-                QueryComplexity.COMPLEX: QueryComplexity.COMPLEX,
-            }[complexity]
-        if profile == "balanced" and complexity is QueryComplexity.COMPLEX:
-            return QueryComplexity.STANDARD
+        # Retained for callers on the v1.0 private surface. V1.1 profiles bound
+        # work but no longer pretend that the question itself changed meaning.
         return complexity
 
     @staticmethod
-    def _bounded_budget(source: Any, options: Mapping[str, Any]) -> dict[str, int]:
+    def _bounded_budget(complexity: QueryComplexity, options: Mapping[str, Any]) -> dict[str, int]:
         profile = str(options.get("profile") or "auto")
-        profile_max = (
-            5
-            if profile == "fast"
-            else min(8, source.final_max)
-            if profile == "balanced"
-            else min(14, max(8, source.final_max))
-            if profile == "deep"
-            else source.final_max
-        )
+        source = performance_budget(complexity, profile)
+        context_tokens = performance_context_tokens(complexity, profile)
+        configured_context = int(options.get("_model_context_tokens") or 0)
+        if configured_context > 0:
+            context_tokens = min(context_tokens, configured_context)
+        context_tokens = max(4096, context_tokens)
         final_max = min(
             source.final_max,
-            profile_max,
             int(options.get("max_sources") or source.final_max),
         )
-        candidate_cap = source.candidate_cap
-        evidence_tokens = source.evidence_tokens
-        deadline_ms = source.deadline_ms
-        if profile == "fast":
-            candidate_cap = min(candidate_cap, 24)
-            evidence_tokens = min(evidence_tokens, 480)
-            deadline_ms = min(deadline_ms, 15_000)
-        elif profile == "balanced":
-            candidate_cap = min(candidate_cap, 40)
-            evidence_tokens = min(evidence_tokens, 1_200)
-            deadline_ms = min(deadline_ms, 25_000)
-        elif profile == "deep":
-            candidate_cap = min(72, max(candidate_cap, 40))
-            evidence_tokens = min(1_800, max(evidence_tokens, 1_200))
-            deadline_ms = min(35_000, max(deadline_ms, 25_000))
+        requested_answer_tokens = min(
+            source.answer_tokens,
+            int(options.get("max_answer_tokens") or source.answer_tokens),
+        )
+        # Raw evidence is only one part of the prompt. Reserve deterministic
+        # headroom for navigation metadata, claim protocol, the question and
+        # generated answer so low-tier models can never receive an impossible
+        # 4.5K-evidence request inside a 4K context.
+        answer_tokens = min(requested_answer_tokens, max(256, context_tokens // 8))
+        prompt_reserve = max(1536, context_tokens // 4)
+        evidence_tokens = min(
+            source.evidence_tokens,
+            max(256, context_tokens - prompt_reserve - answer_tokens),
+        )
         return {
-            "candidate_cap": candidate_cap,
+            "candidate_cap": source.candidate_cap,
             "final_min": min(source.final_min, final_max),
             "final_max": final_max,
             "evidence_tokens": evidence_tokens,
-            "answer_tokens": min(
-                source.answer_tokens, int(options.get("max_answer_tokens") or source.answer_tokens)
+            "answer_tokens": answer_tokens,
+            "context_tokens": context_tokens,
+            "deadline_ms": min(
+                source.deadline_ms,
+                int(options.get("deadline_ms") or source.deadline_ms),
             ),
-            "deadline_ms": min(deadline_ms, int(options.get("deadline_ms") or deadline_ms)),
         }
 
     @staticmethod
@@ -519,9 +877,29 @@ class QueryOrchestrator:
             book = BookMetadata.model_validate(document_meta.get("book_metadata"))
         except (TypeError, ValueError):
             book = None
+        raw_kind = str(metadata.get("evidence_kind") or "unknown").casefold()
+        try:
+            evidence_kind = EvidenceKind(raw_kind)
+        except ValueError:
+            labels = {str(item).casefold() for item in metadata.get("labels", [])}
+            evidence_kind = (
+                EvidenceKind.TABLE
+                if labels & {"table", "table_item"}
+                else EvidenceKind.FORMULA
+                if labels & {"formula", "equation"}
+                else EvidenceKind.FIGURE
+                if labels & {"picture", "figure", "image", "diagram", "chart"}
+                else EvidenceKind.UNKNOWN
+            )
+        raw_provenance = str(metadata.get("provenance_kind") or "unknown").casefold()
+        try:
+            provenance_kind = ProvenanceKind(raw_provenance)
+        except ValueError:
+            provenance_kind = ProvenanceKind.UNKNOWN
         return RetrievalCandidate(
             chunk_id=hit.chunk_id,
             content=hit.content,
+            generation_id=str(metadata.get("generation_id") or "") or None,
             document_id=hit.document_id,
             document_title=hit.document_title,
             source_uri=str(metadata.get("source_uri") or "") or None,
@@ -536,6 +914,9 @@ class QueryOrchestrator:
             element_types=tuple(str(item) for item in metadata.get("labels", [])),
             doc_item_refs=tuple(str(item) for item in metadata.get("doc_item_refs", [])),
             book=book,
+            evidence_kind=evidence_kind,
+            provenance_kind=provenance_kind,
+            quality_flags=tuple(str(item) for item in metadata.get("quality_flags", [])),
         )
 
     @staticmethod
@@ -635,6 +1016,7 @@ class QueryOrchestrator:
                 Citation(
                     evidence_id=candidate.evidence_id or window.evidence_id,
                     prompt_evidence_id=window.evidence_id,
+                    generation_id=candidate.generation_id,
                     chunk_id=window.chunk_id,
                     document_id=candidate.document_id,
                     logical_document_id=candidate.logical_document_id,
@@ -653,7 +1035,7 @@ class QueryOrchestrator:
                     rerank_score=scored.raw_score if scored else None,
                     retrieval_paths=list(path.retrieval_paths) if path else [],
                     relevance_score=scored.relevance if scored else None,
-                    verification_status="protocol-and-literal-checked",
+                    verification_status="window-integrity-checked",
                 )
             )
         return citations

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -39,10 +40,15 @@ def _memory_snapshot() -> MemorySnapshot:
 class ResourceCoordinator:
     """Serialize memory-heavy work and prioritize interactive questions."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_residency_seconds: float = 300.0) -> None:
+        if not 0.0 <= max_residency_seconds <= 600.0:
+            raise ValueError("max_residency_seconds must be between 0 and 600")
         self._condition = asyncio.Condition()
         self._busy = False
         self._waiting_chats = 0
+        self._max_residency_seconds = max_residency_seconds
+        self._recent_query_uses = 0
+        self._last_query_completed_at = 0.0
 
     def memory(self) -> MemorySnapshot:
         return _memory_snapshot()
@@ -56,8 +62,28 @@ class ResourceCoordinator:
         return self._waiting_chats
 
     def residency_seconds(self) -> float:
-        """Adaptive query residency: fast when safe, aggressive under pressure."""
-        return {"ready": 120.0, "guarded": 30.0, "waiting": 0.0}[self.memory().state]
+        """Grow hot-query residency from 30s to 5m, but yield on pressure."""
+
+        # Keeping a cross-encoder or Ollama model resident is only an
+        # optimization.  As soon as the reserve is guarded it must not compete
+        # with the active request/indexer for memory.
+        if self.memory().state != "ready":
+            return 0.0
+        now = time.monotonic()
+        if self._last_query_completed_at and now - self._last_query_completed_at > 300.0:
+            self._recent_query_uses = 0
+        return min(
+            self._max_residency_seconds,
+            300.0,
+            30.0 * (2 ** min(self._recent_query_uses, 4)),
+        )
+
+    def _record_query_use(self) -> None:
+        now = time.monotonic()
+        if self._last_query_completed_at and now - self._last_query_completed_at > 300.0:
+            self._recent_query_uses = 0
+        self._recent_query_uses = min(4, self._recent_query_uses + 1)
+        self._last_query_completed_at = now
 
     def segment_pages(self, preferred: int, scanned: bool) -> int:
         """Reduce future conversion units before memory pressure becomes an OOM."""
@@ -89,9 +115,13 @@ class ResourceCoordinator:
                 self._busy = True
             finally:
                 self._waiting_chats -= 1
+        completed = False
         try:
             yield
+            completed = True
         finally:
+            if completed:
+                self._record_query_use()
             async with self._condition:
                 self._busy = False
                 self._condition.notify_all()

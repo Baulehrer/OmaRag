@@ -5,94 +5,71 @@
 <h1 align="center">OmaRag</h1>
 
 <p align="center">
-  <strong>Deine Fachbücher. Deine Fragen. Antworten mit Seitenangabe.</strong>
+  <strong>Your textbooks. Your questions. Answers with page references.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Baulehrer/OmaRag/releases/latest">Neueste Version</a> ·
-  <a href="https://github.com/Baulehrer/OmaRag/issues">Hilfe</a>
+  <a href="https://github.com/Baulehrer/OmaRag/releases/latest">Latest release</a> ·
+  <a href="https://github.com/Baulehrer/OmaRag/issues">Get help</a>
 </p>
 
 ![OmaRag](docs/screenshots/dashboard.png)
 
-## Was ist OmaRag?
+## What is OmaRag?
 
-OmaRag macht aus deinen PDF-Fachbüchern eine private Wissensbibliothek.
+OmaRag turns PDF textbooks into a private knowledge library. Ask a question and it finds relevant
+passages, answers in plain language, and shows the exact book and page. Your books and questions
+stay on your computer by default.
 
-Du fügst Bücher hinzu und stellst Fragen in normaler Sprache. OmaRag sucht die passenden Stellen,
-erstellt eine verständliche Antwort und zeigt dir, aus welchem Buch und von welcher Seite sie
-stammt.
+## Get started
 
-Deine Bücher und Fragen bleiben auf deinem Rechner.
+1. Start OmaRag.
+2. Choose **Fast**, **Normal**, or **Quality**.
+3. Add PDF books.
+4. Ask a question and inspect the original sources.
 
-## Was kann OmaRag?
+On first launch, OmaRag checks your hardware and recommends suitable models. It never downloads
+models without your confirmation. Advanced model settings remain available in Expert mode.
 
-- ganze Bücher und Ordner einlesen;
-- Inhaltsverzeichnisse, Kapitel, Register und Glossare erkennen;
-- passende Textstellen auch bei schwierigen Fragen finden;
-- Antworten mit Buch, Seite und Originalausschnitt belegen;
-- große Bücher schrittweise verarbeiten und unterbrochene Vorgänge fortsetzen;
-- mehrere Bibliotheken für unterschiedliche Themen verwalten;
-- vollständig mit Tastatur oder Maus bedient werden.
+The source panel shows cited pages first, followed by up to four relevant figures or tables when
+available.
 
-## Installation
+Version 1.2 keeps simple searches small and expands them only when evidence is missing. Device-only
+mode blocks content from being sent to external services. Existing libraries are never silently
+deleted or reindexed.
 
-Du brauchst einen Linux-PC mit x86-64-Prozessor und [Ollama](https://ollama.com/). 16 GB
-Arbeitsspeicher sind empfohlen.
+## Install
 
-Öffne ein Terminal und führe aus:
+You need a Linux x86-64 computer and [Ollama](https://ollama.com/). The smallest profile needs 8 GB
+of RAM; 16 GB or more is recommended.
 
 ```bash
 curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh | sh
 ```
 
-Danach startest du OmaRag mit:
+Start OmaRag with:
 
 ```bash
 oracle
 ```
 
-Beim ersten Start hilft dir OmaRag dabei, ein passendes Modell einzurichten.
-
-## Die ersten Schritte
-
-1. Erstelle eine Bibliothek.
-2. Füge deine PDF-Bücher hinzu.
-3. Warte, bis die Bücher fertig eingelesen sind.
-4. Öffne den Chat und stelle deine Frage.
-5. Wähle eine Quelle aus, um die Originalseite zu sehen.
-
-## Aktualisieren
+## Update
 
 ```bash
 oracle-update
 ```
 
-Nach einem großen Update kann OmaRag eine vollständige Neuindexierung verlangen. Deine
-Originalbücher bleiben dabei erhalten.
+A major update may require reindexing. Your original books are preserved.
 
-## AppImage
-
-Auf der Seite [Releases](https://github.com/Baulehrer/OmaRag/releases/latest) findest du zusätzlich
-eine portable AppImage. Sie ist nur die Benutzeroberfläche und verbindet sich mit dem installierten
-OmaRag-Dienst.
-
-## Datenschutz
-
-Die normale Suche, das Einlesen und die Antworten laufen lokal. Eine Internetverbindung wird nur
-für Installation, Updates und das Herunterladen von Modellen benötigt.
-
-## Hilfe
-
-Wenn etwas nicht funktioniert, starte zuerst:
+## Get help
 
 ```bash
 oracle-cli doctor
 ```
 
-Du kannst anschließend ein [GitHub-Issue](https://github.com/Baulehrer/OmaRag/issues) erstellen.
-Bitte lade dort keine privaten Bücher oder Zugangsdaten hoch.
+If the problem continues, open a [GitHub issue](https://github.com/Baulehrer/OmaRag/issues). Do not
+upload private books or credentials.
 
-## Lizenz
+## License
 
-OmaRag steht unter der MIT-Lizenz.
+OmaRag is released under the MIT License.

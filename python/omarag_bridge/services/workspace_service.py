@@ -83,6 +83,7 @@ class WorkspaceService:
     ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.root.chmod(0o700)
         self.store = store
         self.ollama_url = ollama_url.rstrip("/")
 
@@ -121,6 +122,8 @@ class WorkspaceService:
         return manifest
 
     def _create_layout(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=False)
+        path.chmod(0o700)
         for relative in (
             "metadata-overlays",
             "database",
@@ -133,7 +136,15 @@ class WorkspaceService:
             "sources/originals",
             ".omarag/locks",
         ):
-            (path / relative).mkdir(parents=True, exist_ok=True)
+            directory = path / relative
+            directory.mkdir(parents=True, exist_ok=True)
+            # Parents created by mkdir(parents=True) need the same boundary.
+            current = directory
+            while current != path.parent and current.is_relative_to(path):
+                current.chmod(0o700)
+                if current == path:
+                    break
+                current = current.parent
         runtime = _runtime_profile()
         (path / "haiku.rag.yaml").write_text(
             f"""environment: production
@@ -154,7 +165,9 @@ reranking:
 qa:
   model:
     provider: ollama
-    name: qwen3.5:4b-q4_K_M
+    # Safe bootstrap only. The first-run hardware preflight replaces this
+    # with the pinned tier stack after explicit user confirmation.
+    name: qwen3.5:2b-q4_K_M
     vision: true
     enable_thinking: false
     temperature: 0.1
@@ -207,8 +220,12 @@ prompts:
 """,
             encoding="utf-8",
         )
+        (path / "haiku.rag.yaml").chmod(0o600)
         (path / "sources.yaml").write_text("sources: []\n", encoding="utf-8")
-        (path / ".omarag" / "queue-links.json").write_text("{}\n", encoding="utf-8")
+        (path / "sources.yaml").chmod(0o600)
+        queue_links = path / ".omarag" / "queue-links.json"
+        queue_links.write_text("{}\n", encoding="utf-8")
+        queue_links.chmod(0o600)
 
     @staticmethod
     def _manifest_toml(manifest: WorkspaceManifest) -> dict[str, object]:
@@ -249,7 +266,10 @@ prompts:
         path = Path(manifest.path)
         temporary = path / "workspace.toml.tmp"
         temporary.write_text(tomli_w.dumps(self._manifest_toml(manifest)), encoding="utf-8")
-        temporary.replace(path / "workspace.toml")
+        temporary.chmod(0o600)
+        target = path / "workspace.toml"
+        temporary.replace(target)
+        target.chmod(0o600)
 
     def list(self) -> list[WorkspaceSummary]:
         return [
@@ -300,6 +320,7 @@ prompts:
             target,
             ignore=shutil.ignore_patterns("locks", "runtime-state.json"),
         )
+        target.chmod(0o700)
         now = datetime.now(UTC)
         manifest = source.model_copy(
             update={

@@ -24,6 +24,8 @@ class OmaRagApi:
             headers=headers,
             timeout=30,
             transport=transport,
+            trust_env=False,
+            follow_redirects=False,
         )
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:

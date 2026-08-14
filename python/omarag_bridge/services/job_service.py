@@ -3,16 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import shutil
+import stat
 import tempfile
 import time
-import urllib.error
-import urllib.request
-from contextlib import suppress
+from collections.abc import Callable
+from contextlib import asynccontextmanager, suppress
 from importlib import metadata as package_metadata
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+import httpx
 
 from ..adapters.base import HaikuAdapter
 from ..compat_probe import SUPPORTED_DOCLING, SUPPORTED_HAIKU
@@ -22,17 +25,40 @@ from ..models.errors import ConflictError, OmaRagError, ReadOnlyError
 from ..store import StateStore
 from .event_service import EventService
 from .resource_coordinator import ResourceCoordinator
+from .source_fetcher import download_url_source
 from .textbook_service import archive_source, file_sha256
 from .workspace_service import WorkspaceService
 
 TERMINAL_STATUSES = {JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED}
+_ACTIVE_IMPORT_STATUSES = {
+    JobStatus.QUEUED,
+    JobStatus.RUNNING,
+    JobStatus.PAUSE_REQUESTED,
+    JobStatus.PAUSED,
+}
+_URL_IMPORT_JOB_ID = re.compile(r"^job-[0-9a-f]{12}$")
+_URL_IMPORT_STALE_SECONDS = 3600.0
+
+
+def _index_pipeline(indexing: dict[str, Any] | None) -> str:
+    return (
+        "book-index-v3"
+        if str((indexing or {}).get("pipeline") or "book-v2") == "book-v3"
+        else "book-index-v2"
+    )
 
 
 def _same_model_name(left: str, right: str) -> bool:
     return left == right or left == f"{right}:latest" or right == f"{left}:latest"
 
 
-def _rebuild_runtime_lock(workspace: Path, ollama_url: str) -> dict[str, str]:
+def _rebuild_runtime_lock(
+    workspace: Path,
+    ollama_url: str,
+    pipeline: str = "book-index-v2",
+    *,
+    config_bytes: bytes | None = None,
+) -> dict[str, str]:
     """Resolve every versioned indexing dependency without pulling a model."""
     haiku = next(
         (
@@ -48,41 +74,61 @@ def _rebuild_runtime_lock(workspace: Path, ollama_url: str) -> dict[str, str]:
             f"Book-v2 requires Haiku {SUPPORTED_HAIKU} and Docling {SUPPORTED_DOCLING}; "
             f"found Haiku {haiku or 'missing'}, Docling {docling or 'missing'}"
         )
-    config_path = workspace / "haiku.rag.yaml"
-    config_bytes = config_path.read_bytes()
+    if config_bytes is None:
+        config_path = workspace / "haiku.rag.yaml"
+        config_bytes = config_path.read_bytes()
     import yaml
 
     config = yaml.safe_load(config_bytes) or {}
-    embedding = str((((config.get("embeddings") or {}).get("model") or {}).get("name")) or "")
+    embedding_config = (config.get("embeddings") or {}).get("model") or {}
+    embedding = str(embedding_config.get("name") or "")
+    embedding_provider = str(embedding_config.get("provider") or "ollama").casefold()
     reranker = str((((config.get("reranking") or {}).get("model") or {}).get("name")) or "")
     if not embedding:
         raise RuntimeError("Workspace has no configured embedding model")
-    request = urllib.request.Request(f"{ollama_url.rstrip('/')}/api/tags")
-    try:
-        with urllib.request.urlopen(request, timeout=3.0) as response:  # noqa: S310
-            payload = json.loads(response.read())
-    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Ollama model inventory is unavailable: {exc}") from exc
-    models = payload.get("models", []) if isinstance(payload, dict) else []
-    matches = [
-        item
-        for item in models
-        if isinstance(item, dict)
-        and _same_model_name(str(item.get("name") or item.get("model") or ""), embedding)
-    ]
-    if len(matches) != 1 or not matches[0].get("digest"):
-        raise RuntimeError(
-            f"Configured embedding model is not installed unambiguously: {embedding}"
-        )
+    embedding_digest = ""
+    if embedding_provider == "ollama":
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(3.0),
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
+                response = client.get(f"{ollama_url.rstrip('/')}/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"Ollama model inventory is unavailable: {exc}") from exc
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        matches = [
+            item
+            for item in models
+            if isinstance(item, dict)
+            and _same_model_name(str(item.get("name") or item.get("model") or ""), embedding)
+        ]
+        if len(matches) != 1 or not matches[0].get("digest"):
+            raise RuntimeError(
+                f"Configured embedding model is not installed unambiguously: {embedding}"
+            )
+        embedding_digest = str(matches[0]["digest"])
     return {
-        "pipeline": "book-index-v2",
+        "pipeline": pipeline,
         "haiku": haiku,
         "docling": docling,
         "workspace_config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "embedding_provider": embedding_provider,
         "embedding_model": embedding,
-        "embedding_digest": str(matches[0]["digest"]),
+        "embedding_digest": embedding_digest,
         "reranker_model": reranker,
     }
+
+
+class _WriterLease:
+    """Unforgeable marker for calls already inside ``JobService.writer``."""
+
+    def __init__(self, owner: JobService) -> None:
+        self.owner = owner
+        self.active = True
 
 
 def _distribution_exists(name: str) -> bool:
@@ -166,19 +212,79 @@ class JobService:
         events: EventService,
         adapter: HaikuAdapter,
         resources: ResourceCoordinator,
+        profile_config_activator: Callable[[str, str, str, str, str], Any] | None = None,
     ) -> None:
         self.store = store
         self.workspaces = workspaces
         self.events = events
         self.adapter = adapter
         self.resources = resources
+        self.profile_config_activator = profile_config_activator
+        self.content_egress_guard: Callable[[str, str], None] | None = None
+        self.url_source_guard: Callable[[str, str], None] | None = None
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._admission_lock = asyncio.Lock()
         self._writer_lock = asyncio.Lock()
         self._segment_samples: dict[tuple[str, int], list[tuple[float, int]]] = {}
+
+    def _authorize_model_content(self, workspace_id: str) -> None:
+        """Re-evaluate the workspace policy inside the corpus writer lease."""
+
+        if self.content_egress_guard is not None:
+            self.content_egress_guard(workspace_id, self.workspaces.ollama_url)
 
     @property
     def active(self) -> bool:
         return bool(self._tasks)
+
+    @asynccontextmanager
+    async def writer(self, *, fail_if_active: bool = False):
+        """Serialize corpus/config mutations with complete import jobs.
+
+        ``fail_if_active`` checks admission before waiting for the writer lock.
+        Pausing is checkpoint based: the job task unwinds and releases this lock,
+        while callers that require a quiescent corpus still reject the persisted
+        paused job through the active-job admission policy.
+        """
+
+        async with self._admission_lock:
+            persisted_active = False
+            list_jobs = getattr(getattr(self, "store", None), "list_jobs", None)
+            if fail_if_active and callable(list_jobs):
+                persisted_active = any(
+                    job.kind in {"ingest", "reindex"}
+                    and job.status
+                    in {
+                        JobStatus.QUEUED,
+                        JobStatus.RUNNING,
+                        JobStatus.PAUSE_REQUESTED,
+                        JobStatus.PAUSED,
+                    }
+                    for job in list_jobs()
+                )
+            if fail_if_active and (self.active or persisted_active):
+                raise ConflictError("An import or rebuild is queued, running, or paused")
+            async with self._writer_lock:
+                lease = _WriterLease(self)
+                try:
+                    yield lease
+                finally:
+                    lease.active = False
+
+    async def _verify_runtime_lock(self, workspace_id: str, expected: dict[str, str]) -> None:
+        if not expected:
+            return
+        current = await asyncio.to_thread(
+            _rebuild_runtime_lock,
+            Path(self.workspaces.get(workspace_id).path),
+            self.workspaces.ollama_url,
+            str(expected.get("pipeline") or "book-index-v2"),
+        )
+        if current != expected:
+            raise ConflictError(
+                "Indexing model identity changed while the job was running",
+                details={"expected": expected, "actual": current},
+            )
 
     async def shutdown(self) -> None:
         for task in self._tasks.values():
@@ -186,7 +292,151 @@ class JobService:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
 
+    def _url_import_root(self, workspace_id: str, *, create: bool) -> Path | None:
+        workspace_path = Path(self.workspaces.get(workspace_id).path)
+        workspace_root = workspace_path.resolve()
+        if (
+            workspace_path.is_symlink()
+            or workspace_root.parent != self.workspaces.root
+            or workspace_root.suffix != ".omarag"
+            or not workspace_root.is_dir()
+        ):
+            raise ConflictError("Managed URL-import storage is not trustworthy")
+        metadata_root = workspace_root / ".omarag"
+        if metadata_root.is_symlink() or (
+            metadata_root.exists() and metadata_root.resolve().parent != workspace_root
+        ):
+            raise ConflictError("Managed URL-import storage is not trustworthy")
+        if create:
+            metadata_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            metadata_root.chmod(0o700)
+        elif not metadata_root.is_dir():
+            return None
+
+        import_root = metadata_root / "url-imports"
+        if import_root.is_symlink() or (
+            import_root.exists() and import_root.resolve().parent != metadata_root.resolve()
+        ):
+            raise ConflictError("Managed URL-import storage is not trustworthy")
+        if create:
+            import_root.mkdir(mode=0o700, exist_ok=True)
+            import_root.chmod(0o700)
+        elif not import_root.is_dir():
+            return None
+        return import_root
+
+    @staticmethod
+    def _remove_url_import_path(path: Path) -> bool:
+        """Remove one already parent-gated entry without following symlinks."""
+
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(path)
+        return True
+
+    def _prepare_url_import_directory(self, workspace_id: str, job_id: str) -> Path:
+        if _URL_IMPORT_JOB_ID.fullmatch(job_id) is None:
+            raise ConflictError("URL-import job identity is invalid")
+        root = self._url_import_root(workspace_id, create=True)
+        assert root is not None
+        target = root / job_id
+        if target.parent != root:
+            raise ConflictError("Managed URL-import storage is not trustworthy")
+        self._remove_url_import_path(target)
+        target.mkdir(mode=0o700)
+        target.chmod(0o700)
+        if target.is_symlink() or target.resolve().parent != root.resolve():
+            raise ConflictError("Managed URL-import storage is not trustworthy")
+        return target
+
+    def _cleanup_url_import_directory(self, workspace_id: str, job_id: str) -> None:
+        if _URL_IMPORT_JOB_ID.fullmatch(job_id) is None:
+            return
+        root = self._url_import_root(workspace_id, create=False)
+        if root is None:
+            return
+        target = root / job_id
+        if target.parent == root:
+            self._remove_url_import_path(target)
+
+    def sweep_url_import_orphans(
+        self,
+        *,
+        now: float | None = None,
+        stale_after_seconds: float = _URL_IMPORT_STALE_SECONDS,
+    ) -> int:
+        """Delete only stale URL-import work paths not owned by an active job.
+
+        The sweep is intentionally conservative: registered workspace roots,
+        direct children, lstat age, active job ownership, and symlink handling
+        are checked before any removal. Legacy V1.2 root-level temp directories
+        are removed only when that workspace has no active ingest at all.
+        """
+
+        if stale_after_seconds < 1:
+            raise ValueError("stale_after_seconds must be at least one second")
+        cutoff = (time.time() if now is None else now) - stale_after_seconds
+        removed = 0
+        for workspace in self.workspaces.list():
+            jobs = self.store.list_jobs(workspace.id)
+            active = {
+                job.id
+                for job in jobs
+                if job.kind == "ingest" and job.status in _ACTIVE_IMPORT_STATUSES
+            }
+            try:
+                root = self._url_import_root(workspace.id, create=False)
+            except (ConflictError, OSError):
+                root = None
+            if root is not None:
+                try:
+                    entries = list(root.iterdir())
+                except OSError:
+                    entries = []
+                for entry in entries:
+                    if entry.parent != root or entry.name in active:
+                        continue
+                    try:
+                        if entry.lstat().st_mtime > cutoff:
+                            continue
+                        removed += int(self._remove_url_import_path(entry))
+                    except OSError:
+                        continue
+
+            if active:
+                continue
+            workspace_root = Path(workspace.path).resolve()
+            try:
+                legacy_entries = [
+                    entry
+                    for entry in workspace_root.iterdir()
+                    if entry.name.startswith(".omarag-url-import-")
+                ]
+            except OSError:
+                legacy_entries = []
+            for entry in legacy_entries:
+                if entry.parent != workspace_root:
+                    continue
+                try:
+                    if entry.lstat().st_mtime > cutoff:
+                        continue
+                    removed += int(self._remove_url_import_path(entry))
+                except OSError:
+                    continue
+        return removed
+
     async def start_ingest(
+        self, workspace_id: str, request: IngestRequest, idempotency_key: str
+    ) -> tuple[JobSnapshot, bool]:
+        async with self._admission_lock:
+            return await self._start_ingest_admitted(workspace_id, request, idempotency_key)
+
+    async def _start_ingest_admitted(
         self, workspace_id: str, request: IngestRequest, idempotency_key: str
     ) -> tuple[JobSnapshot, bool]:
         workspace = self.workspaces.get(workspace_id)
@@ -212,7 +462,13 @@ class JobService:
             self._spawn(job.id)
         return self.store.get_job(job.id), reused
 
-    def preflight_reindex(self, workspace_id: str, indexing: dict[str, Any]) -> ReindexPreflight:
+    def preflight_reindex(
+        self,
+        workspace_id: str,
+        indexing: dict[str, Any],
+        *,
+        target_config_content: str | None = None,
+    ) -> ReindexPreflight:
         workspace = self.workspaces.get(workspace_id)
         if workspace.read_only:
             raise ReadOnlyError("A read-only workspace cannot be rebuilt")
@@ -264,7 +520,14 @@ class JobService:
         if records and self.adapter.available and cache_writable:
             try:
                 runtime_lock = _rebuild_runtime_lock(
-                    Path(workspace.path), self.workspaces.ollama_url
+                    Path(workspace.path),
+                    self.workspaces.ollama_url,
+                    _index_pipeline(indexing),
+                    config_bytes=(
+                        target_config_content.encode()
+                        if target_config_content is not None
+                        else None
+                    ),
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 issues.append(str(exc))
@@ -308,6 +571,15 @@ class JobService:
         request: ReindexRequest,
         idempotency_key: str,
     ) -> tuple[JobSnapshot, bool]:
+        async with self._admission_lock:
+            return await self._start_reindex_admitted(workspace_id, request, idempotency_key)
+
+    async def _start_reindex_admitted(
+        self,
+        workspace_id: str,
+        request: ReindexRequest,
+        idempotency_key: str,
+    ) -> tuple[JobSnapshot, bool]:
         self.workspaces.get(workspace_id)
         preflight = self.store.get_import_preflight(request.preflight_id, workspace_id)
         if preflight.get("kind") != "reindex" or preflight.get("mode") != "full":
@@ -346,6 +618,222 @@ class JobService:
             self._spawn(job.id)
         return self.store.get_job(job.id), reused
 
+    def _profile_stage_path(self, workspace_id: str, target_etag: str) -> Path:
+        if len(target_etag) != 64 or any(
+            character not in "0123456789abcdef" for character in target_etag
+        ):
+            raise ConflictError("Target model configuration has an invalid digest")
+        workspace_root = Path(self.workspaces.get(workspace_id).path).resolve()
+        stage_dir = workspace_root / ".omarag" / "profile-reindex"
+        stage_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if stage_dir.is_symlink() or stage_dir.resolve().parent.parent != workspace_root:
+            raise ConflictError("Workspace profile staging directory is not trustworthy")
+        stage_dir.chmod(0o700)
+        target = stage_dir / f"{target_etag}.yaml"
+        if target.is_symlink():
+            raise ConflictError("Workspace profile staging file is not trustworthy")
+        return target
+
+    def _write_profile_stage(
+        self,
+        workspace_id: str,
+        target_etag: str,
+        content: str,
+    ) -> str:
+        target = self._profile_stage_path(workspace_id, target_etag)
+        if hashlib.sha256(content.encode()).hexdigest() != target_etag:
+            raise ConflictError("Target model configuration failed its integrity check")
+        if target.exists():
+            existing = target.read_text(encoding="utf-8")
+            if hashlib.sha256(existing.encode()).hexdigest() != target_etag:
+                raise ConflictError("Existing staged model configuration is corrupt")
+            target.chmod(0o600)
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=".profile-",
+                suffix=".tmp",
+                dir=target.parent,
+                delete=False,
+            ) as stream:
+                stream.write(content)
+                temporary = Path(stream.name)
+            try:
+                temporary.chmod(0o600)
+                temporary.replace(target)
+                target.chmod(0o600)
+            finally:
+                temporary.unlink(missing_ok=True)
+        workspace_root = Path(self.workspaces.get(workspace_id).path).resolve()
+        return str(target.relative_to(workspace_root))
+
+    def _read_profile_stage(
+        self,
+        workspace_id: str,
+        transition: dict[str, Any],
+    ) -> str:
+        target_etag = str(transition.get("target_config_etag") or "")
+        expected = self._profile_stage_path(workspace_id, target_etag)
+        relative = Path(str(transition.get("staged_config") or ""))
+        workspace_root = Path(self.workspaces.get(workspace_id).path).resolve()
+        candidate = workspace_root / relative
+        if candidate.is_symlink() or candidate.resolve() != expected.resolve():
+            raise ConflictError("Staged model configuration path failed validation")
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ConflictError(
+                "Staged model configuration is unavailable; rebuild cannot resume"
+            ) from exc
+        if hashlib.sha256(content.encode()).hexdigest() != target_etag:
+            raise ConflictError("Staged model configuration failed its integrity check")
+        return content
+
+    @staticmethod
+    def _idempotency_fingerprint(idempotency_key: str) -> str:
+        return hashlib.sha256(idempotency_key.encode()).hexdigest()
+
+    def profile_reindex_replay(
+        self,
+        workspace_id: str,
+        *,
+        profile_preflight_id: str,
+        indexing: dict[str, Any],
+        idempotency_key: str,
+    ) -> JobSnapshot | None:
+        """Resolve an exact profile-reindex replay before current-config checks."""
+
+        fingerprint = self._idempotency_fingerprint(idempotency_key)
+        for job in self.store.list_jobs(workspace_id):
+            transition = dict(job.payload.get("profile_transition") or {})
+            if transition.get("idempotency_fingerprint") != fingerprint:
+                continue
+            if (
+                transition.get("profile_preflight_id") != profile_preflight_id
+                or dict(job.payload.get("indexing") or {}) != indexing
+            ):
+                raise ConflictError("Idempotency-Key was already used for another profile rebuild")
+            return job
+        return None
+
+    async def start_profile_reindex_under_writer(
+        self,
+        workspace_id: str,
+        *,
+        writer_lease: _WriterLease,
+        profile_preflight_id: str,
+        target_config_content: str,
+        expected_current_etag: str,
+        target_config_etag: str,
+        expected_embedding_model: str,
+        expected_embedding_digest: str,
+        recommendation_id: str,
+        indexing: dict[str, Any],
+        idempotency_key: str,
+    ) -> tuple[JobSnapshot, bool]:
+        """Queue a staged embedding rebuild without re-entering writer locks.
+
+        The explicit lease removes the old nested-lock/deadlock path.  Downloads,
+        digest refresh, target rendering, and this admission all happen inside
+        one caller-owned writer transaction; the active config is untouched.
+        """
+
+        if (
+            not isinstance(writer_lease, _WriterLease)
+            or writer_lease.owner is not self
+            or not writer_lease.active
+        ):
+            raise ConflictError("Profile rebuild admission requires an active writer lease")
+        if self.profile_config_activator is None:
+            raise ConflictError("Staged profile activation is unavailable")
+        current_path = Path(self.workspaces.get(workspace_id).path) / "haiku.rag.yaml"
+        current_etag = hashlib.sha256(current_path.read_bytes()).hexdigest()
+        if current_etag != expected_current_etag:
+            raise ConflictError("Workspace configuration changed after model preflight")
+        if hashlib.sha256(target_config_content.encode()).hexdigest() != target_config_etag:
+            raise ConflictError("Target model configuration failed its integrity check")
+        preflight_view = self.preflight_reindex(
+            workspace_id,
+            indexing,
+            target_config_content=target_config_content,
+        )
+        preflight = self.store.get_import_preflight(preflight_view.id, workspace_id)
+        if not preflight_view.ready:
+            raise ConflictError(
+                "Profile rebuild preflight did not pass",
+                details={"issues": preflight_view.issues},
+            )
+        runtime_lock = dict(preflight.get("runtime_lock") or {})
+        actual_model = str(runtime_lock.get("embedding_model") or "").removesuffix(":latest")
+        expected_model = expected_embedding_model.removesuffix(":latest")
+        actual_digest = str(runtime_lock.get("embedding_digest") or "").casefold()
+        expected_digest = expected_embedding_digest.casefold()
+        if actual_model != expected_model or actual_digest != expected_digest:
+            raise ConflictError(
+                "Installed embedding artifact does not match the consented model profile",
+                details={
+                    "expected_model": expected_embedding_model,
+                    "actual_model": runtime_lock.get("embedding_model"),
+                    "expected_digest": expected_embedding_digest,
+                    "actual_digest": runtime_lock.get("embedding_digest"),
+                },
+            )
+        staged_config = self._write_profile_stage(
+            workspace_id,
+            target_config_etag,
+            target_config_content,
+        )
+        payload = {
+            "preflight_id": preflight_view.id,
+            "mode": "full",
+            "confirm": "APPLY_AND_REINDEX",
+            "sources": preflight["sources"],
+            "indexing": preflight["indexing"],
+            "runtime_lock": runtime_lock,
+            "catalog_epoch": str(preflight.get("catalog_epoch") or ""),
+            "profile_transition": {
+                "profile_preflight_id": profile_preflight_id,
+                "recommendation_id": recommendation_id,
+                "expected_current_config_etag": expected_current_etag,
+                "target_config_etag": target_config_etag,
+                "staged_config": staged_config,
+                "embedding_model": expected_embedding_model,
+                "embedding_digest": expected_embedding_digest,
+                "idempotency_fingerprint": self._idempotency_fingerprint(idempotency_key),
+            },
+        }
+        job_id = f"job-{uuid4().hex[:12]}"
+        job, reused = self.store.create_job_idempotent(
+            job_id=job_id,
+            workspace_id=workspace_id,
+            kind="reindex",
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+        if not reused:
+            await self.events.emit(
+                "model-profile.rebuild.queued",
+                correlation_id=job.id,
+                workspace_id=workspace_id,
+                job_id=job.id,
+                payload={
+                    "mode": "apply-and-reindex",
+                    "documents": len(preflight["sources"]),
+                    "recommendation_id": recommendation_id,
+                },
+            )
+        return self.store.get_job(job.id), reused
+
+    def spawn_profile_reindex(self, job_id: str) -> None:
+        """Start a previously admitted profile job after releasing resources."""
+
+        job = self.store.get_job(job_id)
+        if job.kind != "reindex" or not job.payload.get("profile_transition"):
+            raise ConflictError("Job is not an admitted profile rebuild")
+        if job.status == JobStatus.QUEUED:
+            self._spawn(job_id)
+
     def _spawn(self, job_id: str) -> None:
         previous = self._tasks.get(job_id)
         if previous is not None and not previous.done():
@@ -354,7 +842,12 @@ class JobService:
         runner = self._run_reindex if job.kind == "reindex" else self._run_ingest
         task = asyncio.create_task(runner(job_id), name=job_id)
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _: self._tasks.pop(job_id, None))
+
+        def forget(completed: asyncio.Task[None]) -> None:
+            if self._tasks.get(job_id) is completed:
+                self._tasks.pop(job_id, None)
+
+        task.add_done_callback(forget)
 
     async def _run_reindex(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
@@ -372,9 +865,15 @@ class JobService:
             ).encode()
         ).hexdigest()
         generation_started = generation_checkpoint is not None
+        pipeline_version = _index_pipeline(dict(job.payload.get("indexing") or {}))
+        profile_transition = dict(job.payload.get("profile_transition") or {})
+        staged_profile_content: str | None = None
         async with self._writer_lock:
             imported: list[dict[str, Any]] = []
             try:
+                if not await self._continue(job_id):
+                    return
+                self._authorize_model_content(job.workspace_id)
                 sources = list(job.payload.get("sources") or [])
                 cleared = self.store.checkpoint_data(job_id, "legacy-index-cleared") is not None
                 # Fail while the old index is still intact whenever the frozen
@@ -392,24 +891,64 @@ class JobService:
                             },
                         )
                 expected_lock = dict(job.payload.get("runtime_lock") or {})
-                current_lock = await asyncio.to_thread(
-                    _rebuild_runtime_lock,
-                    Path(self.workspaces.get(job.workspace_id).path),
-                    self.workspaces.ollama_url,
-                )
-                if current_lock != expected_lock:
-                    raise ConflictError(
-                        "Indexing dependencies changed after reindex preflight",
-                        details={"expected": expected_lock, "actual": current_lock},
+                if profile_transition:
+                    staged_profile_content = await asyncio.to_thread(
+                        self._read_profile_stage,
+                        job.workspace_id,
+                        profile_transition,
                     )
+                    target_lock = await asyncio.to_thread(
+                        _rebuild_runtime_lock,
+                        Path(self.workspaces.get(job.workspace_id).path),
+                        self.workspaces.ollama_url,
+                        pipeline_version,
+                        config_bytes=staged_profile_content.encode(),
+                    )
+                    if target_lock != expected_lock:
+                        raise ConflictError(
+                            "Target indexing dependencies changed after profile admission",
+                            details={"expected": expected_lock, "actual": target_lock},
+                        )
+                    current_config = Path(
+                        self.workspaces.get(job.workspace_id).path,
+                        "haiku.rag.yaml",
+                    ).read_bytes()
+                    current_etag = hashlib.sha256(current_config).hexdigest()
+                    allowed_etags = {
+                        str(profile_transition["expected_current_config_etag"]),
+                        str(profile_transition["target_config_etag"]),
+                    }
+                    if current_etag not in allowed_etags:
+                        raise ConflictError(
+                            "Workspace configuration changed after profile admission",
+                            details={"actual_config_etag": current_etag},
+                        )
+                    if generation_checkpoint is None and current_etag != str(
+                        profile_transition["expected_current_config_etag"]
+                    ):
+                        raise ConflictError(
+                            "Target profile was activated without a maintenance generation"
+                        )
+                else:
+                    current_lock = await asyncio.to_thread(
+                        _rebuild_runtime_lock,
+                        Path(self.workspaces.get(job.workspace_id).path),
+                        self.workspaces.ollama_url,
+                        pipeline_version,
+                    )
+                    if current_lock != expected_lock:
+                        raise ConflictError(
+                            "Indexing dependencies changed after reindex preflight",
+                            details={"expected": expected_lock, "actual": current_lock},
+                        )
                 if generation_checkpoint is None:
                     self.store.begin_index_generation(
                         job.workspace_id,
                         generation_id,
-                        "book-index-v2",
+                        pipeline_version,
                         config_hash,
                         status="maintenance",
-                        config=current_lock,
+                        config=expected_lock,
                     )
                     generation_started = True
                     self.store.checkpoint(
@@ -433,16 +972,20 @@ class JobService:
                 # then drains already-admitted chats before stopping the query
                 # worker or deleting a single published document.
                 async with self.resources.indexing():
-                    current_lock = await asyncio.to_thread(
-                        _rebuild_runtime_lock,
-                        Path(self.workspaces.get(job.workspace_id).path),
-                        self.workspaces.ollama_url,
-                    )
-                    if current_lock != expected_lock:
-                        raise ConflictError(
-                            "Indexing dependencies changed at the rebuild boundary",
-                            details={"expected": expected_lock, "actual": current_lock},
+                    if profile_transition:
+                        assert staged_profile_content is not None
+                        target_lock = await asyncio.to_thread(
+                            _rebuild_runtime_lock,
+                            Path(self.workspaces.get(job.workspace_id).path),
+                            self.workspaces.ollama_url,
+                            pipeline_version,
+                            config_bytes=staged_profile_content.encode(),
                         )
+                        if target_lock != expected_lock:
+                            raise ConflictError(
+                                "Target dependencies changed at the rebuild boundary",
+                                details={"expected": expected_lock, "actual": target_lock},
+                            )
                     await asyncio.to_thread(_validate_reindex_sources, sources)
                     if not cleared:
                         expected_catalog = str(job.payload.get("catalog_epoch") or "")
@@ -455,6 +998,34 @@ class JobService:
                                     "actual_catalog_epoch": current_catalog,
                                 },
                             )
+                    if profile_transition:
+                        if not await self._continue(job_id):
+                            raise asyncio.CancelledError
+                        assert self.profile_config_activator is not None
+                        await asyncio.to_thread(
+                            self.profile_config_activator,
+                            job.workspace_id,
+                            staged_profile_content,
+                            str(profile_transition["expected_current_config_etag"]),
+                            str(profile_transition["target_config_etag"]),
+                            generation_id,
+                        )
+                        self.store.checkpoint(
+                            job_id,
+                            "profile-config-activated",
+                            {"target_config_etag": profile_transition["target_config_etag"]},
+                        )
+                    current_lock = await asyncio.to_thread(
+                        _rebuild_runtime_lock,
+                        Path(self.workspaces.get(job.workspace_id).path),
+                        self.workspaces.ollama_url,
+                        pipeline_version,
+                    )
+                    if current_lock != expected_lock:
+                        raise ConflictError(
+                            "Indexing dependencies changed at the rebuild boundary",
+                            details={"expected": expected_lock, "actual": current_lock},
+                        )
                     prepare = getattr(self.adapter, "prepare_rebuild", None)
                     if prepare is not None:
                         await prepare(self.workspaces.database_path(job.workspace_id))
@@ -497,6 +1068,9 @@ class JobService:
                         checkpoint=f"book-{index}",
                     )
                     metadata = BookMetadata.model_validate(source.get("metadata") or {})
+                    await self._verify_runtime_lock(job.workspace_id, expected_lock)
+                    indexing_options = dict(job.payload.get("indexing") or {})
+                    indexing_options["_runtime_lock"] = expected_lock
                     result = await self.adapter.ingest(
                         self.workspaces.database_path(job.workspace_id),
                         str(source["path"]),
@@ -515,17 +1089,22 @@ class JobService:
                         segment_sizer=self.resources.segment_pages,
                         metadata=metadata,
                         original_source=str(source["original_source"]),
-                        indexing_options=dict(job.payload.get("indexing") or {}),
+                        indexing_options=indexing_options,
+                        llm_url=self.workspaces.ollama_url,
                     )
+                    await self._verify_runtime_lock(job.workspace_id, expected_lock)
                     result.setdefault("fingerprint", source["fingerprint"])
                     result.setdefault("generation_id", generation_id)
                     result.setdefault("original_source", source["original_source"])
                     result.setdefault("managed_source", source["path"])
+                    result.setdefault("runtime_lock", expected_lock)
                     if (
                         Path(str(source["path"])).suffix.casefold() == ".pdf"
-                        and str(result.get("pipeline_version")) != "book-index-v2"
+                        and str(result.get("pipeline_version")) != pipeline_version
                     ):
-                        raise ConflictError("A PDF did not complete the homogeneous book-v2 path")
+                        raise ConflictError(
+                            f"A PDF did not complete the homogeneous {pipeline_version} path"
+                        )
                     self.store.upsert_document(
                         job.workspace_id,
                         str(source["original_source"]),
@@ -535,6 +1114,7 @@ class JobService:
                     self.store.checkpoint(job_id, f"book-{index}-complete", result)
                     imported.append(result)
 
+                await self._verify_runtime_lock(job.workspace_id, expected_lock)
                 self.store.validate_index_generation(job.workspace_id, generation_id)
                 self.store.update_index_generation(job.workspace_id, generation_id, status="ready")
                 self.store.clear_answer_cache(job.workspace_id)
@@ -544,7 +1124,18 @@ class JobService:
                     phase="completed",
                     progress=1.0,
                     checkpoint="completed",
-                    result={"generation_id": generation_id, "documents": imported},
+                    result={
+                        "generation_id": generation_id,
+                        "documents": imported,
+                        **(
+                            {
+                                "config_etag": profile_transition["target_config_etag"],
+                                "recommendation_id": profile_transition["recommendation_id"],
+                            }
+                            if profile_transition
+                            else {}
+                        ),
+                    },
                 )
                 await self.events.emit(
                     "index.generation.published",
@@ -553,6 +1144,12 @@ class JobService:
                     job_id=job_id,
                     payload={"generation_id": generation_id, "documents": len(imported)},
                 )
+                if profile_transition:
+                    with suppress(OSError):
+                        self._profile_stage_path(
+                            job.workspace_id,
+                            str(profile_transition["target_config_etag"]),
+                        ).unlink(missing_ok=True)
             except asyncio.CancelledError:
                 if generation_started:
                     self.store.update_index_generation(
@@ -590,12 +1187,125 @@ class JobService:
                     )
                 await self._fail(job, "REINDEX_FAILED", str(exc), {}, True)
 
+    def _published_source_result(
+        self,
+        job: JobSnapshot,
+        source_index: int,
+        fingerprint: str,
+        generation_id: str,
+    ) -> dict[str, Any] | None:
+        """Resolve a generation durably published before a runner interruption."""
+
+        publication = self.store.checkpoint_data(job.id, f"source-published-{source_index}")
+        if publication is None:
+            return None
+        indexed = self.store.document_by_fingerprint(job.workspace_id, fingerprint)
+        if (
+            indexed is None
+            or str(indexed.get("generation_id") or "") != generation_id
+            or str(publication.get("generation_id") or "") != generation_id
+        ):
+            raise ConflictError(
+                "Published document generation no longer matches its recovery checkpoint",
+                details={
+                    "source_index": source_index,
+                    "generation_id": generation_id,
+                    "published_generation_id": (
+                        str(indexed.get("generation_id") or "") if indexed else None
+                    ),
+                },
+            )
+        return dict(indexed["result"])
+
+    async def _retire_superseded_segments(
+        self,
+        job: JobSnapshot,
+        source_index: int,
+        result: dict[str, Any],
+    ) -> None:
+        """Idempotently retire provider rows hidden by the published Store mapping."""
+
+        generation_id = str(result.get("generation_id") or "")
+        current_ids = {str(item) for item in result.get("segment_document_ids", []) if str(item)}
+        pending = list(
+            dict.fromkeys(
+                str(item)
+                for item in result.get("superseded_segment_document_ids", [])
+                if str(item) and str(item) not in current_ids
+            )
+        )
+        checkpoint_name = f"source-retirement-{source_index}"
+        checkpoint = self.store.checkpoint_data(job.id, checkpoint_name) or {}
+        if checkpoint and str(checkpoint.get("generation_id") or "") != generation_id:
+            raise ConflictError(
+                "Retirement checkpoint belongs to another document generation",
+                details={"source_index": source_index, "generation_id": generation_id},
+            )
+        retired = {str(item) for item in checkpoint.get("retired_document_ids", []) if str(item)}
+        database = self.workspaces.database_path(job.workspace_id)
+        for document_id in pending:
+            if document_id in retired:
+                continue
+            # Haiku's documented delete operation is idempotent for our
+            # purposes: False means the already-hidden row no longer exists.
+            await self.adapter.delete_document(database, document_id)
+            retired.add(document_id)
+            self.store.checkpoint(
+                job.id,
+                checkpoint_name,
+                {
+                    "generation_id": generation_id,
+                    "retired_document_ids": sorted(retired),
+                    "pending_document_ids": [item for item in pending if item not in retired],
+                },
+            )
+        if not pending:
+            self.store.checkpoint(
+                job.id,
+                checkpoint_name,
+                {
+                    "generation_id": generation_id,
+                    "retired_document_ids": [],
+                    "pending_document_ids": [],
+                },
+            )
+
+    async def _publish_ingest_result(
+        self,
+        job: JobSnapshot,
+        source_index: int,
+        source_path: str,
+        fingerprint: str,
+        result: dict[str, Any],
+        expected_lock: dict[str, Any],
+        *,
+        already_published: bool = False,
+    ) -> None:
+        """Publish one complete generation and retire its predecessor atomically to readers."""
+
+        async with self.resources.indexing():
+            await self._verify_runtime_lock(job.workspace_id, expected_lock)
+            if not already_published:
+                # The catalogue swap and recovery marker share one SQLite
+                # transaction. Queries obtain their segment IDs under the same
+                # resource lease and therefore see either the old mapping or
+                # this complete one.
+                self.store.upsert_document(
+                    job.workspace_id,
+                    source_path,
+                    fingerprint,
+                    result,
+                    publication_checkpoint=(job.id, source_index),
+                )
+            await self._retire_superseded_segments(job, source_index, result)
+
     async def _run_ingest(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
         async with self._writer_lock:
             current = self.store.get_job(job_id)
-            if current.status == JobStatus.CANCELLED:
+            if not await self._continue(job_id):
                 return
+            current = self.store.get_job(job_id)
             self.store.update_job(job_id, status=JobStatus.RUNNING, phase="preflight")
             await self.events.emit(
                 "job.started",
@@ -606,7 +1316,29 @@ class JobService:
             )
             sources = current.payload["sources"]
             imported: list[dict[str, Any]] = []
+            url_import_directory: Path | None = None
             try:
+                self._authorize_model_content(job.workspace_id)
+                runtime_checkpoint = self.store.checkpoint_data(job_id, "runtime-lock")
+                expected_lock = dict((runtime_checkpoint or {}).get("runtime_lock") or {})
+                if getattr(self.adapter.capabilities, "book_index_v2", False):
+                    pipeline_version = _index_pipeline(dict(current.payload.get("indexing") or {}))
+                    current_lock = await asyncio.to_thread(
+                        _rebuild_runtime_lock,
+                        Path(self.workspaces.get(job.workspace_id).path),
+                        self.workspaces.ollama_url,
+                        pipeline_version,
+                    )
+                    if expected_lock and current_lock != expected_lock:
+                        raise ConflictError(
+                            "Indexing dependencies changed since this job was started",
+                            details={"expected": expected_lock, "actual": current_lock},
+                        )
+                    if not expected_lock:
+                        expected_lock = current_lock
+                        self.store.checkpoint(
+                            job_id, "runtime-lock", {"runtime_lock": expected_lock}
+                        )
                 total = len(sources)
                 for index, source in enumerate(sources):
                     if not await self._continue(job_id):
@@ -615,12 +1347,48 @@ class JobService:
                     if completed is not None:
                         imported.append(completed)
                         continue
+                    url_recovery = self.store.checkpoint_data(job_id, f"url-source-{index}")
+                    declared_type = str(source.get("type") or "file")
                     raw_source = str(source["path"])
-                    candidate_path = Path(raw_source).expanduser()
-                    source_path = (
-                        str(candidate_path.resolve()) if candidate_path.exists() else raw_source
-                    )
                     provided_fingerprint = source.get("fingerprint")
+                    source_reference = str(
+                        (url_recovery or {}).get("original_source") or raw_source
+                    )
+                    if url_recovery is not None:
+                        candidate_path = Path(str(url_recovery.get("managed_source") or ""))
+                        provided_fingerprint = str(
+                            url_recovery.get("fingerprint") or provided_fingerprint or ""
+                        )
+                        if not candidate_path.is_file() or not provided_fingerprint:
+                            raise ConflictError("Managed URL source recovery file is unavailable")
+                    elif declared_type == "url":
+                        if self.url_source_guard is None:
+                            raise ConflictError("URL source imports are not configured")
+                        if url_import_directory is None:
+                            url_import_directory = self._prepare_url_import_directory(
+                                job.workspace_id,
+                                job.id,
+                            )
+                        downloaded = await download_url_source(
+                            raw_source,
+                            url_import_directory,
+                            authorize=lambda url: self.url_source_guard(job.workspace_id, url),
+                        )
+                        if (
+                            provided_fingerprint
+                            and str(provided_fingerprint) != downloaded.fingerprint
+                        ):
+                            raise ConflictError("URL source changed after import preflight")
+                        candidate_path = downloaded.path
+                        provided_fingerprint = downloaded.fingerprint
+                        source_reference = downloaded.final_reference
+                    else:
+                        candidate_path = Path(raw_source).expanduser()
+                        if not candidate_path.is_file():
+                            raise ConflictError(
+                                "A file import must reference an existing regular local file"
+                            )
+                    source_path = str(candidate_path.resolve())
                     managed_source = source_path
                     archive_mode = "external"
                     is_local_file = Path(source_path).is_file()
@@ -650,7 +1418,7 @@ class JobService:
                             job_id,
                             f"source-init-{index}",
                             {
-                                "source": source_path,
+                                "source": source_reference,
                                 "fingerprint": fingerprint,
                                 "generation_id": generation_id,
                             },
@@ -658,21 +1426,66 @@ class JobService:
                     elif initial.get("fingerprint") != fingerprint:
                         raise ConflictError(
                             "Source changed after this import job was started",
-                            details={"source": source_path},
+                            details={"source": source_reference},
                         )
                     duplicate = self.store.document_by_fingerprint(job.workspace_id, fingerprint)
+                    published_result = self._published_source_result(
+                        job,
+                        index,
+                        fingerprint,
+                        generation_id,
+                    )
+                    if published_result is not None:
+                        # Publication won the crash boundary but retirement or
+                        # the final source checkpoint did not. Never rebuild or
+                        # apply duplicate policy to our own active generation;
+                        # only finish the idempotent hidden-row cleanup.
+                        await self._publish_ingest_result(
+                            job,
+                            index,
+                            source_reference,
+                            fingerprint,
+                            published_result,
+                            expected_lock,
+                            already_published=True,
+                        )
+                        self.store.checkpoint(job_id, f"source-result-{index}", published_result)
+                        imported.append(published_result)
+                        continue
                     if duplicate is not None:
                         policy = str(current.payload.get("duplicate_policy", "review"))
                         if policy == "review":
                             raise ConflictError(
                                 "This content is already indexed",
                                 details={
-                                    "source": source_path,
+                                    "source": source_reference,
                                     "existing_source": duplicate["source_path"],
                                     "fingerprint": fingerprint,
                                 },
                             )
                         if policy == "skip":
+                            if declared_type == "url" and url_recovery is None:
+                                # Even a duplicate URL import must cross the
+                                # privacy/recovery boundary before the job can
+                                # complete. Otherwise the original URL (and
+                                # potentially credentials in its query string)
+                                # would remain in durable job/preflight JSON.
+                                await self._phase(job_id, index, total, "archiving", 0, 0, 0)
+                                archived, fingerprint, archive_mode = await asyncio.to_thread(
+                                    archive_source,
+                                    Path(self.workspaces.get(job.workspace_id).path),
+                                    Path(source_path),
+                                    str(provided_fingerprint),
+                                )
+                                managed_source = str(archived)
+                                self.store.promote_url_source_to_managed(
+                                    job_id,
+                                    index,
+                                    raw_reference=raw_source,
+                                    opaque_reference=source_reference,
+                                    managed_source=managed_source,
+                                    fingerprint=fingerprint,
+                                )
                             result = dict(duplicate["result"])
                             result["duplicate"] = True
                             result["cache_status"] = "duplicate"
@@ -684,7 +1497,7 @@ class JobService:
                         # generation only after every replacement segment is
                         # searchable, so a failed rebuild leaves the old book
                         # intact.
-                    if is_local_file and provided_fingerprint:
+                    if is_local_file and provided_fingerprint and url_recovery is None:
                         await self._phase(job_id, index, total, "archiving", 0, 0, 0)
                         archived, fingerprint, archive_mode = await asyncio.to_thread(
                             archive_source,
@@ -693,11 +1506,25 @@ class JobService:
                             str(provided_fingerprint),
                         )
                         managed_source = str(archived)
+                        if declared_type == "url":
+                            self.store.promote_url_source_to_managed(
+                                job_id,
+                                index,
+                                raw_reference=raw_source,
+                                opaque_reference=source_reference,
+                                managed_source=managed_source,
+                                fingerprint=fingerprint,
+                            )
+                    elif url_recovery is not None:
+                        managed_source = source_path
+                        archive_mode = "managed-url"
                     progress = index / total
                     self.store.update_job(
                         job_id, progress=progress, phase="ingest", checkpoint=f"source-{index}"
                     )
-                    self.store.checkpoint(job_id, f"source-{index}", {"source": source})
+                    checkpoint_source = dict(source)
+                    checkpoint_source["path"] = source_reference
+                    self.store.checkpoint(job_id, f"source-{index}", {"source": checkpoint_source})
                     await self.events.emit(
                         "job.progress",
                         correlation_id=job_id,
@@ -717,6 +1544,14 @@ class JobService:
                         if metadata_payload is not None
                         else None
                     )
+                    await self._verify_runtime_lock(job.workspace_id, expected_lock)
+                    indexing_options = dict(current.payload.get("indexing") or {})
+                    # Book-v2/v3 imports stage complete Haiku generations. The
+                    # daemon owns the later Store publish + old-row retirement
+                    # boundary so queries cannot observe an empty replacement.
+                    indexing_options["_defer_previous_generation_retirement"] = True
+                    if expected_lock:
+                        indexing_options["_runtime_lock"] = expected_lock
                     result = await self.adapter.ingest(
                         self.workspaces.database_path(job.workspace_id),
                         managed_source,
@@ -739,19 +1574,31 @@ class JobService:
                         ),
                         segment_sizer=self.resources.segment_pages,
                         metadata=book_metadata,
-                        original_source=source_path,
-                        indexing_options=dict(current.payload.get("indexing") or {}),
+                        original_source=source_reference,
+                        indexing_options=indexing_options,
+                        llm_url=self.workspaces.ollama_url,
                     )
+                    await self._verify_runtime_lock(job.workspace_id, expected_lock)
                     result.setdefault("fingerprint", fingerprint)
                     result.setdefault("generation_id", generation_id)
-                    result.setdefault("original_source", source_path)
+                    result.setdefault("original_source", source_reference)
                     result.setdefault("managed_source", managed_source)
                     result.setdefault("archive_mode", archive_mode)
+                    if expected_lock:
+                        result.setdefault("runtime_lock", expected_lock)
                     if Path(managed_source).is_file():
                         result.setdefault("size_bytes", Path(managed_source).stat().st_size)
-                    self.store.upsert_document(job.workspace_id, source_path, fingerprint, result)
+                    await self._publish_ingest_result(
+                        job,
+                        index,
+                        source_reference,
+                        fingerprint,
+                        result,
+                        expected_lock,
+                    )
                     self.store.checkpoint(job_id, f"source-result-{index}", result)
                     imported.append(result)
+                await self._verify_runtime_lock(job.workspace_id, expected_lock)
                 self.store.update_job(
                     job_id,
                     status=JobStatus.COMPLETED,
@@ -778,6 +1625,9 @@ class JobService:
             finally:
                 for key in [key for key in self._segment_samples if key[0] == job_id]:
                     self._segment_samples.pop(key, None)
+                if url_import_directory is not None:
+                    with suppress(ConflictError, OSError):
+                        self._cleanup_url_import_directory(job.workspace_id, job.id)
 
     async def _segment_committed(
         self, job_id: str, source_index: int, segment: dict[str, Any]
@@ -928,7 +1778,7 @@ class JobService:
 
     async def _continue(self, job_id: str) -> bool:
         job = self.store.get_job(job_id)
-        if job.status == JobStatus.CANCELLED:
+        if job.status in {JobStatus.CANCELLED, JobStatus.PAUSED}:
             return False
         if job.status == JobStatus.PAUSE_REQUESTED:
             self.store.update_job(job_id, status=JobStatus.PAUSED, phase="paused")
@@ -938,9 +1788,10 @@ class JobService:
                 workspace_id=job.workspace_id,
                 job_id=job_id,
             )
-            while self.store.get_job(job_id).status == JobStatus.PAUSED:
-                await asyncio.sleep(0.2)
-            return self.store.get_job(job_id).status != JobStatus.CANCELLED
+            # Do not wait here. Both ingest runners call _continue while holding
+            # the corpus writer lock. Returning releases the task at its next
+            # checkpoint; resume() starts a fresh task from persisted segments.
+            return False
         return True
 
     async def _fail(
@@ -975,30 +1826,46 @@ class JobService:
         return job
 
     async def resume(self, job_id: str) -> JobSnapshot:
-        job = self.store.get_job(job_id)
-        if job.status not in {JobStatus.PAUSED, JobStatus.PAUSE_REQUESTED, JobStatus.FAILED}:
-            raise ConflictError(f"A job in state {job.status} cannot be resumed")
-        if job.kind == "reindex":
-            checkpoint = self.store.checkpoint_data(job_id, "reindex-generation") or {}
-            generation_id = checkpoint.get("generation_id")
-            latest = self.store.workspace_index_generation(job.workspace_id)
-            if generation_id and latest and latest["generation_id"] != generation_id:
-                raise ConflictError(
-                    "A superseded reindex generation cannot be resumed",
-                    details={
-                        "job_generation_id": generation_id,
-                        "current_generation_id": latest["generation_id"],
-                    },
-                )
-        job = self.store.update_job(job_id, status=JobStatus.RUNNING, error=None)
-        await self.events.emit(
-            "job.resumed",
-            correlation_id=job_id,
-            workspace_id=job.workspace_id,
-            job_id=job_id,
-        )
-        self._spawn(job_id)
-        return job
+        async with self._admission_lock:
+            job = self.store.get_job(job_id)
+            if job.status not in {
+                JobStatus.PAUSED,
+                JobStatus.PAUSE_REQUESTED,
+                JobStatus.FAILED,
+            }:
+                raise ConflictError(f"A job in state {job.status} cannot be resumed")
+            previous = self._tasks.get(job_id)
+            if previous is not None and not previous.done():
+                # PAUSED is written at a checkpoint just before the old runner
+                # unwinds. Wait for that runner so _spawn cannot silently keep
+                # the old task and leave a persisted RUNNING job orphaned.
+                await asyncio.gather(previous, return_exceptions=True)
+                job = self.store.get_job(job_id)
+                if job.status not in {JobStatus.PAUSED, JobStatus.FAILED}:
+                    raise ConflictError(
+                        f"A job in state {job.status} cannot be resumed after unwind"
+                    )
+            if job.kind == "reindex":
+                checkpoint = self.store.checkpoint_data(job_id, "reindex-generation") or {}
+                generation_id = checkpoint.get("generation_id")
+                latest = self.store.workspace_index_generation(job.workspace_id)
+                if generation_id and latest and latest["generation_id"] != generation_id:
+                    raise ConflictError(
+                        "A superseded reindex generation cannot be resumed",
+                        details={
+                            "job_generation_id": generation_id,
+                            "current_generation_id": latest["generation_id"],
+                        },
+                    )
+            job = self.store.update_job(job_id, status=JobStatus.RUNNING, error=None)
+            await self.events.emit(
+                "job.resumed",
+                correlation_id=job_id,
+                workspace_id=job.workspace_id,
+                job_id=job_id,
+            )
+            self._spawn(job_id)
+            return job
 
     async def cancel(self, job_id: str) -> JobSnapshot:
         job = self.store.get_job(job_id)
@@ -1040,12 +1907,19 @@ class JobService:
             return current
 
         job = self.store.update_job(job_id, status=JobStatus.CANCELLED, phase="cancelled")
+        with suppress(ConflictError, OSError):
+            self._cleanup_url_import_directory(job.workspace_id, job.id)
         database = self.workspaces.database_path(job.workspace_id)
         cleanup_failed = False
         for source_index, _source in enumerate(job.payload.get("sources", [])):
-            # A completed source is already published in Store and must never
-            # be deleted merely because a later source was cancelled.
-            if self.store.checkpoint_data(job_id, f"source-result-{source_index}") is not None:
+            # A completed source, or one that crossed the atomic publication
+            # boundary just before interruption, must never be deleted merely
+            # because retirement or a later source was cancelled.
+            if (
+                self.store.checkpoint_data(job_id, f"source-result-{source_index}") is not None
+                or self.store.checkpoint_data(job_id, f"source-published-{source_index}")
+                is not None
+            ):
                 continue
             for segment in reversed(self.store.list_segments(job_id, source_index)):
                 try:

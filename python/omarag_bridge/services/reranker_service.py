@@ -64,6 +64,8 @@ class PersistentCrossEncoder:
             device="cpu",
             revision=self.revision,
             cache_folder=str(self.cache_folder) if self.cache_folder else None,
+            local_files_only=True,
+            trust_remote_code=False,
             max_length=self.max_length,
         )
 
