@@ -16,6 +16,7 @@ ProcessingProfile = Literal[
     "eco",
     "balanced",
 ]
+RetrievalProfile = Literal["auto", "fast", "balanced", "deep"]
 ValidityPolicy = Literal["prefer-current", "strict"]
 DocumentPolicy = Literal["current-only", "all-editions"]
 TextFilter = str | list[str]
@@ -67,6 +68,18 @@ class SourceInput(StrictModel):
     metadata: BookMetadata | None = None
 
 
+class IndexingOptions(StrictModel):
+    """Safe, versioned controls for the public book indexing pipeline.
+
+    Parser thresholds deliberately stay server-owned so a workspace cannot
+    accidentally create an index that is incompatible with its generation.
+    """
+
+    pipeline: Literal["book-v2", "compatible"] = "book-v2"
+    enrichment: Literal["captions", "vlm"] = "captions"
+    llm_fallback: Literal["auto", "off"] = "auto"
+
+
 class IngestRequest(StrictModel):
     sources: list[SourceInput] = Field(min_length=1)
     tags: list[str] = Field(default_factory=list)
@@ -75,6 +88,13 @@ class IngestRequest(StrictModel):
     processing_profile: ProcessingProfile = "default"
     duplicate_policy: Literal["review", "skip", "replace"] = "review"
     validity_policy: ValidityPolicy = "prefer-current"
+    indexing: IndexingOptions = Field(default_factory=IndexingOptions)
+
+
+class SearchOptions(StrictModel):
+    profile: RetrievalProfile = "auto"
+    max_sources: int | None = Field(default=None, ge=1, le=14)
+    deadline_ms: int | None = Field(default=None, ge=3000, le=35000)
 
 
 class SearchRequest(StrictModel):
@@ -82,6 +102,7 @@ class SearchRequest(StrictModel):
     limit: int = Field(default=10, ge=1, le=100)
     filters: SearchFilters = Field(default_factory=SearchFilters)
     document_policy: DocumentPolicy = "current-only"
+    options: SearchOptions = Field(default_factory=SearchOptions)
 
 
 class PreflightImportRequest(StrictModel):
@@ -94,6 +115,7 @@ class CommitImportRequest(StrictModel):
     processing_profile: ProcessingProfile = "default"
     duplicate_policy: Literal["review", "skip", "replace"] = "review"
     validity_policy: ValidityPolicy = "prefer-current"
+    indexing: IndexingOptions = Field(default_factory=IndexingOptions)
 
 
 class PatchBookMetadataRequest(StrictModel):
@@ -112,6 +134,14 @@ class RunEvaluationRequest(StrictModel):
     top_k: int = Field(default=10, ge=3, le=50)
 
 
+class RunOptions(StrictModel):
+    profile: RetrievalProfile = "auto"
+    memory: Literal["auto", "off"] = "auto"
+    max_sources: int | None = Field(default=None, ge=1, le=14)
+    max_answer_tokens: int | None = Field(default=None, ge=64, le=768)
+    deadline_ms: int | None = Field(default=None, ge=3000, le=60000)
+
+
 class RunRequest(StrictModel):
     session_id: str | None = Field(
         default=None,
@@ -125,6 +155,29 @@ class RunRequest(StrictModel):
     evidence_mode: EvidenceMode = EvidenceMode.STRICT
     document_policy: DocumentPolicy = "current-only"
     filters: SearchFilters = Field(default_factory=SearchFilters)
+    options: RunOptions = Field(default_factory=RunOptions)
+
+    @model_validator(mode="after")
+    def deadline_matches_mode(self) -> RunRequest:
+        if (
+            self.mode == "rag"
+            and self.options.deadline_ms is not None
+            and self.options.deadline_ms > 35000
+        ):
+            raise ValueError("rag deadline_ms must not exceed 35000")
+        return self
+
+
+class ReindexPreflightRequest(StrictModel):
+    mode: Literal["full"] = "full"
+    indexing: IndexingOptions = Field(default_factory=IndexingOptions)
+
+
+class ReindexRequest(StrictModel):
+    preflight_id: str = Field(min_length=1)
+    mode: Literal["full"] = "full"
+    confirm: Literal["REINDEX"]
+    indexing: IndexingOptions = Field(default_factory=IndexingOptions)
 
 
 class ErrorBody(StrictModel):
@@ -197,7 +250,7 @@ class ModelDefaultsRequest(StrictModel):
     vl: str = Field(min_length=1)
     embedding: str = Field(min_length=1)
     rerank: str = Field(min_length=1)
-    embedding_provider: Literal["ollama", "sentence-transformers"] = "ollama"
+    embedding_provider: Literal["ollama"] = "ollama"
     rerank_provider: Literal["cross-encoder", "vllm"] = "cross-encoder"
     vector_dim: int = Field(default=1024, ge=64, le=8192)
 

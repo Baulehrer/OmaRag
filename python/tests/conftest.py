@@ -221,6 +221,8 @@ def app(tmp_path: Path) -> FastAPI:
     result.state.services.adapter = adapter
     result.state.services.jobs.adapter = adapter
     result.state.services.runs.adapter = adapter
+    result.state.services.runs.query.adapter = adapter
+    result.state.services.search.adapter = adapter
     result.state.services.features.adapter = adapter
     result.state.services.textbooks.adapter = adapter
     result.state.services.evaluations.adapter = adapter

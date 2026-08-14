@@ -46,3 +46,37 @@ class UpstreamUnavailableError(OmaRagError):
     status_code = 503
     code = "UPSTREAM_UNAVAILABLE"
     retryable = True
+
+
+class IndexRebuildInProgressError(OmaRagError):
+    status_code = 503
+    code = "INDEX_REBUILD_IN_PROGRESS"
+    retryable = True
+
+
+class IndexNotReadyError(OmaRagError):
+    status_code = 503
+    code = "INDEX_NOT_READY"
+    retryable = True
+
+
+class IndexModelMismatchError(ConflictError):
+    code = "INDEX_MODEL_MISMATCH"
+
+
+class QueryNotReadyError(OmaRagError):
+    status_code = 503
+    code = "QUERY_NOT_READY"
+    retryable = True
+
+
+class QueryBusyError(OmaRagError):
+    status_code = 429
+    code = "QUERY_BUSY"
+    retryable = True
+
+
+class QueryDeadlineExceededError(OmaRagError):
+    status_code = 504
+    code = "QUERY_DEADLINE_EXCEEDED"
+    retryable = True

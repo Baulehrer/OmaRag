@@ -67,7 +67,7 @@ class WorkspaceFeatureService:
         }
         documents: list[DocumentSummary] = []
         for job in self.store.list_jobs(workspace_id):
-            if job.kind != "ingest" or job.status != JobStatus.COMPLETED:
+            if job.kind not in {"ingest", "reindex"} or job.status != JobStatus.COMPLETED:
                 continue
             sources = job.payload.get("sources", [])
             results = (job.result or {}).get("documents", [])
@@ -108,6 +108,16 @@ class WorkspaceFeatureService:
                             record.get("pipeline_version")
                             or current_result.get("pipeline_version", "textbook-v1")
                         ),
+                        structure_mode=str(
+                            (quality_payload or {}).get("structure_mode", "unknown")
+                        ),
+                        structure_confidence=float(
+                            (quality_payload or {}).get("structure_confidence", 0.0)
+                        ),
+                        toc_found=bool((quality_payload or {}).get("toc_found", False)),
+                        index_found=bool((quality_payload or {}).get("index_found", False)),
+                        glossary_found=bool((quality_payload or {}).get("glossary_found", False)),
+                        fallback_used=bool((quality_payload or {}).get("fallback_used", False)),
                         size_bytes=int(current_result.get("size_bytes") or 0),
                         archive_mode=str(current_result.get("archive_mode") or "unknown"),
                     )
@@ -314,6 +324,24 @@ class WorkspaceFeatureService:
         if if_match is not None and if_match.strip('"') != current.etag:
             raise EtagConflictError("Konfiguration wurde zwischenzeitlich geaendert")
         self.adapter.validate_config(content)
+        if self.store.book_records(workspace_id):
+            yaml = self._round_trip_yaml()
+            before = yaml.load(current.content) or {}
+            after = yaml.load(content) or {}
+
+            def embedding_identity(data: dict[str, object]) -> tuple[str, str, int]:
+                model = (data.get("embeddings") or {}).get("model") or {}  # type: ignore[union-attr]
+                return (
+                    str(model.get("provider") or ""),
+                    str(model.get("name") or ""),
+                    int(model.get("vector_dim") or 0),
+                )
+
+            if embedding_identity(before) != embedding_identity(after):
+                raise ConflictError(
+                    "Embedding provider, model, and dimension are pinned to the current index; "
+                    "use the full rebuild workflow"
+                )
         path = Path(manifest.path) / "haiku.rag.yaml"
         backup = path.with_suffix(".yaml.bak")
         temporary = path.with_suffix(".yaml.tmp")

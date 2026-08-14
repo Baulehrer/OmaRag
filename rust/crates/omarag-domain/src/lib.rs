@@ -35,6 +35,14 @@ pub struct CapabilitySet {
     pub event_replay: bool,
     #[serde(default)]
     pub workspaces: bool,
+    #[serde(default)]
+    pub book_index_v2: bool,
+    #[serde(default)]
+    pub adaptive_retrieval: bool,
+    #[serde(default)]
+    pub claim_streaming: bool,
+    #[serde(default)]
+    pub knowledge_snapshots: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +194,24 @@ pub struct DocumentQuality {
     #[serde(default)]
     pub provenance_coverage: f64,
     #[serde(default)]
+    pub substantive_coverage: f64,
+    #[serde(default = "default_unknown")]
+    pub structure_mode: String,
+    #[serde(default)]
+    pub structure_confidence: f64,
+    #[serde(default)]
+    pub toc_found: bool,
+    #[serde(default)]
+    pub index_found: bool,
+    #[serde(default)]
+    pub glossary_found: bool,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub llm_fallback_used: bool,
+    #[serde(default)]
+    pub exact_duplicate_count: u32,
+    #[serde(default)]
     pub issues: Vec<String>,
 }
 
@@ -222,6 +248,18 @@ pub struct DocumentSummary {
     pub quality: Option<DocumentQuality>,
     #[serde(default = "default_pipeline_version")]
     pub pipeline_version: String,
+    #[serde(default = "default_unknown")]
+    pub structure_mode: String,
+    #[serde(default)]
+    pub structure_confidence: f64,
+    #[serde(default)]
+    pub toc_found: bool,
+    #[serde(default)]
+    pub index_found: bool,
+    #[serde(default)]
+    pub glossary_found: bool,
+    #[serde(default)]
+    pub fallback_used: bool,
     #[serde(default)]
     pub size_bytes: u64,
     #[serde(default = "default_archive_mode")]
@@ -238,6 +276,10 @@ fn default_docling_parser() -> String {
 
 fn default_pipeline_version() -> String {
     "textbook-v1".into()
+}
+
+fn default_unknown() -> String {
+    "unknown".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +399,28 @@ pub struct SearchRequest {
     pub filters: BTreeMap<String, Value>,
     #[serde(default = "default_document_policy")]
     pub document_policy: String,
+    #[serde(default)]
+    pub options: SearchOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchOptions {
+    #[serde(default = "default_auto")]
+    pub profile: String,
+    #[serde(default)]
+    pub max_sources: Option<u32>,
+    #[serde(default)]
+    pub deadline_ms: Option<u32>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            profile: default_auto(),
+            max_sources: None,
+            deadline_ms: None,
+        }
+    }
 }
 
 const fn default_search_limit() -> u32 {
@@ -370,6 +434,7 @@ impl SearchRequest {
             limit: default_search_limit(),
             filters: BTreeMap::new(),
             document_policy: default_document_policy(),
+            options: SearchOptions::default(),
         }
     }
 }
@@ -401,6 +466,12 @@ fn default_document_policy() -> String {
 pub struct RetrievalTiming {
     pub search_ms: f64,
     pub total_ms: f64,
+    #[serde(default)]
+    pub routing_ms: f64,
+    #[serde(default)]
+    pub rerank_ms: f64,
+    #[serde(default)]
+    pub pack_ms: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -426,6 +497,38 @@ pub struct RunRequest {
     pub document_policy: String,
     #[serde(default)]
     pub filters: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub options: RunOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunOptions {
+    #[serde(default = "default_auto")]
+    pub profile: String,
+    #[serde(default = "default_auto")]
+    pub memory: String,
+    #[serde(default)]
+    pub max_sources: Option<u32>,
+    #[serde(default)]
+    pub max_answer_tokens: Option<u32>,
+    #[serde(default)]
+    pub deadline_ms: Option<u32>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            profile: default_auto(),
+            memory: default_auto(),
+            max_sources: None,
+            max_answer_tokens: None,
+            deadline_ms: None,
+        }
+    }
+}
+
+fn default_auto() -> String {
+    "auto".into()
 }
 
 impl RunRequest {
@@ -438,6 +541,7 @@ impl RunRequest {
             evidence_mode,
             document_policy: "current-only".into(),
             filters: BTreeMap::new(),
+            options: RunOptions::default(),
         }
     }
 
@@ -462,6 +566,8 @@ pub struct CitationAnchor {
 pub struct Citation {
     #[serde(default)]
     pub evidence_id: Option<String>,
+    #[serde(default)]
+    pub prompt_evidence_id: Option<String>,
     pub chunk_id: String,
     #[serde(default)]
     pub chunk_ids: Vec<String>,
@@ -486,8 +592,20 @@ pub struct Citation {
     #[serde(default)]
     pub context_anchors: Vec<CitationAnchor>,
     pub excerpt: String,
+    #[serde(default)]
+    pub excerpt_char_start: Option<u32>,
+    #[serde(default)]
+    pub excerpt_char_end: Option<u32>,
+    #[serde(default)]
+    pub chunk_content_hash: Option<String>,
     pub retrieval_rank: Option<u32>,
     pub rerank_score: Option<f64>,
+    #[serde(default)]
+    pub claim_ids: Vec<String>,
+    #[serde(default)]
+    pub retrieval_paths: Vec<String>,
+    #[serde(default)]
+    pub relevance_score: Option<f64>,
     #[serde(default)]
     pub book: Option<BookMetadata>,
     #[serde(default = "default_verification_status")]
@@ -514,6 +632,26 @@ pub enum SourceCheck {
     Insufficient,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimStatus {
+    Supported,
+    Insufficient,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerClaim {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub facet_id: Option<String>,
+    pub status: ClaimStatus,
+    #[serde(default)]
+    pub alignment_score: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunReceipt {
     pub session_id: String,
@@ -530,6 +668,42 @@ pub struct RunReceipt {
     pub retrieval_mode: String,
     #[serde(default = "default_rerank_status")]
     pub rerank_status: String,
+    #[serde(default = "default_standard")]
+    pub complexity: String,
+    #[serde(default = "default_retrieval_mode")]
+    pub route: String,
+    #[serde(default)]
+    pub facets: Vec<String>,
+    #[serde(default)]
+    pub budgets: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub candidate_count: u32,
+    #[serde(default)]
+    pub selected_count: u32,
+    #[serde(default = "default_legacy")]
+    pub cut_reason: String,
+    #[serde(default)]
+    pub facet_coverage: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+    #[serde(default)]
+    pub model_digests: BTreeMap<String, String>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    #[serde(default)]
+    pub output_tokens: Option<u32>,
+    #[serde(default)]
+    pub tokens_per_second: Option<f64>,
+    #[serde(default)]
+    pub time_to_first_token_ms: Option<f64>,
+    #[serde(default = "default_none")]
+    pub singleflight_status: String,
+    #[serde(default = "default_none")]
+    pub abstention: String,
+    #[serde(default)]
+    pub rejected_claims: u32,
+    #[serde(default = "default_stop")]
+    pub done_reason: String,
 }
 
 fn default_retrieval_mode() -> String {
@@ -538,6 +712,22 @@ fn default_retrieval_mode() -> String {
 
 fn default_rerank_status() -> String {
     "unknown".into()
+}
+
+fn default_standard() -> String {
+    "standard".into()
+}
+
+fn default_legacy() -> String {
+    "legacy".into()
+}
+
+fn default_none() -> String {
+    "none".into()
+}
+
+fn default_stop() -> String {
+    "stop".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -550,6 +740,8 @@ pub struct RunSnapshot {
     pub question: String,
     pub evidence_mode: EvidenceMode,
     pub answer: String,
+    #[serde(default)]
+    pub claims: Vec<AnswerClaim>,
     #[serde(default)]
     pub citations: Vec<Citation>,
     #[serde(default)]
@@ -646,6 +838,8 @@ pub struct CommitImportRequest {
     pub processing_profile: String,
     pub duplicate_policy: String,
     pub validity_policy: String,
+    #[serde(default)]
+    pub indexing: IndexingOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -660,6 +854,36 @@ pub struct IngestRequest {
     pub processing_profile: String,
     pub duplicate_policy: String,
     pub validity_policy: String,
+    #[serde(default)]
+    pub indexing: IndexingOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexingOptions {
+    #[serde(default = "default_book_v2")]
+    pub pipeline: String,
+    #[serde(default = "default_captions")]
+    pub enrichment: String,
+    #[serde(default = "default_auto")]
+    pub llm_fallback: String,
+}
+
+impl Default for IndexingOptions {
+    fn default() -> Self {
+        Self {
+            pipeline: default_book_v2(),
+            enrichment: default_captions(),
+            llm_fallback: default_auto(),
+        }
+    }
+}
+
+fn default_book_v2() -> String {
+    "book-v2".into()
+}
+
+fn default_captions() -> String {
+    "captions".into()
 }
 
 fn default_parser_id() -> String {
@@ -689,8 +913,70 @@ impl IngestRequest {
             processing_profile: "default".into(),
             duplicate_policy: "review".into(),
             validity_policy: "prefer-current".into(),
+            indexing: IndexingOptions::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReindexPreflightRequest {
+    #[serde(default = "default_full")]
+    pub mode: String,
+    #[serde(default)]
+    pub indexing: IndexingOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReindexPreflight {
+    pub id: String,
+    pub workspace_id: WorkspaceId,
+    pub mode: String,
+    pub ready: bool,
+    #[serde(default)]
+    pub documents: u32,
+    #[serde(default)]
+    pub estimated_source_bytes: u64,
+    #[serde(default)]
+    pub available_bytes: u64,
+    #[serde(default)]
+    pub checks: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReindexRequest {
+    pub preflight_id: String,
+    #[serde(default = "default_full")]
+    pub mode: String,
+    pub confirm: String,
+    #[serde(default)]
+    pub indexing: IndexingOptions,
+}
+
+fn default_full() -> String {
+    "full".into()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueryReadiness {
+    pub workspace_id: WorkspaceId,
+    pub index_ready: bool,
+    pub query_ready: bool,
+    pub latency_status: String,
+    #[serde(default = "default_required_loaded_models")]
+    pub required_loaded_models: u32,
+    #[serde(default)]
+    pub loaded_models: Vec<Value>,
+    #[serde(default)]
+    pub model_digests: BTreeMap<String, String>,
+    #[serde(default)]
+    pub checks: BTreeMap<String, Value>,
+}
+
+const fn default_required_loaded_models() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

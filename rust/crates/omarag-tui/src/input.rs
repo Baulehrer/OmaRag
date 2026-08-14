@@ -4364,6 +4364,7 @@ mod tests {
     fn citation(path: &str, pages: &[u32]) -> Citation {
         Citation {
             evidence_id: Some("E1".into()),
+            prompt_evidence_id: Some("E1".into()),
             chunk_id: "chunk-1".into(),
             chunk_ids: Vec::new(),
             document_id: None,
@@ -4378,8 +4379,14 @@ mod tests {
             primary_anchors: Vec::new(),
             context_anchors: Vec::new(),
             excerpt: "Source excerpt".into(),
+            excerpt_char_start: None,
+            excerpt_char_end: None,
+            chunk_content_hash: None,
             retrieval_rank: None,
             rerank_score: None,
+            claim_ids: Vec::new(),
+            retrieval_paths: Vec::new(),
+            relevance_score: None,
             book: None,
             verification_status: "verified".into(),
         }

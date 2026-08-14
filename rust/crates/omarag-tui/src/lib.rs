@@ -3049,7 +3049,10 @@ fn inspector_lines(
                         format!(
                             "{}{} ",
                             if selected { "│" } else { " " },
-                            citation.evidence_id.as_deref().unwrap_or("E?")
+                            preferred_evidence_label(
+                                citation.prompt_evidence_id.as_deref(),
+                                citation.evidence_id.as_deref(),
+                            )
                         ),
                         Style::default().fg(if selected { theme.focus } else { theme.yellow }),
                     ),
@@ -3399,6 +3402,13 @@ fn inspector_lines(
             lines
         }
     }
+}
+
+fn preferred_evidence_label<'a>(
+    prompt_evidence_id: Option<&'a str>,
+    stable_evidence_id: Option<&'a str>,
+) -> &'a str {
+    prompt_evidence_id.or(stable_evidence_id).unwrap_or("E?")
 }
 
 fn receipt_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
@@ -6430,6 +6440,19 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn citation_label_prefers_prompt_id_over_stable_join_id() {
+        assert_eq!(
+            preferred_evidence_label(Some("E2"), Some("ev-stable-42")),
+            "E2"
+        );
+        assert_eq!(
+            preferred_evidence_label(None, Some("ev-stable-42")),
+            "ev-stable-42"
+        );
+        assert_eq!(preferred_evidence_label(None, None), "E?");
     }
 
     #[test]

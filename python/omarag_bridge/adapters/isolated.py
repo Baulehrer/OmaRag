@@ -24,7 +24,16 @@ from ..models.errors import OmaRagError
 from ..runtime import configure_process_environment, release_native_memory
 from .base import HaikuAdapter
 
-_QUERY_OPERATIONS = {"warm", "search", "ask", "analyze", "citation_details"}
+_QUERY_OPERATIONS = {
+    "warm",
+    "search",
+    "get_chunk",
+    "get_chunks",
+    "rerank",
+    "ask",
+    "analyze",
+    "citation_details",
+}
 _CALLBACK_NAMES = {"segment_guard", "before_segment", "on_segment", "on_phase", "segment_sizer"}
 
 
@@ -406,12 +415,17 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         self.version = _haiku_version()
         self._available = self.version is not None
         supports_images = self._available and _version_pair(self.version) >= (0, 72)
+        supports_v2 = self._available and _version_pair(self.version) == (0, 74)
         self.capabilities = CapabilitySet(
-            streaming_chat=False,
+            streaming_chat=supports_v2,
             question_images=supports_images,
             analysis_images=supports_images,
             visual_grounding=supports_images,
             evaluation=True,
+            book_index_v2=supports_v2,
+            adaptive_retrieval=supports_v2,
+            claim_streaming=supports_v2,
+            knowledge_snapshots=supports_v2,
         )
         self.import_limits = import_limits
         self.query_limits = query_limits
@@ -717,6 +731,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
+        indexing_options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return await self._call(
             "ingest",
@@ -734,6 +749,8 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             segment_sizer=segment_sizer,
             metadata=metadata,
             original_source=original_source,
+            indexing_options=indexing_options,
+            llm_url=self.ollama_url,
         )
 
     async def delete_document(self, database: Path, document_id: str) -> bool:
@@ -747,6 +764,7 @@ class IsolatedHaikuAdapter(HaikuAdapter):
         *,
         document_filter: str | None = None,
         search_type: str = "hybrid",
+        rerank: bool = True,
     ) -> list[SearchHit]:
         return await self._call(
             "search",
@@ -755,7 +773,19 @@ class IsolatedHaikuAdapter(HaikuAdapter):
             limit,
             document_filter=document_filter,
             search_type=search_type,
+            rerank=rerank,
         )
+
+    async def get_chunk(self, database: Path, chunk_id: str) -> SearchHit | None:
+        return await self._call("get_chunk", database, chunk_id)
+
+    async def get_chunks(self, database: Path, chunk_ids: list[str]) -> list[SearchHit]:
+        return list(await self._call("get_chunks", database, chunk_ids))
+
+    async def rerank(
+        self, database: Path, question: str, candidates: list[SearchHit]
+    ) -> list[float]:
+        return [float(item) for item in await self._call("rerank", database, question, candidates)]
 
     async def ask(
         self,

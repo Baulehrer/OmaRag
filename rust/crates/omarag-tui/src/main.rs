@@ -1060,6 +1060,7 @@ fn spawn_command(
                                 processing_profile: request.processing_profile,
                                 duplicate_policy: request.duplicate_policy,
                                 validity_policy: request.validity_policy,
+                                indexing: request.indexing,
                             },
                             Uuid::new_v4().to_string(),
                         )

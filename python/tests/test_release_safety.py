@@ -48,6 +48,8 @@ def test_workspace_uses_configured_ollama_endpoint(tmp_path: Path) -> None:
     store.close()
 
     assert "base_url: http://host.docker.internal:11434" in config
+    assert "max_tokens:" in config
+    assert "reasoning_effort: none" in config
 
 
 def test_physical_delete_restores_directory_when_store_fails(

@@ -23,11 +23,10 @@ dependencies = [
 
 [project.optional-dependencies]
 haiku = [
-  # Deliberately no upper bound: the installer stages the newest stable
-  # vanilla release and activates it only after the public-API contract probe.
-  # Install only the providers Oracle uses; the full meta-package also pulls
-  # cloud providers and another TUI into the local daemon environment.
-  "haiku-rag-slim[docling,cross-encoder]>=0.72",
+  # Book-v2 relies on a jointly verified Haiku/Docling public-API pair. Upgrade
+  # both pins only after compat_probe and the PDF adapter contracts pass.
+  "haiku-rag-slim[docling,cross-encoder]==0.74.0",
+  "docling==2.119.0",
   # Direct entries keep uv's explicit CPU index authoritative for transitives.
   "torch",
   "torchvision",

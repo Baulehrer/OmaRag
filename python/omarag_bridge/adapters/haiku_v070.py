@@ -4,24 +4,18 @@ import asyncio
 import copy
 import hashlib
 import inspect
-import io
-import json
-import os
 import re
-import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from importlib import metadata
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from ..models.domain import (
     BookMetadata,
     CapabilitySet,
     Citation,
     CitationAnchor,
-    DocumentQuality,
     EvidenceMode,
     SearchHit,
 )
@@ -52,6 +46,14 @@ def _int_list(value: Any) -> list[int]:
     if isinstance(value, int):
         return [value]
     return [int(item) for item in value if item is not None]
+
+
+def _absolute_pages(pages: Any, document_meta: dict[str, Any]) -> list[int]:
+    values = _int_list(pages)
+    if document_meta.get("page_number_mode") == "absolute" or document_meta.get("pages_absolute"):
+        return values
+    offset = int(document_meta.get("page_offset", 0) or 0)
+    return [page + offset for page in values]
 
 
 def _enum_value(value: Any) -> str | None:
@@ -127,129 +129,6 @@ def _anchors_for_refs(
                 )
             )
     return anchors
-
-
-def _looks_like_memory_pressure(exc: BaseException) -> bool:
-    if isinstance(exc, MemoryError):
-        return True
-    message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in ("out of memory", "cannot allocate memory", "oom", "memoryerror")
-    )
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while block := source.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _pdf_info(path: Path) -> tuple[int, list[bool]]:
-    """Return page count and a cheap per-page text-vs-scan classification."""
-    import pypdfium2 as pdfium
-
-    document = pdfium.PdfDocument(str(path))
-    try:
-        total = len(document)
-        scanned_pages: list[bool] = []
-        for index in range(total):
-            page = document[index]
-            try:
-                text_page = page.get_textpage()
-                try:
-                    text = text_page.get_text_range()
-                finally:
-                    text_page.close()
-            finally:
-                page.close()
-            scanned_pages.append(len(text.strip()) < 80)
-        return total, scanned_pages
-    finally:
-        document.close()
-
-
-def _cached_pdf_info(path: Path, profile_path: Path) -> tuple[int, list[bool]]:
-    try:
-        payload = json.loads(profile_path.read_text(encoding="utf-8"))
-        scanned_pages = payload["scanned_pages"]
-        if payload.get("version") == 1 and isinstance(scanned_pages, list):
-            os.utime(profile_path, None)
-            return len(scanned_pages), [bool(value) for value in scanned_pages]
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    result = _pdf_info(path)
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = profile_path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps({"version": 1, "scanned_pages": result[1]}, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    temporary.replace(profile_path)
-    return result
-
-
-def _pdf_slice(path: Path, start: int, end: int) -> bytes:
-    """Extract zero-based ``[start, end)`` pages into a standalone PDF."""
-    import pypdfium2 as pdfium
-
-    source = pdfium.PdfDocument(str(path))
-    target = pdfium.PdfDocument.new()
-    try:
-        target.import_pages(source, list(range(start, end)))
-        output = io.BytesIO()
-        target.save(output)
-        return output.getvalue()
-    finally:
-        target.close()
-        source.close()
-
-
-def _cache_file(database: Path, cache_key: str) -> Path:
-    return database.parent / ".oracle-cache" / "docling" / f"{cache_key}.json"
-
-
-def _load_cached_docling(path: Path) -> Any | None:
-    if not path.exists():
-        return None
-    try:
-        from docling_core.types.doc import DoclingDocument
-
-        document = DoclingDocument.model_validate(json.loads(path.read_text(encoding="utf-8")))
-        os.utime(path, None)
-        return document
-    except Exception:
-        path.unlink(missing_ok=True)
-        return None
-
-
-def _store_cached_docling(path: Path, document: Any) -> None:
-    if not hasattr(document, "export_to_dict"):
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(document.export_to_dict(), ensure_ascii=False, separators=(",", ":"))
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False
-    ) as temporary:
-        temporary.write(payload)
-        temporary_path = Path(temporary.name)
-    temporary_path.replace(path)
-
-
-def _prune_cache(cache_dir: Path, limit_bytes: int = 5 * 1024**3) -> None:
-    files = sorted(
-        (path for path in cache_dir.glob("*.json") if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    total = 0
-    for path in files:
-        size = path.stat().st_size
-        total += size
-        if total > limit_bytes:
-            path.unlink(missing_ok=True)
 
 
 def _deduplicate_citations(citations: list[Citation]) -> list[Citation]:
@@ -333,43 +212,13 @@ def _book_payload(metadata: BookMetadata | None) -> dict[str, Any]:
     }
 
 
-def _chunk_manifest(chunk: Any, *, page_offset: int, segment_index: int) -> dict[str, Any]:
-    metadata = dict(_value(chunk, "metadata", default={}) or {})
-    content = str(_value(chunk, "content", default=""))
-    pages = [page + page_offset for page in _int_list(metadata.get("page_numbers"))]
-    return {
-        "chunk_id": str(_value(chunk, "id", default="") or ""),
-        "segment_index": segment_index,
-        "chunk_order": int(_value(chunk, "order", default=0) or 0),
-        "content_hash": hashlib.sha256(content.encode()).hexdigest(),
-        "pages": pages,
-        "headings": _string_list(metadata.get("headings")),
-        "labels": _string_list(metadata.get("labels")),
-        "doc_item_refs": _string_list(metadata.get("doc_item_refs")),
-    }
-
-
-def _content_chunks(chunks: list[Any]) -> list[Any]:
-    excluded = {"page_header", "page_footer"}
-    retained: list[Any] = []
-    for chunk in chunks:
-        labels = {
-            value
-            for item in _string_list((_value(chunk, "metadata", default={}) or {}).get("labels"))
-            if (value := item.casefold().replace("-", "_").replace(" ", "_"))
-        }
-        if labels and labels <= excluded:
-            continue
-        retained.append(chunk)
-    return retained
-
-
 class VanillaHaikuAdapter(HaikuAdapter):
     """Compatibility boundary around Haiku RAG's documented public API."""
 
     name = "haiku-vanilla"
 
     def __init__(self) -> None:
+        self._persistent_reranker: Any | None = None
         self.version = None
         for distribution in ("haiku-rag", "haiku-rag-slim"):
             try:
@@ -389,9 +238,7 @@ class VanillaHaikuAdapter(HaikuAdapter):
         )
         supports_images = self._available and version_pair >= (0, 72)
         self.capabilities = CapabilitySet(
-            # OmaRag normalizes a completed public Haiku answer into deltas;
-            # it does not expose Haiku/Pydantic-AI internal streaming events.
-            streaming_chat=False,
+            streaming_chat=True,
             question_images=supports_images,
             analysis_images=supports_images,
             multimodal_search=False,
@@ -400,6 +247,10 @@ class VanillaHaikuAdapter(HaikuAdapter):
             database_tags=False,
             native_ingester=False,
             evaluation=True,
+            book_index_v2=True,
+            adaptive_retrieval=True,
+            claim_streaming=True,
+            knowledge_snapshots=True,
         )
 
     @property
@@ -451,6 +302,18 @@ class VanillaHaikuAdapter(HaikuAdapter):
         existing = str(config.prompts.domain_preamble or "").strip()
         config.prompts.domain_preamble = "\n\n".join(item for item in (existing, preamble) if item)
         config.qa.model.temperature = 0.1 if evidence_mode is EvidenceMode.STRICT else 0.2
+        # Pydantic-AI cannot infer a useful output budget for local Ollama
+        # models.  In particular, Qwen 3.5 may otherwise spend the provider
+        # default entirely on hidden reasoning and return no answer text.
+        if config.qa.model.max_tokens is None:
+            config.qa.model.max_tokens = 1024
+        if config.qa.model.provider == "ollama" and config.qa.model.enable_thinking is False:
+            extra_body = dict(config.qa.model.extra_body or {})
+            # Ollama's OpenAI-compatible endpoint maps this field to its native
+            # ``think: false`` behavior.  Haiku's generic enable_thinking flag
+            # is intentionally not mapped on this provider path.
+            extra_body["reasoning_effort"] = "none"
+            config.qa.model.extra_body = extra_body
         return config
 
     def _ask_supports_images(self) -> bool:
@@ -511,6 +374,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
+        indexing_options: dict[str, Any] | None = None,
+        llm_url: str | None = None,
     ) -> dict[str, Any]:
         if parser_id not in {"auto", "docling"}:
             raise ConflictError(f"Parser {parser_id} is not supported")
@@ -531,6 +396,8 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 segment_sizer=segment_sizer,
                 metadata=metadata,
                 original_source=original_source,
+                indexing_options=indexing_options,
+                llm_url=llm_url,
             )
         guard = segment_guard or _unguarded
         async with guard(), self._client(database) as rag:
@@ -564,337 +431,31 @@ class VanillaHaikuAdapter(HaikuAdapter):
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
+        indexing_options: dict[str, Any] | None = None,
+        llm_url: str | None = None,
     ) -> dict[str, Any]:
-        book_metadata = metadata
-        document_fingerprint = document_fingerprint or await asyncio.to_thread(_file_sha256, source)
-        total_pages, scanned_pages = await asyncio.to_thread(
-            _cached_pdf_info,
-            source,
-            _cache_file(database, f"profile-{document_fingerprint}"),
+        from .book_v2 import ingest_pdf_book_v2
+
+        return await ingest_pdf_book_v2(
+            database=database,
+            source=source,
+            config=self._config(database),
+            client_factory=self._client,
+            haiku_version=self.version,
+            processing_profile=processing_profile,
+            segment_guard=segment_guard,
+            before_segment=before_segment,
+            generation_id=generation_id,
+            document_fingerprint=document_fingerprint,
+            resume_segments=resume_segments,
+            on_segment=on_segment,
+            on_phase=on_phase,
+            segment_sizer=segment_sizer,
+            metadata=metadata,
+            original_source=original_source,
+            indexing_options=indexing_options,
+            llm_url=llm_url,
         )
-        if on_phase is not None:
-            await on_phase("profiling", 0, 0, total_pages)
-        if isinstance(scanned_pages, bool):
-            scanned_pages = [scanned_pages] * total_pages
-        if total_pages == 0:
-            raise ConflictError(f"PDF {source.name} contains no pages")
-        logical_id = f"book-{document_fingerprint[:20]}"
-        generation_id = generation_id or f"gen-{uuid4().hex[:16]}"
-        source_uri = source.as_uri()
-        segment_sizes = {
-            "eco": (12, 5),
-            "low-memory": (10, 4),
-            "default": (25, 10),
-            "technical": (25, 10),
-            "balanced": (25, 10),
-            "quality": (16, 6),
-            "image-heavy": (8, 3),
-            "fast": (40, 15),
-        }
-        text_size, scan_size = segment_sizes.get(processing_profile, segment_sizes["default"])
-        guard = segment_guard or _unguarded
-        resume_segments = sorted(resume_segments or [], key=lambda item: item["segment_index"])
-        # Resume positions must be derived from segments that still exist in Haiku.
-        # A persisted checkpoint can outlive its imported document after cleanup.
-        start = 0
-        segment_index = 0
-        imported_ids = [str(item["document_id"]) for item in resume_segments]
-        segments = [dict(item) for item in resume_segments]
-        cache_hits = sum(bool(item.get("metadata", {}).get("cache_hit")) for item in segments)
-        converted_segments = 0
-        manifest_chunks: list[dict[str, Any]] = []
-        quality_counts = {"chunks": 0, "tables": 0, "formulas": 0, "pictures": 0, "refs": 0}
-        base_config = self._config(database)
-        async with self._client(database) as rag:
-            listed_documents = await rag.list_documents()
-        current_ids = {str(document.id) for document in listed_documents if document.id}
-        imported_ids = [document_id for document_id in imported_ids if document_id in current_ids]
-        segments = [item for item in segments if str(item["document_id"]) in current_ids]
-        for segment in segments:
-            for item in segment.get("metadata", {}).get("chunk_manifest", []):
-                labels = {label.casefold() for label in item.get("labels", [])}
-                quality_counts["chunks"] += 1
-                quality_counts["tables"] += bool(labels & {"table", "table_item"})
-                quality_counts["formulas"] += bool(labels & {"formula", "equation"})
-                quality_counts["pictures"] += bool(labels & {"picture", "figure", "image"})
-                quality_counts["refs"] += bool(item.get("doc_item_refs"))
-                manifest_chunks.append(item)
-        generation_documents = [
-            document
-            for document in listed_documents
-            if document.id
-            and (_value(document, "metadata", default={}) or {}).get("generation_id")
-            == generation_id
-        ]
-        known_ids = set(imported_ids)
-        for document in generation_documents:
-            document_id = str(document.id)
-            if document_id in known_ids:
-                continue
-            metadata_value = _value(document, "metadata", default={}) or {}
-            recovered = {
-                "document_id": document_id,
-                "segment_index": int(metadata_value.get("segment_index", len(segments))),
-                "page_start": int(metadata_value.get("page_start", 1)),
-                "page_end": int(metadata_value.get("page_end", 1)),
-                "fingerprint": document_fingerprint,
-                "generation_id": generation_id,
-                "status": "committed",
-                "metadata": {
-                    "recovered": True,
-                    "cache_hit": True,
-                    "page_kind": metadata_value.get("page_kind"),
-                },
-            }
-            segments.append(recovered)
-            imported_ids.append(document_id)
-            known_ids.add(document_id)
-            if on_segment is not None:
-                await on_segment(recovered)
-        segments.sort(key=lambda item: item["segment_index"])
-        if segments:
-            last_page = int(segments[-1]["page_end"])
-            last_kind = segments[-1].get("metadata", {}).get("page_kind")
-            next_kind = (
-                "scanned" if last_page < total_pages and scanned_pages[last_page] else "text"
-            )
-            start = (
-                total_pages
-                if last_page >= total_pages
-                else last_page
-                if last_kind and last_kind != next_kind
-                else max(0, last_page - 1)
-            )
-            segment_index = int(segments[-1]["segment_index"]) + 1
-        old_document_ids = [
-            str(document.id)
-            for document in listed_documents
-            if document.id
-            and (_value(document, "metadata", default={}) or {}).get("logical_document_id")
-            == logical_id
-            and (_value(document, "metadata", default={}) or {}).get("generation_id")
-            != generation_id
-        ]
-        while start < total_pages:
-            scanned = scanned_pages[start]
-            segment_size = scan_size if scanned else text_size
-            if segment_sizer is not None:
-                segment_size = max(1, segment_sizer(segment_size, scanned))
-            end = min(start + segment_size, total_pages)
-            kind_boundary = False
-            # Keep OCR and native-text pages in separate conversions.
-            for boundary in range(start + 1, end):
-                if scanned_pages[boundary] != scanned:
-                    end = boundary
-                    kind_boundary = True
-                    break
-            if before_segment is not None and not await before_segment(start, end, total_pages):
-                raise asyncio.CancelledError
-            try:
-                async with guard():
-                    if on_phase is not None:
-                        await on_phase("converting", start + 1, end, total_pages)
-                    pdf_bytes = await asyncio.to_thread(_pdf_slice, source, start, end)
-                    with tempfile.NamedTemporaryFile(
-                        mode="wb", suffix=".pdf", delete=False
-                    ) as temporary:
-                        temporary.write(pdf_bytes)
-                        temporary_path = Path(temporary.name)
-                    try:
-                        config = copy.deepcopy(base_config)
-                        options = config.processing.conversion_options
-                        # A page can contain plenty of native text and still keep
-                        # its most important table or formula as a bitmap.  The
-                        # page classifier only decides segmentation; it must not
-                        # silently disable the OCR policy selected by the user.
-                        options.do_ocr = bool(options.do_ocr) or scanned
-                        options.force_ocr = bool(options.force_ocr)
-                        if processing_profile in {"eco", "low-memory", "fast"}:
-                            # These opt-in profiles trade table reconstruction
-                            # detail for a lower Docling peak. Technical and
-                            # quality profiles retain accurate table handling.
-                            options.table_mode = "fast"
-                            options.table_cell_matching = False
-                            options.images_scale = min(float(options.images_scale), 1.0)
-                        conversion_signature = {
-                            "do_ocr": bool(options.do_ocr),
-                            "force_ocr": bool(options.force_ocr),
-                            "ocr_engine": str(getattr(options, "ocr_engine", "")),
-                            "ocr_lang": list(getattr(options, "ocr_lang", []) or []),
-                            "do_table_structure": bool(
-                                getattr(options, "do_table_structure", False)
-                            ),
-                            "table_mode": str(getattr(options, "table_mode", "")),
-                            "table_cell_matching": bool(
-                                getattr(options, "table_cell_matching", False)
-                            ),
-                            "images_scale": float(getattr(options, "images_scale", 1.0)),
-                        }
-                        cache_material = (
-                            f"v3:{document_fingerprint}:{start}:{end}:{processing_profile}:"
-                            f"{json.dumps(conversion_signature, sort_keys=True)}:"
-                            f"haiku={self.version or 'unknown'}"
-                        )
-                        cache_key = hashlib.sha256(cache_material.encode()).hexdigest()
-                        cache_path = _cache_file(database, cache_key)
-                        docling_document = await asyncio.to_thread(_load_cached_docling, cache_path)
-                        cache_hit = docling_document is not None
-                        async with self._client(database, config=config) as segment_rag:
-                            if docling_document is None:
-                                docling_document = await segment_rag.convert(
-                                    temporary_path, source_uri=source_uri
-                                )
-                                await asyncio.to_thread(
-                                    _store_cached_docling, cache_path, docling_document
-                                )
-                                converted_segments += 1
-                            else:
-                                cache_hits += 1
-                            if on_phase is not None:
-                                await on_phase("chunking", start + 1, end, total_pages)
-                            chunks = _content_chunks(await segment_rag.chunk(docling_document))
-                            document_metadata = {
-                                "logical_document_id": logical_id,
-                                "generation_id": generation_id,
-                                "segment_index": segment_index,
-                                "page_start": start + 1,
-                                "page_end": end,
-                                "page_offset": start,
-                                "source_uri": source_uri,
-                                "parser_id": "docling",
-                                "processing_profile": processing_profile,
-                                "chunker": "hybrid",
-                                "fingerprint": document_fingerprint,
-                                "page_kind": "scanned" if scanned else "text",
-                                "cache_key": cache_key,
-                                **_book_payload(book_metadata),
-                            }
-                            segment_uri = (
-                                f"{source_uri}#oracle-pages={start + 1}-{end}"
-                                f"&generation={generation_id}"
-                            )
-                            if on_phase is not None:
-                                await on_phase("embedding", start + 1, end, total_pages)
-                            document = await segment_rag.import_document(
-                                docling_document,
-                                chunks,
-                                uri=segment_uri,
-                                title=(document_metadata.get("book_title") or source.name),
-                                metadata=document_metadata,
-                            )
-                            if on_phase is not None:
-                                await on_phase("committing", start + 1, end, total_pages)
-                            segment_manifest = [
-                                _chunk_manifest(
-                                    chunk,
-                                    page_offset=start,
-                                    segment_index=segment_index,
-                                )
-                                for chunk in chunks
-                            ]
-                            for item in segment_manifest:
-                                labels = {label.casefold() for label in item["labels"]}
-                                quality_counts["chunks"] += 1
-                                quality_counts["tables"] += bool(labels & {"table", "table_item"})
-                                quality_counts["formulas"] += bool(labels & {"formula", "equation"})
-                                quality_counts["pictures"] += bool(
-                                    labels & {"picture", "figure", "image"}
-                                )
-                                quality_counts["refs"] += bool(item["doc_item_refs"])
-                            manifest_chunks.extend(segment_manifest)
-                    finally:
-                        temporary_path.unlink(missing_ok=True)
-            except Exception as exc:
-                if segment_size > 1 and _looks_like_memory_pressure(exc):
-                    text_size = max(1, text_size // 2)
-                    scan_size = max(1, scan_size // 2)
-                    continue
-                raise
-            document_id = str(_value(document, "id", "document_id", default=""))
-            imported_ids.append(document_id)
-            segment = {
-                "document_id": document_id,
-                "segment_index": segment_index,
-                "page_start": start + 1,
-                "page_end": end,
-                "fingerprint": document_fingerprint,
-                "generation_id": generation_id,
-                "status": "committed",
-                "metadata": {
-                    "cache_hit": cache_hit,
-                    "cache_key": cache_key,
-                    "cache_path": str(cache_path),
-                    "page_kind": "scanned" if scanned else "text",
-                    "chunk_manifest": segment_manifest,
-                },
-            }
-            segments.append(segment)
-            if on_segment is not None:
-                await on_segment(segment)
-            segment_index += 1
-            if end == total_pages:
-                break
-            # Keep one boundary page in both segments. Citation
-            # normalization and adapter-level deduplication hide the
-            # overlap while preserving long tables and sections.
-            start = end if kind_boundary else max(start + 1, end - 1)
-        # Only retire the previous generation after every new segment is
-        # searchable. Interrupted work remains staged and can be resumed.
-        if on_phase is not None:
-            await on_phase("verifying", total_pages, total_pages, total_pages)
-        async with self._client(database) as rag:
-            for document_id in old_document_ids:
-                with suppress(Exception):
-                    await rag.delete_document(document_id)
-        await asyncio.to_thread(_prune_cache, _cache_file(database, "x").parent)
-        provenance_coverage = quality_counts["refs"] / max(quality_counts["chunks"], 1)
-        quality = DocumentQuality(
-            score=max(0.0, min(1.0, 0.75 + 0.25 * provenance_coverage)),
-            pages_total=total_pages,
-            native_text_pages=total_pages - sum(scanned_pages),
-            ocr_pages=sum(scanned_pages),
-            chunks=quality_counts["chunks"],
-            tables=quality_counts["tables"],
-            formulas=quality_counts["formulas"],
-            pictures=quality_counts["pictures"],
-            provenance_coverage=provenance_coverage,
-            issues=(
-                ["Ein Teil der Chunks besitzt keine elementgenaue PDF-Provenienz."]
-                if provenance_coverage < 0.9
-                else []
-            ),
-        )
-        return {
-            "source": str(source),
-            "source_uri": source_uri,
-            "document_id": logical_id,
-            "logical_document_id": logical_id,
-            "generation_id": generation_id,
-            "segment_document_ids": imported_ids,
-            "segments": segments,
-            "page_count": total_pages,
-            "scanned": any(scanned_pages),
-            "scanned_pages": sum(scanned_pages),
-            "parser_id": "docling",
-            "processing_profile": processing_profile,
-            "fingerprint": document_fingerprint,
-            "book_metadata": (book_metadata.model_dump(mode="json") if book_metadata else None),
-            "original_source": original_source or str(source),
-            "managed_source": str(source),
-            "pipeline_version": "vanilla-haiku-public-api-v1",
-            "quality": quality.model_dump(mode="json"),
-            "chunk_manifest": manifest_chunks,
-            "cache_status": (
-                "hit" if converted_segments == 0 else "miss" if cache_hits == 0 else "mixed"
-            ),
-            "pipeline_stats": {
-                "cache_hits": cache_hits,
-                "converted_segments": converted_segments,
-                "ocr_pages": sum(scanned_pages),
-                "text_pages": total_pages - sum(scanned_pages),
-                "vl_pages": 0,
-            },
-        }
 
     async def delete_document(self, database: Path, document_id: str) -> bool:
         await self.ensure_database(database)
@@ -910,41 +471,244 @@ class VanillaHaikuAdapter(HaikuAdapter):
         *,
         document_filter: str | None = None,
         search_type: str = "hybrid",
+        rerank: bool = True,
     ) -> list[SearchHit]:
         await self.ensure_database(database)
-        async with self._client(database) as rag:
-            results = await rag.search(
-                query,
-                limit=limit,
-                search_type=search_type,
-                filter=document_filter,
+        config = None
+        if not rerank:
+            config = copy.deepcopy(self._config(database))
+            config.reranking.model = None
+        async with self._client(database, config=config) as rag:
+            search_kwargs: dict[str, Any] = {
+                "limit": limit,
+                "search_type": search_type,
+                "filter": document_filter,
+            }
+            if "include_images" in inspect.signature(rag.search).parameters:
+                search_kwargs["include_images"] = False
+            results = await rag.search(query, **search_kwargs)
+            hits: list[SearchHit] = []
+            result_rows = list(results)
+            chunk_ids = [
+                str(_value(result, "chunk_id", "id", default=f"chunk-{index}"))
+                for index, result in enumerate(result_rows)
+            ]
+
+            async def optional(call: Any) -> Any:
+                try:
+                    return await call
+                except Exception:
+                    return None
+
+            stored_chunks = await asyncio.gather(
+                *(optional(rag.get_chunk_by_id(chunk_id)) for chunk_id in chunk_ids)
             )
-        hits: list[SearchHit] = []
-        for index, result in enumerate(results):
-            pages = _int_list(_value(result, "page_numbers", "pages", default=[]))
-            metadata = dict(_value(result, "metadata", default={}) or {})
-            metadata.update(
-                {
-                    "source_uri": _value(result, "document_uri"),
-                    "headings": _string_list(_value(result, "headings")),
-                    "labels": _string_list(_value(result, "labels")),
-                    "doc_item_refs": _string_list(_value(result, "doc_item_refs")),
-                    "chunk_ids": _string_list(_value(result, "chunk_ids")),
-                }
-            )
-            hits.append(
-                SearchHit(
-                    chunk_id=str(_value(result, "chunk_id", "id", default=f"chunk-{index}")),
-                    content=str(_value(result, "content", "text", default="")),
-                    score=_value(result, "score"),
-                    pages=list(pages),
-                    document_id=_value(result, "document_id"),
-                    document_title=_value(result, "document_title", "title"),
-                    metadata=metadata,
-                    search_type=search_type,
+            document_ids = list(
+                dict.fromkeys(
+                    str(document_id)
+                    for result, stored_chunk in zip(result_rows, stored_chunks, strict=True)
+                    if (
+                        document_id := _value(result, "document_id")
+                        or _value(stored_chunk, "document_id")
+                    )
+                    and not dict(_value(result, "document_meta", default={}) or {})
                 )
             )
+            document_rows = await asyncio.gather(
+                *(optional(rag.get_document_by_id(document_id)) for document_id in document_ids)
+            )
+            document_cache = dict(zip(document_ids, document_rows, strict=True))
+            for result, result_chunk_id, stored_chunk in zip(
+                result_rows, chunk_ids, stored_chunks, strict=True
+            ):
+                chunk_metadata = dict(_value(stored_chunk, "metadata", default={}) or {})
+                result_metadata = dict(_value(result, "metadata", default={}) or {})
+                document_id = _value(result, "document_id") or _value(stored_chunk, "document_id")
+                document = None
+                if document_id:
+                    key = str(document_id)
+                    document = document_cache.get(key)
+                document_meta = dict(_value(document, "metadata", default={}) or {})
+                document_meta.update(dict(_value(stored_chunk, "document_meta", default={}) or {}))
+                document_meta.update(dict(_value(result, "document_meta", default={}) or {}))
+                pages = _absolute_pages(
+                    chunk_metadata.get("page_numbers")
+                    or _value(result, "page_numbers", "pages", default=[]),
+                    document_meta,
+                )
+                citation_headings = _string_list(
+                    chunk_metadata.get("citation_headings") or _value(result, "headings")
+                )
+                metadata = {
+                    **result_metadata,
+                    **chunk_metadata,
+                    "source_uri": _value(result, "document_uri") or _value(document, "uri"),
+                    "headings": citation_headings,
+                    "labels": _string_list(
+                        chunk_metadata.get("labels") or _value(result, "labels")
+                    ),
+                    "doc_item_refs": _string_list(
+                        chunk_metadata.get("doc_item_refs") or _value(result, "doc_item_refs")
+                    ),
+                    "chunk_ids": _string_list(_value(result, "chunk_ids")),
+                    "document_meta": document_meta,
+                    "logical_document_id": document_meta.get("logical_document_id"),
+                    "generation_id": document_meta.get("generation_id"),
+                    "raw_evidence": True,
+                }
+                hits.append(
+                    SearchHit(
+                        chunk_id=result_chunk_id,
+                        content=str(_value(result, "content", "text", default="")),
+                        score=_value(result, "score"),
+                        pages=pages,
+                        document_id=document_id,
+                        document_title=_value(result, "document_title", "title")
+                        or _value(document, "title"),
+                        metadata=metadata,
+                        search_type=search_type,
+                    )
+                )
         return hits
+
+    async def get_chunk(self, database: Path, chunk_id: str) -> SearchHit | None:
+        """Return unexpanded raw evidence via Haiku's public chunk lookup."""
+        await self.ensure_database(database)
+        async with self._client(database) as rag:
+            chunk = await rag.get_chunk_by_id(chunk_id)
+            document_id = _value(chunk, "document_id") if chunk is not None else None
+            document = None
+            if document_id:
+                with suppress(Exception):
+                    document = await rag.get_document_by_id(str(document_id))
+        if chunk is None:
+            return None
+        chunk_metadata = dict(_value(chunk, "metadata", default={}) or {})
+        document_meta = dict(
+            _value(document, "metadata", default=None)
+            or _value(chunk, "document_meta", default={})
+            or {}
+        )
+        metadata_payload = {
+            **chunk_metadata,
+            "source_uri": _value(chunk, "document_uri") or _value(document, "uri"),
+            "document_meta": document_meta,
+            "logical_document_id": document_meta.get("logical_document_id"),
+            "generation_id": document_meta.get("generation_id"),
+            "raw_evidence": True,
+        }
+        return SearchHit(
+            chunk_id=str(_value(chunk, "id", default=chunk_id) or chunk_id),
+            content=str(_value(chunk, "content", default="")),
+            pages=_absolute_pages(chunk_metadata.get("page_numbers"), document_meta),
+            document_id=_value(chunk, "document_id"),
+            document_title=_value(chunk, "document_title") or _value(document, "title"),
+            metadata=metadata_payload,
+            search_type="lookup",
+        )
+
+    async def get_chunks(self, database: Path, chunk_ids: list[str]) -> list[SearchHit]:
+        """Resolve a bounded batch while reusing one public Haiku client."""
+        if not chunk_ids:
+            return []
+        await self.ensure_database(database)
+        async with self._client(database) as rag:
+            unique_chunk_ids = list(dict.fromkeys(chunk_ids))
+
+            async def optional(call: Any) -> Any:
+                try:
+                    return await call
+                except Exception:
+                    return None
+
+            chunk_rows = await asyncio.gather(
+                *(optional(rag.get_chunk_by_id(chunk_id)) for chunk_id in unique_chunk_ids)
+            )
+            chunks = [
+                (chunk_id, chunk)
+                for chunk_id, chunk in zip(unique_chunk_ids, chunk_rows, strict=True)
+                if chunk is not None
+            ]
+            document_ids = list(
+                dict.fromkeys(
+                    document_id
+                    for _chunk_id, chunk in chunks
+                    if (document_id := str(_value(chunk, "document_id", default="") or ""))
+                )
+            )
+            document_rows = await asyncio.gather(
+                *(optional(rag.get_document_by_id(document_id)) for document_id in document_ids)
+            )
+            documents = dict(zip(document_ids, document_rows, strict=True))
+            resolved: list[SearchHit] = []
+            for chunk_id, chunk in chunks:
+                chunk_metadata = dict(_value(chunk, "metadata", default={}) or {})
+                document_id = str(_value(chunk, "document_id", default="") or "")
+                document = documents.get(document_id)
+                document_meta = dict(
+                    _value(document, "metadata", default=None)
+                    or _value(chunk, "document_meta", default={})
+                    or {}
+                )
+                resolved.append(
+                    SearchHit(
+                        chunk_id=str(_value(chunk, "id", default=chunk_id) or chunk_id),
+                        content=str(_value(chunk, "content", default="")),
+                        pages=_absolute_pages(chunk_metadata.get("page_numbers"), document_meta),
+                        document_id=document_id or None,
+                        document_title=_value(chunk, "document_title") or _value(document, "title"),
+                        metadata={
+                            **chunk_metadata,
+                            "source_uri": _value(chunk, "document_uri") or _value(document, "uri"),
+                            "document_meta": document_meta,
+                            "logical_document_id": document_meta.get("logical_document_id"),
+                            "generation_id": document_meta.get("generation_id"),
+                            "raw_evidence": True,
+                        },
+                        search_type="lookup",
+                    )
+                )
+        return resolved
+
+    async def rerank(
+        self, database: Path, question: str, candidates: list[SearchHit]
+    ) -> list[float]:
+        """Run one persistent CPU cross-encoder inside the query worker."""
+        del database
+        if not candidates:
+            return []
+        if self._persistent_reranker is None:
+            from ..services.reranker_service import PersistentCrossEncoder
+
+            self._persistent_reranker = PersistentCrossEncoder()
+        from ..services.query_v2 import FusedCandidate, RetrievalCandidate
+
+        fused = []
+        for rank, hit in enumerate(candidates, 1):
+            metadata = hit.metadata
+            candidate = RetrievalCandidate(
+                chunk_id=hit.chunk_id,
+                content=hit.content,
+                document_id=hit.document_id,
+                logical_document_id=str(
+                    metadata.get("logical_document_id") or hit.document_id or ""
+                )
+                or None,
+                section_id=str(metadata.get("section_node_id") or "") or None,
+                pages=tuple(hit.pages),
+                headings=tuple(str(item) for item in metadata.get("headings", [])),
+                content_hash=str(metadata.get("content_hash") or "") or None,
+            )
+            fused.append(
+                FusedCandidate(
+                    candidate=candidate,
+                    fused_score=1.0 / (60 + rank),
+                    ranks=(("rerank", rank),),
+                    retrieval_paths=("rerank",),
+                )
+            )
+        scored = await self._persistent_reranker.score(question, fused)
+        return [score for _candidate, score in scored]
 
     def _basic_citation(self, cite: Any, index: int) -> Citation:
         chunk_id = str(_value(cite, "chunk_id", "id", default=f"chunk-{index}"))
@@ -987,15 +751,47 @@ class VanillaHaikuAdapter(HaikuAdapter):
         if citation.primary_anchors or citation.context_anchors:
             return citation
         primary_refs: list[str] = []
+        primary_chunk = None
         if citation.chunk_id:
-            with suppress(Exception):
+            try:
                 primary_chunk = await rag.get_chunk_by_id(citation.chunk_id)
-                if primary_chunk is not None:
-                    primary_refs = _string_list(
-                        (_value(primary_chunk, "metadata", default={}) or {}).get(
-                            "doc_item_refs", []
-                        )
+            except Exception as exc:
+                if citation.chunk_content_hash:
+                    raise ConflictError(
+                        "Citation evidence can no longer be verified",
+                        details={"chunk_id": citation.chunk_id, "reason": "lookup_failed"},
+                    ) from exc
+            if primary_chunk is not None:
+                primary_metadata = dict(_value(primary_chunk, "metadata", default={}) or {})
+                primary_refs = _string_list(primary_metadata.get("doc_item_refs", []))
+                raw_content = str(_value(primary_chunk, "content", default=""))
+                actual_hash = hashlib.sha256(raw_content.encode()).hexdigest()
+                start = citation.excerpt_char_start
+                end = citation.excerpt_char_end
+                invalid_slice = (
+                    start is not None
+                    and end is not None
+                    and (
+                        end < start
+                        or end > len(raw_content)
+                        or raw_content[start:end] != citation.excerpt
                     )
+                )
+                stable_id = primary_metadata.get("evidence_id")
+                if (
+                    (citation.chunk_content_hash and actual_hash != citation.chunk_content_hash)
+                    or invalid_slice
+                    or (citation.evidence_id and stable_id and citation.evidence_id != stable_id)
+                ):
+                    raise ConflictError(
+                        "Citation evidence changed after the answer was generated",
+                        details={"chunk_id": citation.chunk_id, "reason": "stale_evidence"},
+                    )
+            elif citation.chunk_content_hash:
+                raise ConflictError(
+                    "Citation evidence no longer exists",
+                    details={"chunk_id": citation.chunk_id, "reason": "missing_chunk"},
+                )
         primary_set = set(primary_refs)
         context_refs = [ref for ref in citation.doc_item_refs if ref not in primary_set]
         document = None

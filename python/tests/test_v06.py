@@ -22,7 +22,8 @@ async def test_retrieval_inspector_uses_public_ranked_search(
     assert response.status_code == 200
     payload = response.json()
     assert payload["ranked"][0]["chunk_id"] == "chunk-1"
-    assert payload["candidates"] == []
+    assert payload["candidates"][0]["chunk_id"] == "chunk-1"
+    assert any("candidate_cap=" in note for note in payload["provider_notes"])
     assert payload["timing"]["total_ms"] >= payload["timing"]["search_ms"]
     assert "public API" in payload["provider_notes"][0]
 

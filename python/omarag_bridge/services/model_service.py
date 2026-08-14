@@ -123,9 +123,11 @@ class ModelService:
             models.append(
                 ModelRuntime(
                     name=raw.get("name") or raw.get("model") or "",
+                    digest=str(raw.get("digest") or ""),
                     size=int(raw.get("size") or 0),
                     size_vram=int(raw.get("size_vram") or 0),
                     context_length=int(raw.get("context_length") or 0),
+                    expires_at=(str(raw["expires_at"]) if raw.get("expires_at") else None),
                     capabilities=list(raw.get("capabilities") or []),
                     parameter_size=str(details.get("parameter_size") or ""),
                     quantization_level=str(details.get("quantization_level") or ""),

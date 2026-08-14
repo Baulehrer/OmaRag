@@ -27,6 +27,10 @@ class CapabilitySet(StrictModel):
     evaluation: bool = False
     event_replay: bool = True
     workspaces: bool = True
+    book_index_v2: bool = False
+    adaptive_retrieval: bool = False
+    claim_streaming: bool = False
+    knowledge_snapshots: bool = False
 
 
 class BackendMeta(StrictModel):
@@ -44,7 +48,7 @@ class BackendMeta(StrictModel):
 class HealthReport(StrictModel):
     status: str
     ready: bool
-    checks: dict[str, bool | str | None] = Field(default_factory=dict)
+    checks: dict[str, Any] = Field(default_factory=dict)
 
 
 class PrivacyMode(StrEnum):
@@ -116,6 +120,15 @@ class DocumentQuality(StrictModel):
     formulas: int = 0
     pictures: int = 0
     provenance_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    substantive_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    structure_mode: str = "unknown"
+    structure_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    toc_found: bool = False
+    index_found: bool = False
+    glossary_found: bool = False
+    fallback_used: bool = False
+    llm_fallback_used: bool = False
+    exact_duplicate_count: int = Field(default=0, ge=0)
     issues: list[str] = Field(default_factory=list)
 
 
@@ -208,6 +221,7 @@ class CitationAnchor(StrictModel):
 
 class Citation(StrictModel):
     evidence_id: str | None = None
+    prompt_evidence_id: str | None = None
     chunk_id: str
     chunk_ids: list[str] = Field(default_factory=list)
     document_id: str | None = None
@@ -222,8 +236,14 @@ class Citation(StrictModel):
     primary_anchors: list[CitationAnchor] = Field(default_factory=list)
     context_anchors: list[CitationAnchor] = Field(default_factory=list)
     excerpt: str
+    excerpt_char_start: int | None = Field(default=None, ge=0)
+    excerpt_char_end: int | None = Field(default=None, ge=0)
+    chunk_content_hash: str | None = None
     retrieval_rank: int | None = None
     rerank_score: float | None = None
+    claim_ids: list[str] = Field(default_factory=list)
+    retrieval_paths: list[str] = Field(default_factory=list)
+    relevance_score: float | None = Field(default=None, ge=0.0, le=1.0)
     book: BookMetadata | None = None
     verification_status: str = "unverified"
 
@@ -242,6 +262,9 @@ class SearchHit(StrictModel):
 class RetrievalTiming(StrictModel):
     search_ms: float
     total_ms: float
+    routing_ms: float = 0.0
+    rerank_ms: float = 0.0
+    pack_ms: float = 0.0
 
 
 class RetrievalExplanation(StrictModel):
@@ -264,6 +287,20 @@ class SourceCheck(StrEnum):
     INSUFFICIENT = "insufficient"
 
 
+class ClaimStatus(StrEnum):
+    SUPPORTED = "supported"
+    INSUFFICIENT = "insufficient"
+
+
+class AnswerClaim(StrictModel):
+    id: str
+    text: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    facet_id: str | None = None
+    status: ClaimStatus = ClaimStatus.SUPPORTED
+    alignment_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class RunReceipt(StrictModel):
     """Small, user-facing account of how an answer was produced."""
 
@@ -278,6 +315,24 @@ class RunReceipt(StrictModel):
     phase_timings_ms: dict[str, float] = Field(default_factory=dict)
     retrieval_mode: str = "hybrid"
     rerank_status: str = "unknown"
+    complexity: str = "standard"
+    route: str = "hybrid"
+    facets: list[str] = Field(default_factory=list)
+    budgets: dict[str, int] = Field(default_factory=dict)
+    candidate_count: int = Field(default=0, ge=0)
+    selected_count: int = Field(default=0, ge=0)
+    cut_reason: str = "legacy"
+    facet_coverage: dict[str, bool] = Field(default_factory=dict)
+    fallbacks: list[str] = Field(default_factory=list)
+    model_digests: dict[str, str] = Field(default_factory=dict)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    tokens_per_second: float | None = Field(default=None, ge=0.0)
+    time_to_first_token_ms: float | None = Field(default=None, ge=0.0)
+    singleflight_status: str = "none"
+    abstention: str = "none"
+    rejected_claims: int = Field(default=0, ge=0)
+    done_reason: str = "stop"
 
 
 class RunSnapshot(StrictModel):
@@ -288,6 +343,7 @@ class RunSnapshot(StrictModel):
     question: str
     evidence_mode: EvidenceMode
     answer: str = ""
+    claims: list[AnswerClaim] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     receipt: RunReceipt | None = None
     error: dict[str, Any] | None = None
@@ -313,8 +369,38 @@ class DocumentSummary(StrictModel):
     book: BookMetadata | None = None
     quality: DocumentQuality | None = None
     pipeline_version: str = "textbook-v1"
+    structure_mode: str = "unknown"
+    structure_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    toc_found: bool = False
+    index_found: bool = False
+    glossary_found: bool = False
+    fallback_used: bool = False
     size_bytes: int = Field(default=0, ge=0)
     archive_mode: str = "unknown"
+
+
+class ReindexPreflight(StrictModel):
+    id: str
+    workspace_id: str
+    mode: str = "full"
+    ready: bool
+    documents: int = Field(default=0, ge=0)
+    estimated_source_bytes: int = Field(default=0, ge=0)
+    available_bytes: int = Field(default=0, ge=0)
+    checks: dict[str, Any] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class QueryReadiness(StrictModel):
+    workspace_id: str
+    index_ready: bool
+    query_ready: bool
+    latency_status: str
+    required_loaded_models: int = 2
+    loaded_models: list[dict[str, Any]] = Field(default_factory=list)
+    model_digests: dict[str, str] = Field(default_factory=dict)
+    checks: dict[str, Any] = Field(default_factory=dict)
 
 
 class SourceDefinition(StrictModel):
@@ -462,9 +548,11 @@ class ModelCatalogResponse(StrictModel):
 
 class ModelRuntime(StrictModel):
     name: str
+    digest: str = ""
     size: int = 0
     size_vram: int = 0
     context_length: int = 0
+    expires_at: str | None = None
     capabilities: list[str] = Field(default_factory=list)
     parameter_size: str = ""
     quantization_level: str = ""

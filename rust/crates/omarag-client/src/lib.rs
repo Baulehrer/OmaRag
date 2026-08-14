@@ -4,9 +4,10 @@ use omarag_domain::{
     ApiErrorResponse, BackendMeta, BackupSummary, CommitImportRequest, ConfigDocument,
     CreateSource, CreateWorkspace, DocumentSummary, DomainEvent, EventSubscription, HealthReport,
     IdempotentResult, ImportPreflightBatch, IngestRequest, JobId, JobSnapshot, OmaRagError,
-    OmaResult, PreflightImportRequest, QualityReport, RetrievalExplanation, RunId, RunRequest,
-    RunSnapshot, SearchHit, SearchRequest, SourceDefinition, UpdateConfig, WorkspaceId,
-    WorkspaceManifest, WorkspaceSummary,
+    OmaResult, PreflightImportRequest, QualityReport, QueryReadiness, ReindexPreflight,
+    ReindexPreflightRequest, ReindexRequest, RetrievalExplanation, RunId, RunRequest, RunSnapshot,
+    SearchHit, SearchRequest, SourceDefinition, UpdateConfig, WorkspaceId, WorkspaceManifest,
+    WorkspaceSummary,
 };
 use reqwest::{Method, RequestBuilder, Response, StatusCode};
 use reqwest_eventsource::{Event, EventSource};
@@ -31,6 +32,51 @@ pub trait OmaRagClient: Send + Sync {
     async fn create_workspace(&self, request: CreateWorkspace) -> OmaResult<WorkspaceManifest>;
     async fn delete_workspace(&self, id: WorkspaceId, physical: bool) -> OmaResult<()>;
     async fn list_documents(&self, workspace: WorkspaceId) -> OmaResult<Vec<DocumentSummary>>;
+    async fn document_structure(
+        &self,
+        workspace: WorkspaceId,
+        document_id: String,
+    ) -> OmaResult<serde_json::Value> {
+        let _ = (workspace, document_id);
+        Err(OmaRagError::Protocol(
+            "Document structure is unavailable".into(),
+        ))
+    }
+    async fn knowledge_snapshot(
+        &self,
+        workspace: WorkspaceId,
+        document_id: String,
+    ) -> OmaResult<serde_json::Value> {
+        let _ = (workspace, document_id);
+        Err(OmaRagError::Protocol(
+            "Knowledge snapshot is unavailable".into(),
+        ))
+    }
+    async fn query_readiness(&self, workspace: WorkspaceId) -> OmaResult<QueryReadiness> {
+        let _ = workspace;
+        Err(OmaRagError::Protocol(
+            "Query readiness is unavailable".into(),
+        ))
+    }
+    async fn preflight_reindex(
+        &self,
+        workspace: WorkspaceId,
+        request: ReindexPreflightRequest,
+    ) -> OmaResult<ReindexPreflight> {
+        let _ = (workspace, request);
+        Err(OmaRagError::Protocol(
+            "Reindex preflight is unavailable".into(),
+        ))
+    }
+    async fn reindex(
+        &self,
+        workspace: WorkspaceId,
+        request: ReindexRequest,
+        idempotency_key: String,
+    ) -> OmaResult<IdempotentResult> {
+        let _ = (workspace, request, idempotency_key);
+        Err(OmaRagError::Protocol("Reindex is unavailable".into()))
+    }
     async fn delete_document(&self, workspace: WorkspaceId, document_id: String) -> OmaResult<()>;
     async fn restore_document(&self, workspace: WorkspaceId, document_id: String) -> OmaResult<()>;
     async fn list_sources(&self, workspace: WorkspaceId) -> OmaResult<Vec<SourceDefinition>>;
@@ -260,6 +306,67 @@ impl OmaRagClient for HttpOmaRagClient {
             &format!("/v1/workspaces/{workspace}/documents"),
         )
         .await
+    }
+
+    async fn document_structure(
+        &self,
+        workspace: WorkspaceId,
+        document_id: String,
+    ) -> OmaResult<serde_json::Value> {
+        self.send_empty(
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}/documents/{document_id}/structure"),
+        )
+        .await
+    }
+
+    async fn knowledge_snapshot(
+        &self,
+        workspace: WorkspaceId,
+        document_id: String,
+    ) -> OmaResult<serde_json::Value> {
+        self.send_empty(
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}/documents/{document_id}/knowledge-snapshot"),
+        )
+        .await
+    }
+
+    async fn query_readiness(&self, workspace: WorkspaceId) -> OmaResult<QueryReadiness> {
+        self.send_empty(
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}/readiness"),
+        )
+        .await
+    }
+
+    async fn preflight_reindex(
+        &self,
+        workspace: WorkspaceId,
+        request: ReindexPreflightRequest,
+    ) -> OmaResult<ReindexPreflight> {
+        self.send_json(
+            Method::POST,
+            &format!("/v1/workspaces/{workspace}/reindex/preflight"),
+            &request,
+        )
+        .await
+    }
+
+    async fn reindex(
+        &self,
+        workspace: WorkspaceId,
+        request: ReindexRequest,
+        idempotency_key: String,
+    ) -> OmaResult<IdempotentResult> {
+        let response = self
+            .request(Method::POST, &format!("/v1/workspaces/{workspace}/reindex"))?
+            .header("Idempotency-Key", idempotency_key)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| OmaRagError::Transport(error.to_string()))?;
+        self.json(response).await
     }
 
     async fn delete_document(&self, workspace: WorkspaceId, document_id: String) -> OmaResult<()> {
@@ -740,6 +847,9 @@ impl OmaRagClient for MockOmaRagClient {
             timing: omarag_domain::RetrievalTiming {
                 search_ms: 0.0,
                 total_ms: 0.0,
+                routing_ms: 0.0,
+                rerank_ms: 0.0,
+                pack_ms: 0.0,
             },
             provider_notes: Vec::new(),
         })

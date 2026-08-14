@@ -51,6 +51,8 @@ from .models.api import (
     PatchWorkspaceRequest,
     PreflightImportRequest,
     PullModelRequest,
+    ReindexPreflightRequest,
+    ReindexRequest,
     RestoreBackupRequest,
     RunEvaluationRequest,
     RunRequest,
@@ -69,6 +71,7 @@ from .models.domain import (
     HealthReport,
     ImportPreflightBatch,
     JobSnapshot,
+    JobStatus,
     ModelCatalogResponse,
     ModelCategory,
     ModelDefaultsPreflight,
@@ -77,8 +80,9 @@ from .models.domain import (
     ModelSource,
     ParserDefinition,
     QualityReport,
+    QueryReadiness,
+    ReindexPreflight,
     RetrievalExplanation,
-    RetrievalTiming,
     RunSnapshot,
     SearchHit,
     SourceDefinition,
@@ -87,10 +91,18 @@ from .models.domain import (
     WorkspaceManifest,
     WorkspaceSummary,
 )
-from .models.errors import ConflictError, OmaRagError
+from .models.errors import (
+    ConflictError,
+    IndexNotReadyError,
+    IndexRebuildInProgressError,
+    NotFoundError,
+    OmaRagError,
+    QueryDeadlineExceededError,
+)
 from .preview import render_citation_preview
 from .runtime import configure_process_environment
 from .services import (
+    AdaptiveSearchService,
     EvaluationService,
     EventService,
     JobService,
@@ -118,6 +130,7 @@ class Services:
     models: ModelService
     textbooks: TextbookService
     evaluations: EvaluationService
+    search: AdaptiveSearchService
     token: str | None
     token_path: Path | None
 
@@ -185,6 +198,7 @@ def build_services(settings: Settings) -> Services:
     resources = ResourceCoordinator()
     adapter.set_residency_policy(resources.residency_seconds)
     jobs = JobService(store, workspaces, events, adapter, resources)
+    features = WorkspaceFeatureService(store, workspaces, adapter)
     runs = RunService(
         store,
         workspaces,
@@ -192,11 +206,13 @@ def build_services(settings: Settings) -> Services:
         adapter,
         resources,
         answer_cache_max_entries=settings.answer_cache_max_entries,
+        ollama_url=settings.ollama_url,
+        model_roles=features.configured_model_roles,
     )
-    features = WorkspaceFeatureService(store, workspaces, adapter)
     models = ModelService(settings)
     textbooks = TextbookService(store, workspaces, adapter)
     evaluations = EvaluationService(store, workspaces, adapter)
+    search = AdaptiveSearchService(adapter, store)
     return Services(
         settings,
         store,
@@ -210,6 +226,7 @@ def build_services(settings: Settings) -> Services:
         models,
         textbooks,
         evaluations,
+        search,
         token,
         token_path,
     )
@@ -254,6 +271,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="Invalid bearer token")
 
     protected = [Depends(authorize)]
+
+    def ensure_index_queryable(workspace_id: str) -> None:
+        services.workspaces.get(workspace_id)
+        generation_reader = getattr(services.store, "workspace_index_generation", None)
+        generation = generation_reader(workspace_id) if callable(generation_reader) else None
+        status_value = str((generation or {}).get("status") or "legacy_ready").casefold()
+        if status_value in {"maintenance", "building"}:
+            jobs = [
+                item
+                for item in services.store.list_jobs(workspace_id)
+                if item.kind == "reindex"
+                and item.status
+                in {
+                    JobStatus.QUEUED,
+                    JobStatus.RUNNING,
+                    JobStatus.PAUSE_REQUESTED,
+                    JobStatus.PAUSED,
+                }
+            ]
+            raise IndexRebuildInProgressError(
+                "The workspace index is being rebuilt",
+                details={
+                    "generation_id": (generation or {}).get("generation_id"),
+                    "job_id": jobs[0].id if jobs else None,
+                    "status": status_value,
+                },
+            )
+        if status_value == "maintenance_failed":
+            raise IndexNotReadyError(
+                "The workspace rebuild failed and must be resumed before querying",
+                details={
+                    "generation_id": (generation or {}).get("generation_id"),
+                    "status": status_value,
+                },
+            )
+
+    services.runs.index_gate = ensure_index_queryable
 
     @app.get("/v1/parsers", response_model=list[ParserDefinition], dependencies=protected)
     async def list_parsers() -> list[ParserDefinition]:
@@ -428,6 +482,65 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 keep_alive_seconds=keep_seconds,
                 detail="Query runtime is ready.",
             )
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/readiness",
+        response_model=QueryReadiness,
+        dependencies=protected,
+    )
+    async def workspace_query_readiness(workspace_id: str) -> QueryReadiness:
+        services.workspaces.get(workspace_id)
+        roles = services.features.configured_model_roles(workspace_id)
+        runtime = await services.models.runtime(
+            roles,
+            worker_timeout_seconds=services.settings.worker_query_idle_seconds,
+        )
+
+        def normalized(model: str | None) -> str:
+            return (model or "").removesuffix(":latest")
+
+        loaded = {normalized(item.name): item for item in runtime.models}
+        required = {
+            "embedding": roles.get("embedding"),
+            "generator": roles.get("chat"),
+        }
+        resident = {
+            role: bool(model and normalized(model) in loaded) for role, model in required.items()
+        }
+        generation_status = "ready"
+        generation_reader = getattr(services.store, "workspace_index_generation", None)
+        if callable(generation_reader):
+            generation = generation_reader(workspace_id)
+            if generation is not None:
+                generation_status = str(generation.get("status", "not_ready")).casefold()
+        index_ready = generation_status in {"ready", "none"}
+        models_ready = all(resident.values()) and all(required.values())
+        query_ready = bool(services.adapter.available and index_ready and models_ready)
+        digests = {
+            role: loaded[normalized(model)].digest
+            for role, model in required.items()
+            if model and normalized(model) in loaded and loaded[normalized(model)].digest
+        }
+        return QueryReadiness(
+            workspace_id=workspace_id,
+            index_ready=index_ready,
+            query_ready=query_ready,
+            latency_status="ready" if query_ready else "latency_degraded",
+            loaded_models=[item.model_dump(mode="json") for item in runtime.models],
+            model_digests=digests,
+            checks={
+                "adapter_available": services.adapter.available,
+                "index_generation": generation_status,
+                "embedding_resident": resident["embedding"],
+                "generator_resident": resident["generator"],
+                "required_concurrent_residency": 2,
+                "configuration_hint": (
+                    "OLLAMA_MAX_LOADED_MODELS=2; OLLAMA_NUM_PARALLEL=1"
+                    if not models_ready
+                    else None
+                ),
+            },
+        )
 
     @app.post(
         "/v1/workspaces/{workspace_id}/model-defaults/preflight",
@@ -705,10 +818,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             processing_profile=request.processing_profile,
             duplicate_policy=request.duplicate_policy,
             validity_policy=request.validity_policy,
+            indexing=request.indexing,
         )
         job, reused = await services.jobs.start_ingest(
             workspace_id, ingest_request, idempotency_key
         )
+        return IdempotentResult(id=job.id, reused=reused)
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/reindex/preflight",
+        response_model=ReindexPreflight,
+        dependencies=protected,
+    )
+    async def preflight_reindex(
+        workspace_id: str, request: ReindexPreflightRequest
+    ) -> ReindexPreflight:
+        return await asyncio.to_thread(
+            services.jobs.preflight_reindex,
+            workspace_id,
+            request.indexing.model_dump(mode="json"),
+        )
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/reindex",
+        response_model=IdempotentResult,
+        status_code=202,
+        dependencies=protected,
+    )
+    async def reindex_workspace(
+        workspace_id: str,
+        request: ReindexRequest,
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
+    ) -> IdempotentResult:
+        job, reused = await services.jobs.start_reindex(workspace_id, request, idempotency_key)
         return IdempotentResult(id=job.id, reused=reused)
 
     @app.get(
@@ -718,6 +860,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def list_documents(workspace_id: str) -> list[DocumentSummary]:
         return services.features.documents(workspace_id)
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/documents/{document_id}/structure",
+        dependencies=protected,
+    )
+    async def document_structure(workspace_id: str, document_id: str) -> dict[str, Any]:
+        services.workspaces.get(workspace_id)
+        structure = services.store.book_structure(workspace_id, document_id)
+        if structure is None:
+            raise NotFoundError(f"Buchstruktur {document_id} wurde nicht gefunden")
+        return structure
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/documents/{document_id}/knowledge-snapshot",
+        dependencies=protected,
+    )
+    async def document_knowledge_snapshot(workspace_id: str, document_id: str) -> dict[str, Any]:
+        services.workspaces.get(workspace_id)
+        snapshot = services.store.book_knowledge_snapshot(workspace_id, document_id)
+        if snapshot is None:
+            raise NotFoundError(f"Knowledge-Snapshot {document_id} wurde nicht gefunden")
+        return snapshot
 
     @app.patch(
         "/v1/workspaces/{workspace_id}/documents/{document_id}/metadata",
@@ -729,7 +893,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         document_id: str,
         request: PatchBookMetadataRequest,
     ) -> BookMetadata:
+        ensure_index_queryable(workspace_id)
         async with services.resources.indexing():
+            ensure_index_queryable(workspace_id)
             await services.textbooks.update_metadata(workspace_id, document_id, request.metadata)
         await services.events.emit(
             "document.changed",
@@ -852,6 +1018,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     async def run_evaluation(workspace_id: str, request: RunEvaluationRequest) -> EvaluationReport:
         async with services.resources.chat():
+            ensure_index_queryable(workspace_id)
             return await services.evaluations.run(
                 workspace_id,
                 request.evaluation_id,
@@ -890,7 +1057,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response: Response,
         if_match: Annotated[str | None, Header()] = None,
     ) -> ConfigDocument:
-        config = services.features.update_config(workspace_id, request.content, if_match)
+        ensure_index_queryable(workspace_id)
+        async with services.resources.indexing():
+            ensure_index_queryable(workspace_id)
+            config = services.features.update_config(workspace_id, request.content, if_match)
         response.headers["ETag"] = f'"{config.etag}"'
         await services.events.emit(
             "config.changed",
@@ -959,17 +1129,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dependencies=protected,
     )
     async def search(workspace_id: str, request: SearchRequest) -> list[SearchHit]:
-        services.workspaces.get(workspace_id)
+        deadline = time.monotonic() + (request.options.deadline_ms or 35_000) / 1000
+        ensure_index_queryable(workspace_id)
         document_ids = services.store.resolve_segment_ids(
             workspace_id, request.filters.active(), request.document_policy
         )
-        async with services.resources.chat():
-            return await services.adapter.search(
-                services.workspaces.database_path(workspace_id),
-                request.query,
-                request.limit,
-                document_filter=document_filter_for_ids(document_ids),
-            )
+        try:
+            async with asyncio.timeout_at(deadline), services.resources.chat():
+                ensure_index_queryable(workspace_id)
+                ranked, _ = await services.search.search(
+                    services.workspaces.database_path(workspace_id),
+                    request.query,
+                    requested_limit=request.limit,
+                    max_sources=request.options.max_sources,
+                    document_filter=document_filter_for_ids(document_ids),
+                    allowed_document_ids=(set(document_ids) if document_ids is not None else None),
+                    profile=request.options.profile,
+                )
+                return ranked
+        except TimeoutError as exc:
+            raise QueryDeadlineExceededError("Search deadline exceeded") from exc
 
     @app.post(
         "/v1/workspaces/{workspace_id}/search/explain",
@@ -977,29 +1156,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dependencies=protected,
     )
     async def explain_search(workspace_id: str, request: SearchRequest) -> RetrievalExplanation:
-        services.workspaces.get(workspace_id)
+        deadline = time.monotonic() + (request.options.deadline_ms or 35_000) / 1000
+        ensure_index_queryable(workspace_id)
         document_ids = services.store.resolve_segment_ids(
             workspace_id, request.filters.active(), request.document_policy
         )
         started = time.perf_counter()
-        async with services.resources.chat():
-            search_started = time.perf_counter()
-            ranked = await services.adapter.search(
-                services.workspaces.database_path(workspace_id),
-                request.query,
-                request.limit,
-                document_filter=document_filter_for_ids(document_ids),
-            )
-            search_ms = (time.perf_counter() - search_started) * 1000
+        try:
+            async with asyncio.timeout_at(deadline), services.resources.chat():
+                ensure_index_queryable(workspace_id)
+                search_started = time.perf_counter()
+                _, explanation = await services.search.search(
+                    services.workspaces.database_path(workspace_id),
+                    request.query,
+                    requested_limit=request.limit,
+                    max_sources=request.options.max_sources,
+                    document_filter=document_filter_for_ids(document_ids),
+                    allowed_document_ids=(set(document_ids) if document_ids is not None else None),
+                    profile=request.options.profile,
+                )
+                outer_ms = (time.perf_counter() - search_started) * 1000
+        except TimeoutError as exc:
+            raise QueryDeadlineExceededError("Search explanation deadline exceeded") from exc
         total_ms = (time.perf_counter() - started) * 1000
-        return RetrievalExplanation(
-            query=request.query,
-            ranked=ranked,
-            timing=RetrievalTiming(search_ms=search_ms, total_ms=total_ms),
-            provider_notes=[
-                "Vanilla Haiku RAG exposes final hybrid-ranked hits through its public API; "
-                "private candidate stages are intentionally not inspected."
-            ],
+        return explanation.model_copy(
+            update={
+                "timing": explanation.timing.model_copy(
+                    update={
+                        "search_ms": max(explanation.timing.search_ms, outer_ms),
+                        "total_ms": max(explanation.timing.total_ms, total_ms),
+                    }
+                )
+            }
         )
 
     @app.post(
@@ -1009,6 +1197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dependencies=protected,
     )
     async def start_run(workspace_id: str, request: RunRequest) -> RunSnapshot:
+        ensure_index_queryable(workspace_id)
         return await services.runs.start(workspace_id, request)
 
     @app.get("/v1/runs/{run_id}", response_model=RunSnapshot, dependencies=protected)

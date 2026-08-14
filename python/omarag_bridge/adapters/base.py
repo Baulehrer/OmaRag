@@ -47,6 +47,8 @@ class HaikuAdapter(ABC):
         segment_sizer: Callable[[int, bool], int] | None = None,
         metadata: BookMetadata | None = None,
         original_source: str | None = None,
+        indexing_options: dict[str, Any] | None = None,
+        llm_url: str | None = None,
     ) -> dict[str, Any]: ...
 
     @abstractmethod
@@ -61,7 +63,25 @@ class HaikuAdapter(ABC):
         *,
         document_filter: str | None = None,
         search_type: str = "hybrid",
+        rerank: bool = True,
     ) -> list[SearchHit]: ...
+
+    @abstractmethod
+    async def get_chunk(self, database: Path, chunk_id: str) -> SearchHit | None:
+        """Resolve raw evidence through the provider's documented public API."""
+        ...
+
+    async def get_chunks(self, database: Path, chunk_ids: list[str]) -> list[SearchHit]:
+        """Resolve several raw chunks; adapters may collapse this into one worker call."""
+        resolved = [await self.get_chunk(database, chunk_id) for chunk_id in chunk_ids]
+        return [item for item in resolved if item is not None]
+
+    @abstractmethod
+    async def rerank(
+        self, database: Path, question: str, candidates: list[SearchHit]
+    ) -> list[float]:
+        """Score a bounded candidate pool in the persistent query worker."""
+        ...
 
     @abstractmethod
     async def ask(

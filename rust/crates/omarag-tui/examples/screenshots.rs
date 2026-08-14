@@ -134,6 +134,24 @@ fn demo_state() -> AppState {
         phase_timings_ms: Default::default(),
         retrieval_mode: "hybrid".into(),
         rerank_status: "applied".into(),
+        complexity: "standard".into(),
+        route: "book-kg+hybrid".into(),
+        facets: Vec::new(),
+        budgets: Default::default(),
+        candidate_count: 40,
+        selected_count: 2,
+        cut_reason: "score_gap".into(),
+        facet_coverage: Default::default(),
+        fallbacks: Vec::new(),
+        model_digests: Default::default(),
+        prompt_tokens: Some(320),
+        output_tokens: Some(90),
+        tokens_per_second: Some(24.0),
+        time_to_first_token_ms: Some(480.0),
+        singleflight_status: "none".into(),
+        abstention: "none".into(),
+        rejected_claims: 0,
+        done_reason: "stop".into(),
     });
     state
 }
@@ -148,6 +166,7 @@ fn demo_citation(
 ) -> Citation {
     Citation {
         evidence_id: Some(evidence_id.into()),
+        prompt_evidence_id: Some(evidence_id.into()),
         chunk_id: format!("{document_id}-chunk"),
         chunk_ids: vec![format!("{document_id}-chunk")],
         document_id: Some(document_id.into()),
@@ -165,8 +184,14 @@ fn demo_citation(
         primary_anchors: Vec::new(),
         context_anchors: Vec::new(),
         excerpt: "Durability design combines exposure class, cover and crack control.".into(),
+        excerpt_char_start: Some(0),
+        excerpt_char_end: Some(74),
+        chunk_content_hash: None,
         retrieval_rank: Some(1),
         rerank_score: Some(0.94),
+        claim_ids: vec!["C1".into()],
+        retrieval_paths: vec!["hybrid".into()],
+        relevance_score: Some(0.94),
         book: None,
         verification_status: "verified".into(),
     }
@@ -192,6 +217,12 @@ fn document(title: &str, pages: u32) -> DocumentSummary {
         book: None,
         quality: None,
         pipeline_version: "textbook-v1".into(),
+        structure_mode: "body-headings".into(),
+        structure_confidence: 0.91,
+        toc_found: true,
+        index_found: true,
+        glossary_found: false,
+        fallback_used: false,
     }
 }
 

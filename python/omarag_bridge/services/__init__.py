@@ -9,6 +9,7 @@ from .workspace_feature_service import WorkspaceFeatureService
 from .workspace_service import WorkspaceService
 
 __all__ = [
+    "AdaptiveSearchService",
     "EventService",
     "EvaluationService",
     "JobService",
@@ -19,3 +20,4 @@ __all__ = [
     "WorkspaceFeatureService",
     "WorkspaceService",
 ]
+from .adaptive_search_service import AdaptiveSearchService

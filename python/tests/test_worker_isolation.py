@@ -36,6 +36,17 @@ def test_adapter_metadata_does_not_import_haiku_client() -> None:
     assert {name for name in sys.modules if name.startswith("haiku.")} == before
 
 
+def test_isolated_adapter_exposes_verified_v2_capabilities() -> None:
+    adapter = _adapter()
+    if adapter.version != "0.74.0":
+        pytest.skip("Book-v2 capability contract is pinned to Haiku 0.74.0")
+    assert adapter.capabilities.book_index_v2 is True
+    assert adapter.capabilities.adaptive_retrieval is True
+    assert adapter.capabilities.claim_streaming is True
+    assert adapter.capabilities.knowledge_snapshots is True
+    assert adapter.capabilities.streaming_chat is True
+
+
 def test_config_validation_runs_outside_parent_process() -> None:
     adapter = _adapter()
     if not adapter.available:

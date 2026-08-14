@@ -37,12 +37,32 @@ def _memory_gib() -> float:
 def _runtime_profile() -> dict[str, int]:
     memory = _memory_gib()
     if memory <= 10:
-        return {"embedding_batch": 8, "search_limit": 6, "context_chars": 4000}
+        return {
+            "embedding_batch": 8,
+            "search_limit": 6,
+            "context_chars": 4000,
+            "answer_tokens": 1024,
+        }
     if memory < 18:
-        return {"embedding_batch": 16, "search_limit": 6, "context_chars": 4000}
+        return {
+            "embedding_batch": 16,
+            "search_limit": 6,
+            "context_chars": 4000,
+            "answer_tokens": 1024,
+        }
     if memory <= 32:
-        return {"embedding_batch": 32, "search_limit": 8, "context_chars": 5000}
-    return {"embedding_batch": 64, "search_limit": 8, "context_chars": 6000}
+        return {
+            "embedding_batch": 32,
+            "search_limit": 8,
+            "context_chars": 5000,
+            "answer_tokens": 1536,
+        }
+    return {
+        "embedding_batch": 64,
+        "search_limit": 8,
+        "context_chars": 6000,
+        "answer_tokens": 2048,
+    }
 
 
 def _haiku_version() -> str | None:
@@ -138,6 +158,9 @@ qa:
     vision: true
     enable_thinking: false
     temperature: 0.1
+    max_tokens: {runtime["answer_tokens"]}
+    extra_body:
+      reasoning_effort: none
   max_searches: 3
 
 processing:

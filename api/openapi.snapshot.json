@@ -10,6 +10,60 @@
         "title": "AnswerCacheStatus",
         "type": "string"
       },
+      "AnswerClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "alignment_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alignment Score"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "facet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facet Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ClaimStatus",
+            "default": "supported"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ],
+        "title": "AnswerClaim",
+        "type": "object"
+      },
       "BackendMeta": {
         "additionalProperties": false,
         "properties": {
@@ -274,9 +328,24 @@
       "CapabilitySet": {
         "additionalProperties": false,
         "properties": {
+          "adaptive_retrieval": {
+            "default": false,
+            "title": "Adaptive Retrieval",
+            "type": "boolean"
+          },
           "analysis_images": {
             "default": false,
             "title": "Analysis Images",
+            "type": "boolean"
+          },
+          "book_index_v2": {
+            "default": false,
+            "title": "Book Index V2",
+            "type": "boolean"
+          },
+          "claim_streaming": {
+            "default": false,
+            "title": "Claim Streaming",
             "type": "boolean"
           },
           "database_tags": {
@@ -292,6 +361,11 @@
           "event_replay": {
             "default": true,
             "title": "Event Replay",
+            "type": "boolean"
+          },
+          "knowledge_snapshots": {
+            "default": false,
+            "title": "Knowledge Snapshots",
             "type": "boolean"
           },
           "multimodal_reranking": {
@@ -346,6 +420,17 @@
               }
             ]
           },
+          "chunk_content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chunk Content Hash"
+          },
           "chunk_id": {
             "title": "Chunk Id",
             "type": "string"
@@ -355,6 +440,13 @@
               "type": "string"
             },
             "title": "Chunk Ids",
+            "type": "array"
+          },
+          "claim_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Claim Ids",
             "type": "array"
           },
           "context_anchors": {
@@ -415,6 +507,30 @@
             "title": "Excerpt",
             "type": "string"
           },
+          "excerpt_char_end": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt Char End"
+          },
+          "excerpt_char_start": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excerpt Char Start"
+          },
           "headings": {
             "items": {
               "type": "string"
@@ -454,6 +570,30 @@
             "title": "Primary Anchors",
             "type": "array"
           },
+          "prompt_evidence_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Evidence Id"
+          },
+          "relevance_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relevance Score"
+          },
           "rerank_score": {
             "anyOf": [
               {
@@ -464,6 +604,13 @@
               }
             ],
             "title": "Rerank Score"
+          },
+          "retrieval_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Retrieval Paths",
+            "type": "array"
           },
           "retrieval_rank": {
             "anyOf": [
@@ -559,6 +706,14 @@
         "title": "CitationAnchor",
         "type": "object"
       },
+      "ClaimStatus": {
+        "enum": [
+          "supported",
+          "insufficient"
+        ],
+        "title": "ClaimStatus",
+        "type": "string"
+      },
       "CloneWorkspaceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -599,6 +754,9 @@
             ],
             "title": "Duplicate Policy",
             "type": "string"
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/IndexingOptions"
           },
           "preflight_id": {
             "title": "Preflight Id",
@@ -800,10 +958,31 @@
             "title": "Chunks",
             "type": "integer"
           },
+          "exact_duplicate_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Exact Duplicate Count",
+            "type": "integer"
+          },
+          "fallback_used": {
+            "default": false,
+            "title": "Fallback Used",
+            "type": "boolean"
+          },
           "formulas": {
             "default": 0,
             "title": "Formulas",
             "type": "integer"
+          },
+          "glossary_found": {
+            "default": false,
+            "title": "Glossary Found",
+            "type": "boolean"
+          },
+          "index_found": {
+            "default": false,
+            "title": "Index Found",
+            "type": "boolean"
           },
           "issues": {
             "items": {
@@ -811,6 +990,11 @@
             },
             "title": "Issues",
             "type": "array"
+          },
+          "llm_fallback_used": {
+            "default": false,
+            "title": "Llm Fallback Used",
+            "type": "boolean"
           },
           "native_text_pages": {
             "default": 0,
@@ -846,10 +1030,34 @@
             "title": "Score",
             "type": "number"
           },
+          "structure_confidence": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Structure Confidence",
+            "type": "number"
+          },
+          "structure_mode": {
+            "default": "unknown",
+            "title": "Structure Mode",
+            "type": "string"
+          },
+          "substantive_coverage": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Substantive Coverage",
+            "type": "number"
+          },
           "tables": {
             "default": 0,
             "title": "Tables",
             "type": "integer"
+          },
+          "toc_found": {
+            "default": false,
+            "title": "Toc Found",
+            "type": "boolean"
           }
         },
         "title": "DocumentQuality",
@@ -893,6 +1101,11 @@
             ],
             "title": "Cache Status"
           },
+          "fallback_used": {
+            "default": false,
+            "title": "Fallback Used",
+            "type": "boolean"
+          },
           "fingerprint": {
             "anyOf": [
               {
@@ -915,6 +1128,11 @@
             ],
             "title": "Generation Id"
           },
+          "glossary_found": {
+            "default": false,
+            "title": "Glossary Found",
+            "type": "boolean"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -923,6 +1141,11 @@
             "format": "date-time",
             "title": "Imported At",
             "type": "string"
+          },
+          "index_found": {
+            "default": false,
+            "title": "Index Found",
+            "type": "boolean"
           },
           "managed_source": {
             "anyOf": [
@@ -993,9 +1216,26 @@
             "title": "Status",
             "type": "string"
           },
+          "structure_confidence": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Structure Confidence",
+            "type": "number"
+          },
+          "structure_mode": {
+            "default": "unknown",
+            "title": "Structure Mode",
+            "type": "string"
+          },
           "title": {
             "title": "Title",
             "type": "string"
+          },
+          "toc_found": {
+            "default": false,
+            "title": "Toc Found",
+            "type": "boolean"
           }
         },
         "required": [
@@ -1185,19 +1425,7 @@
         "additionalProperties": false,
         "properties": {
           "checks": {
-            "additionalProperties": {
-              "anyOf": [
-                {
-                  "type": "boolean"
-                },
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
+            "additionalProperties": true,
             "title": "Checks",
             "type": "object"
           },
@@ -1312,6 +1540,41 @@
         "title": "ImportPreflightBatch",
         "type": "object"
       },
+      "IndexingOptions": {
+        "additionalProperties": false,
+        "description": "Safe, versioned controls for the public book indexing pipeline.\n\nParser thresholds deliberately stay server-owned so a workspace cannot\naccidentally create an index that is incompatible with its generation.",
+        "properties": {
+          "enrichment": {
+            "default": "captions",
+            "enum": [
+              "captions",
+              "vlm"
+            ],
+            "title": "Enrichment",
+            "type": "string"
+          },
+          "llm_fallback": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "off"
+            ],
+            "title": "Llm Fallback",
+            "type": "string"
+          },
+          "pipeline": {
+            "default": "book-v2",
+            "enum": [
+              "book-v2",
+              "compatible"
+            ],
+            "title": "Pipeline",
+            "type": "string"
+          }
+        },
+        "title": "IndexingOptions",
+        "type": "object"
+      },
       "IngestRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1324,6 +1587,9 @@
             ],
             "title": "Duplicate Policy",
             "type": "string"
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/IndexingOptions"
           },
           "metadata": {
             "additionalProperties": true,
@@ -1870,11 +2136,8 @@
             "type": "string"
           },
           "embedding_provider": {
+            "const": "ollama",
             "default": "ollama",
-            "enum": [
-              "ollama",
-              "sentence-transformers"
-            ],
             "title": "Embedding Provider",
             "type": "string"
           },
@@ -2100,6 +2363,22 @@
             "default": 0,
             "title": "Context Length",
             "type": "integer"
+          },
+          "digest": {
+            "default": "",
+            "title": "Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
           },
           "name": {
             "title": "Name",
@@ -2383,6 +2662,170 @@
         "title": "QualityReport",
         "type": "object"
       },
+      "QueryReadiness": {
+        "additionalProperties": false,
+        "properties": {
+          "checks": {
+            "additionalProperties": true,
+            "title": "Checks",
+            "type": "object"
+          },
+          "index_ready": {
+            "title": "Index Ready",
+            "type": "boolean"
+          },
+          "latency_status": {
+            "title": "Latency Status",
+            "type": "string"
+          },
+          "loaded_models": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Loaded Models",
+            "type": "array"
+          },
+          "model_digests": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Model Digests",
+            "type": "object"
+          },
+          "query_ready": {
+            "title": "Query Ready",
+            "type": "boolean"
+          },
+          "required_loaded_models": {
+            "default": 2,
+            "title": "Required Loaded Models",
+            "type": "integer"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "index_ready",
+          "query_ready",
+          "latency_status"
+        ],
+        "title": "QueryReadiness",
+        "type": "object"
+      },
+      "ReindexPreflight": {
+        "additionalProperties": false,
+        "properties": {
+          "available_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Available Bytes",
+            "type": "integer"
+          },
+          "checks": {
+            "additionalProperties": true,
+            "title": "Checks",
+            "type": "object"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "documents": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Documents",
+            "type": "integer"
+          },
+          "estimated_source_bytes": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Estimated Source Bytes",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "mode": {
+            "default": "full",
+            "title": "Mode",
+            "type": "string"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "ready"
+        ],
+        "title": "ReindexPreflight",
+        "type": "object"
+      },
+      "ReindexPreflightRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "indexing": {
+            "$ref": "#/components/schemas/IndexingOptions"
+          },
+          "mode": {
+            "const": "full",
+            "default": "full",
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "title": "ReindexPreflightRequest",
+        "type": "object"
+      },
+      "ReindexRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "const": "REINDEX",
+            "title": "Confirm",
+            "type": "string"
+          },
+          "indexing": {
+            "$ref": "#/components/schemas/IndexingOptions"
+          },
+          "mode": {
+            "const": "full",
+            "default": "full",
+            "title": "Mode",
+            "type": "string"
+          },
+          "preflight_id": {
+            "minLength": 1,
+            "title": "Preflight Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preflight_id",
+          "confirm"
+        ],
+        "title": "ReindexRequest",
+        "type": "object"
+      },
       "RestoreBackupRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2439,6 +2882,21 @@
       "RetrievalTiming": {
         "additionalProperties": false,
         "properties": {
+          "pack_ms": {
+            "default": 0.0,
+            "title": "Pack Ms",
+            "type": "number"
+          },
+          "rerank_ms": {
+            "default": 0.0,
+            "title": "Rerank Ms",
+            "type": "number"
+          },
+          "routing_ms": {
+            "default": 0.0,
+            "title": "Routing Ms",
+            "type": "number"
+          },
           "search_ms": {
             "title": "Search Ms",
             "type": "number"
@@ -2492,17 +2950,156 @@
         "title": "RunEvaluationRequest",
         "type": "object"
       },
+      "RunOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "deadline_ms": {
+            "anyOf": [
+              {
+                "maximum": 60000.0,
+                "minimum": 3000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Ms"
+          },
+          "max_answer_tokens": {
+            "anyOf": [
+              {
+                "maximum": 768.0,
+                "minimum": 64.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Answer Tokens"
+          },
+          "max_sources": {
+            "anyOf": [
+              {
+                "maximum": 14.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Sources"
+          },
+          "memory": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "off"
+            ],
+            "title": "Memory",
+            "type": "string"
+          },
+          "profile": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "fast",
+              "balanced",
+              "deep"
+            ],
+            "title": "Profile",
+            "type": "string"
+          }
+        },
+        "title": "RunOptions",
+        "type": "object"
+      },
       "RunReceipt": {
         "additionalProperties": false,
         "description": "Small, user-facing account of how an answer was produced.",
         "properties": {
+          "abstention": {
+            "default": "none",
+            "title": "Abstention",
+            "type": "string"
+          },
+          "budgets": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Budgets",
+            "type": "object"
+          },
           "cache_status": {
             "$ref": "#/components/schemas/AnswerCacheStatus"
+          },
+          "candidate_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "complexity": {
+            "default": "standard",
+            "title": "Complexity",
+            "type": "string"
+          },
+          "cut_reason": {
+            "default": "legacy",
+            "title": "Cut Reason",
+            "type": "string"
+          },
+          "done_reason": {
+            "default": "stop",
+            "title": "Done Reason",
+            "type": "string"
+          },
+          "facet_coverage": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Facet Coverage",
+            "type": "object"
+          },
+          "facets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Facets",
+            "type": "array"
+          },
+          "fallbacks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Fallbacks",
+            "type": "array"
+          },
+          "model_digests": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Model Digests",
+            "type": "object"
           },
           "new_source_count": {
             "minimum": 0.0,
             "title": "New Source Count",
             "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
           },
           "phase_timings_ms": {
             "additionalProperties": {
@@ -2510,6 +3107,24 @@
             },
             "title": "Phase Timings Ms",
             "type": "object"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Tokens"
+          },
+          "rejected_claims": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Rejected Claims",
+            "type": "integer"
           },
           "rerank_status": {
             "default": "unknown",
@@ -2526,8 +3141,24 @@
             "title": "Reused Source Count",
             "type": "integer"
           },
+          "route": {
+            "default": "hybrid",
+            "title": "Route",
+            "type": "string"
+          },
+          "selected_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Selected Count",
+            "type": "integer"
+          },
           "session_id": {
             "title": "Session Id",
+            "type": "string"
+          },
+          "singleflight_status": {
+            "default": "none",
+            "title": "Singleflight Status",
             "type": "string"
           },
           "source_check": {
@@ -2537,6 +3168,30 @@
             "minimum": 0.0,
             "title": "Source Count",
             "type": "integer"
+          },
+          "time_to_first_token_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time To First Token Ms"
+          },
+          "tokens_per_second": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tokens Per Second"
           },
           "total_ms": {
             "minimum": 0.0,
@@ -2597,6 +3252,9 @@
             "title": "Mode",
             "type": "string"
           },
+          "options": {
+            "$ref": "#/components/schemas/RunOptions"
+          },
           "question": {
             "minLength": 1,
             "title": "Question",
@@ -2636,6 +3294,13 @@
               "$ref": "#/components/schemas/Citation"
             },
             "title": "Citations",
+            "type": "array"
+          },
+          "claims": {
+            "items": {
+              "$ref": "#/components/schemas/AnswerClaim"
+            },
+            "title": "Claims",
             "type": "array"
           },
           "created_at": {
@@ -3042,6 +3707,50 @@
         "title": "SearchHit",
         "type": "object"
       },
+      "SearchOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "deadline_ms": {
+            "anyOf": [
+              {
+                "maximum": 35000.0,
+                "minimum": 3000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline Ms"
+          },
+          "max_sources": {
+            "anyOf": [
+              {
+                "maximum": 14.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Sources"
+          },
+          "profile": {
+            "default": "auto",
+            "enum": [
+              "auto",
+              "fast",
+              "balanced",
+              "deep"
+            ],
+            "title": "Profile",
+            "type": "string"
+          }
+        },
+        "title": "SearchOptions",
+        "type": "object"
+      },
       "SearchRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3063,6 +3772,9 @@
             "minimum": 1.0,
             "title": "Limit",
             "type": "integer"
+          },
+          "options": {
+            "$ref": "#/components/schemas/SearchOptions"
           },
           "query": {
             "minLength": 1,
@@ -5271,6 +5983,61 @@
         "summary": "Delete Document"
       }
     },
+    "/v1/workspaces/{workspace_id}/documents/{document_id}/knowledge-snapshot": {
+      "get": {
+        "operationId": "document_knowledge_snapshot_v1_workspaces__workspace_id__documents__document_id__knowledge_snapshot_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Document Knowledge Snapshot V1 Workspaces  Workspace Id  Documents  Document Id  Knowledge Snapshot Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Document Knowledge Snapshot"
+      }
+    },
     "/v1/workspaces/{workspace_id}/documents/{document_id}/metadata": {
       "patch": {
         "operationId": "patch_book_metadata_v1_workspaces__workspace_id__documents__document_id__metadata_patch",
@@ -5378,6 +6145,61 @@
           }
         ],
         "summary": "Restore Document"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/documents/{document_id}/structure": {
+      "get": {
+        "operationId": "document_structure_v1_workspaces__workspace_id__documents__document_id__structure_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Document Structure V1 Workspaces  Workspace Id  Documents  Document Id  Structure Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Document Structure"
       }
     },
     "/v1/workspaces/{workspace_id}/evaluations/generate": {
@@ -5947,6 +6769,167 @@
           }
         ],
         "summary": "Quality Report"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/readiness": {
+      "get": {
+        "operationId": "workspace_query_readiness_v1_workspaces__workspace_id__readiness_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryReadiness"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Workspace Query Readiness"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/reindex": {
+      "post": {
+        "operationId": "reindex_workspace_v1_workspaces__workspace_id__reindex_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReindexRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotentResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reindex Workspace"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/reindex/preflight": {
+      "post": {
+        "operationId": "preflight_reindex_v1_workspaces__workspace_id__reindex_preflight_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReindexPreflightRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReindexPreflight"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preflight Reindex"
       }
     },
     "/v1/workspaces/{workspace_id}/runs": {

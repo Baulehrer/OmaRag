@@ -1,191 +1,98 @@
 <p align="center">
-  <img src="assets/omarag.svg" width="128" alt="OmaRag twin-oracle mark">
+  <img src="assets/omarag.svg" width="128" alt="OmaRag">
 </p>
 
 <h1 align="center">OmaRag</h1>
-<p align="center"><strong>Oracle of Metis &amp; Aletheia</strong></p>
+
 <p align="center">
-  Turn a folder of PDFs into a private, cited knowledge library—without leaving the terminal.
+  <strong>Deine Fachbücher. Deine Fragen. Antworten mit Seitenangabe.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/Baulehrer/OmaRag/actions/workflows/ci.yml"><img src="https://github.com/Baulehrer/OmaRag/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/Baulehrer/OmaRag/releases/latest"><img src="https://img.shields.io/github/v/release/Baulehrer/OmaRag?color=f38ba8" alt="Release"></a>
-  <a href="https://github.com/Baulehrer/OmaRag/pkgs/container/omarag"><img src="https://img.shields.io/badge/container-GHCR-89dceb" alt="GHCR"></a>
-  <img src="https://img.shields.io/badge/Haiku%20RAG-vanilla%20latest--gated-a6e3a1" alt="Vanilla Haiku RAG latest gated">
+  <a href="https://github.com/Baulehrer/OmaRag/releases/latest">Neueste Version</a> ·
+  <a href="https://github.com/Baulehrer/OmaRag/issues">Hilfe</a>
 </p>
 
-![OmaRag dashboard](docs/screenshots/dashboard.png)
+![OmaRag](docs/screenshots/dashboard.png)
 
-## Your books. Your machine. Answers with receipts.
+## Was ist OmaRag?
 
-OmaRag is a clean, three-pane terminal workbench for local knowledge. The left sidebar
-moves between Chat, Library, Models and Settings, the center holds every action and setting, and the
-right inspector keeps sources or read-only technical detail in view. Select PDFs or whole folders, let the library index in
-the background, then ask questions in plain language. Every answer stays connected to its
-evidence: title, page, excerpt, layout position and—where available—the original figure or table.
+OmaRag macht aus deinen PDF-Fachbüchern eine private Wissensbibliothek.
 
-- **Library instead of file pile.** Create focused libraries, watch indexing progress, tag and
-  filter documents, retry failures and safely remove or restore material.
-- **Sources you can inspect.** Select every citation and page with arrows or the mouse, open the
-  original PDF at the exact page, or show a lazily rendered preview with highlighted anchors.
-- **Structure-aware reading.** Docling preserves headings, paragraphs, lists and tables so chunks
-  follow the document rather than arbitrary character counts.
-- **Books are works, not filenames.** Import review shows detected title, author, edition and ISBN;
-  Oracle keeps immutable originals and searches the newest active edition unless you choose one.
-- **Large-book friendly.** Long PDFs are processed in bounded page segments. There is no product
-  limit on file size or page count. Interrupted books continue at the last committed segment.
-- **Fast on the second pass.** Content fingerprints detect duplicates, a bounded conversion cache
-  reuses Docling output and exact repeat questions reuse a generation-bound answer. Any book or
-  settings change invalidates it automatically.
-- **Retrieval you can audit.** The Retrieval Inspector shows ranked chunks, scores, pages and
-  end-to-end search timing without reaching into private Haiku internals.
-- **Answers with a receipt.** Conversation turns stay connected. Source shows whether an answer was
-  fresh or safely reused, how many sources were checked, and which evidence is known or new.
-- **Quality you can measure.** Reproducible Silver cases compare FTS, vector and hybrid retrieval
-  with Recall@5/10, MRR, nDCG and correct-page hit rate.
-- **Strict means strict.** Stable evidence IDs, source-only prompting, technical-token validation
-  and a defined refusal prevent unsupported numbers, units and standards from slipping through.
-- **Models for the machine you own.** Install and activate a Fast, Balanced or Quality stack in one
-  step; browse Chat, VL, Embedding and Rerank roles; or add an Ollama ID or local GGUF.
-- **The machine stays visible.** A compact hardware rail shows CPU, RAM, VRAM and the configured,
-  loaded or active model for every role without opening another screen.
-- **Designed not to eat the laptop.** Only one heavy operation runs at a time, chat gets priority
-  before the next indexing segment, and model residency can be temporary. Systemd and Docker add
-  hard memory ceilings.
-- **Terminal-native, not keyboard-exclusive.** Tab cycles Sidebar, Workspace and Inspector;
-  arrow navigation, direct shortcuts, Shift+Arrow role switching, mouse focus, scrolling and
-  clickable actions all work together.
-- **At home on Omarchy.** The optional Omarchy System palette follows the active Hyprland desktop
-  colors automatically and falls back safely on other Linux desktops.
-- **Local-first.** The bridge talks to a normal, unmodified Haiku RAG runtime and a local
-  Ollama service. Libraries, models and tokens remain on your machine.
+Du fügst Bücher hinzu und stellst Fragen in normaler Sprache. OmaRag sucht die passenden Stellen,
+erstellt eine verständliche Antwort und zeigt dir, aus welchem Buch und von welcher Seite sie
+stammt.
 
-## See it in motion
+Deine Bücher und Fragen bleiben auf deinem Rechner.
 
-| Add knowledge | Hardware-matched models |
-|---|---|
-| [![PDF and folder browser](docs/screenshots/knowledge-browser.png)](docs/screenshots/knowledge-browser.png) | [![Models and presets](docs/screenshots/model-foundry.png)](docs/screenshots/model-foundry.png) |
-| Select several PDFs or folders with `Space`, review once, then index. | Install Fast, Balanced or Quality, or tune the four model roles yourself. |
+## Was kann OmaRag?
 
-| Keyboard and mouse help | Fourteen local themes + Omarchy System |
-|---|---|
-| [![Keyboard and mouse help](docs/screenshots/keyboard-and-mouse.png)](docs/screenshots/keyboard-and-mouse.png) | [![Theme browser](docs/screenshots/themes.png)](docs/screenshots/themes.png) |
+- ganze Bücher und Ordner einlesen;
+- Inhaltsverzeichnisse, Kapitel, Register und Glossare erkennen;
+- passende Textstellen auch bei schwierigen Fragen finden;
+- Antworten mit Buch, Seite und Originalausschnitt belegen;
+- große Bücher schrittweise verarbeiten und unterbrochene Vorgänge fortsetzen;
+- mehrere Bibliotheken für unterschiedliche Themen verwalten;
+- vollständig mit Tastatur oder Maus bedient werden.
 
-## Start in one command
+## Installation
 
-Linux x86_64, Ollama and a working internet connection for the first model download are required.
+Du brauchst einen Linux-PC mit x86-64-Prozessor und [Ollama](https://ollama.com/). 16 GB
+Arbeitsspeicher sind empfohlen.
+
+Öffne ein Terminal und führe aus:
 
 ```bash
-curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh \
-  | sh
+curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh | sh
+```
+
+Danach startest du OmaRag mit:
+
+```bash
 oracle
 ```
 
-The installer creates a private local token, installs the client and slim Haiku-backed daemon,
-stages the newest vanilla Haiku release behind a public-API compatibility probe, enables
-conservative memory limits, and schedules a randomized weekly update check. Keep the current
-version without the timer with `--no-auto-update`.
+Beim ersten Start hilft dir OmaRag dabei, ein passendes Modell einzurichten.
 
-Prefer to inspect first?
+## Die ersten Schritte
 
-```bash
-curl -fLO https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh
-less install.sh
-sh install.sh
-```
+1. Erstelle eine Bibliothek.
+2. Füge deine PDF-Bücher hinzu.
+3. Warte, bis die Bücher fertig eingelesen sind.
+4. Öffne den Chat und stelle deine Frage.
+5. Wähle eine Quelle aus, um die Originalseite zu sehen.
 
-### Portable AppImage
-
-The AppImage is the small console client. It connects to the daemon installed above or to a
-Docker-hosted daemon; it intentionally does not bundle Python, Haiku, models or your libraries.
+## Aktualisieren
 
 ```bash
-chmod +x OmaRag-1.0.0-x86_64.AppImage
-./OmaRag-1.0.0-x86_64.AppImage
+oracle-update
 ```
 
-It contains GitHub zsync update metadata, so `AppImageUpdate` can apply binary-delta updates when
-that tool is available. The installed `oracle-update` command works independently of it.
+Nach einem großen Update kann OmaRag eine vollständige Neuindexierung verlangen. Deine
+Originalbücher bleiben dabei erhalten.
 
-### Docker backend
+## AppImage
+
+Auf der Seite [Releases](https://github.com/Baulehrer/OmaRag/releases/latest) findest du zusätzlich
+eine portable AppImage. Sie ist nur die Benutzeroberfläche und verbindet sich mit dem installierten
+OmaRag-Dienst.
+
+## Datenschutz
+
+Die normale Suche, das Einlesen und die Antworten laufen lokal. Eine Internetverbindung wird nur
+für Installation, Updates und das Herunterladen von Modellen benötigt.
+
+## Hilfe
+
+Wenn etwas nicht funktioniert, starte zuerst:
 
 ```bash
-export OMARAG_TOKEN="$(openssl rand -hex 32)"
-docker compose -f deploy/compose.yaml up -d
-docker compose -f deploy/compose.yaml ps
+oracle-cli doctor
 ```
 
-The CPU image runs without root privileges, stores libraries in a named volume, reaches Ollama on
-the host through `host.docker.internal`, and exposes the API only on `127.0.0.1:8765`.
+Du kannst anschließend ein [GitHub-Issue](https://github.com/Baulehrer/OmaRag/issues) erstellen.
+Bitte lade dort keine privaten Bücher oder Zugangsdaten hoch.
 
-### Lean runtime behavior
+## Lizenz
 
-The long-lived API process does not import Haiku, Docling, PyTorch or SentenceTransformers.
-Indexing runs in a disposable worker; search and answers share an on-demand worker. Its adaptive
-residency is 120 seconds when memory is healthy, 30 seconds when guarded and immediate release
-when indexing is waiting for memory. This returns native model allocations and swap to the operating system
-instead of retaining a conversion high-water mark in an idle daemon. Worker budgets can be tuned
-with `OMARAG_WORKER_IMPORT_MEMORY_MAX_MB`, `OMARAG_WORKER_QUERY_MEMORY_MAX_MB` and
-`OMARAG_WORKER_QUERY_IDLE_SECONDS`. The systemd unit delegates child cgroups and the workers also
-carry an RSS-plus-swap watchdog for environments without cgroup delegation.
-The API itself is placed in a 768 MiB, no-swap sibling cgroup, so model pressure cannot page out
-the control plane; `OMARAG_API_MEMORY_MAX_MB` adjusts that ceiling when required.
-Ollama models used by that worker are explicitly unloaded at the same boundary; set
-`OMARAG_UNLOAD_OLLAMA_MODELS_ON_WORKER_EXIT=false` only when deliberate model residency matters
-more than the smallest idle footprint.
-
-Run `oracle-cli doctor` for a plain-English readiness report, or `oracle-cli --json doctor` for
-automation. It checks component versions, Haiku, configured models, memory, workspace permissions
-and cgroup support without reading document contents or printing the private API token.
-
-## The few controls worth remembering
-
-| Control | Action |
-|---|---|
-| `Tab` / `Shift+Tab` | Cycle Sidebar → Workspace → Inspector |
-| Arrow keys | Move or scroll in the focused pane |
-| `Enter` | Open, confirm or start typing in Chat |
-| `Space` | Select PDFs and folders in the browser |
-| `I` | Index new PDFs |
-| `Ctrl+M` | Open the integrated model catalog |
-| `Ctrl+P` / `:` | Open the command palette |
-| `/` | Search the active view |
-| `Ctrl+T` | Cycle all palettes, including automatic Omarchy system colors |
-| `Ctrl+C` | Exit OmaRag cleanly |
-| `?` | Show contextual help |
-| `Ctrl+Z` | Undo the latest supported library action |
-| Mouse | Focus, choose, scroll and activate visible controls |
-
-## What “offline” means here
-
-Questions, indexing and model inference run locally. Network access is only needed when you ask
-the model foundry to download something, when the updater checks GitHub, or when you explicitly
-configure a remote provider. The default library profile does none of those during normal use.
-
-OmaRag keeps operational metadata in SQLite and lets **Vanilla Haiku RAG** remain the sole owner
-of the vector database. It does not patch or fork Haiku's retrieval behavior.
-
-## Release 1.0 boundaries
-
-- Linux x86_64 is the supported packaged platform.
-- Indexed originals are kept immutable for reproducible citations. OmaRag uses a copy-on-write
-  filesystem clone when available and otherwise copies and hashes in one streaming pass; it never
-  hardlinks a mutable source file into the evidence archive.
-- The backend is local-first. Authenticated citation previews now work across the API; opening the
-  original PDF still requires the file to be reachable by the client or its desktop opener.
-- Visual evidence is rendered only when requested and cropped from Docling provenance. No VL model
-  scans every page by default.
-- Model compatibility is a conservative estimate, not a promise that another desktop workload
-  cannot consume the remaining RAM or VRAM.
-
-Found a sharp edge? [Open an issue](https://github.com/Baulehrer/OmaRag/issues) with
-the visible error and the `Indexing` entry—never attach your private PDFs or auth token.
-
-The TUI layout and quiet aqua-slate direction are inspired by
-[SOAP](https://github.com/GhifariArsa/soap); OmaRag's interaction model and implementation are its
-own.
-
-## License
-
-Licensed under MIT.
+OmaRag steht unter der MIT-Lizenz.

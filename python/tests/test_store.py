@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from omarag_bridge.models.api import CreateWorkspaceRequest
+from omarag_bridge.models.book import (
+    BookRagGraph,
+    BookStructure,
+    BookStructureNode,
+    EvidenceAnchor,
+    EvidenceRecord,
+    KnowledgeTerm,
+    TermTarget,
+)
 from omarag_bridge.models.domain import JobStatus
+from omarag_bridge.services.book_snapshot_service import build_book_knowledge_snapshot
 from omarag_bridge.services.workspace_service import WorkspaceService
 from omarag_bridge.store import StateStore
 
@@ -133,6 +144,10 @@ def test_answer_cache_is_bounded_and_document_generations_invalidate_it(tmp_path
         )
     assert store.answer_cache_size(workspace.id) == 2
     assert store.cached_answer("key-0") is None
+    cached = store.cached_answer("key-2")
+    assert cached is not None
+    assert cached["claims"] == []
+    assert cached["metadata"] == {}
 
     before = store.workspace_index_fingerprint(workspace.id)
     store.upsert_document(
@@ -149,3 +164,257 @@ def test_answer_cache_is_bounded_and_document_generations_invalidate_it(tmp_path
     assert store.workspace_index_fingerprint(workspace.id) != before
     assert store.answer_cache_size(workspace.id) == 0
     store.close()
+
+
+def test_book_v2_store_round_trip_and_generation_gate(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state.sqlite3")
+    workspace = WorkspaceService(tmp_path / "workspaces", store).create(
+        CreateWorkspaceRequest(name="Book v2")
+    )
+    store.begin_index_generation(
+        workspace.id,
+        "gen-v2",
+        "book-index-v2",
+        "config-v2",
+    )
+    assert store.workspace_index_generation(workspace.id)["status"] == "maintenance"
+
+    structure = BookStructure(
+        logical_document_id="book-v2",
+        mode="body-headings",
+        confidence=0.9,
+        total_pages=10,
+        nodes=[
+            BookStructureNode(
+                node_id="sec-1",
+                depth=0,
+                ordinal=0,
+                title="Grundlagen",
+                normalized_title="grundlagen",
+                page_start=1,
+                page_end=10,
+                source_kind="body-heading",
+                confidence=0.9,
+            )
+        ],
+    )
+    evidence = EvidenceRecord(
+        evidence_id="ev-one",
+        raw_content="Beleg",
+        content_hash="raw-hash",
+        anchors=[EvidenceAnchor(page_no=2, source_ref="#/texts/1")],
+        page_start=2,
+        page_end=2,
+        section_node_id="sec-1",
+    )
+    snapshot = build_book_knowledge_snapshot(
+        logical_document_id="book-v2",
+        generation_id="gen-v2",
+        fingerprint="pdf-sha",
+        config_hash="config-v2",
+        structure=structure,
+        evidence=[evidence],
+        graph=BookRagGraph(
+            terms=[
+                KnowledgeTerm(
+                    term_id="term-beleg",
+                    canonical="Belegbegriff",
+                    normalized="belegbegriff",
+                    kind="index",
+                    confidence=0.95,
+                )
+            ],
+            targets=[
+                TermTarget(
+                    term_id="term-beleg",
+                    node_id="sec-1",
+                    page_start=2,
+                    page_end=2,
+                    evidence_id="ev-one",
+                    relation="located_in",
+                    confidence=0.95,
+                )
+            ],
+        ),
+    )
+    store.upsert_document(
+        workspace.id,
+        "/books/v2.pdf",
+        "pdf-sha",
+        {
+            "logical_document_id": "book-v2",
+            "generation_id": "gen-v2",
+            "pipeline_version": "book-index-v2",
+            "book_knowledge_snapshot": snapshot.model_dump(mode="json"),
+            "segments": [
+                {
+                    "document_id": "haiku-v2-segment",
+                    "segment_index": 0,
+                    "page_start": 1,
+                    "page_end": 10,
+                    "core_start": 1,
+                    "core_end": 10,
+                    "conversion_start": 1,
+                    "conversion_end": 10,
+                    "role": "body",
+                }
+            ],
+            "chunk_manifest": [
+                {
+                    "chunk_id": "haiku-chunk",
+                    "segment_index": 0,
+                    "chunk_order": 0,
+                    "content_hash": "raw-hash",
+                    "pages": [2],
+                    "headings": ["Grundlagen"],
+                    "labels": ["paragraph"],
+                    "doc_item_refs": ["#/texts/1"],
+                    "generation_id": "gen-v2",
+                    "evidence_id": "ev-one",
+                    "global_order": 0,
+                    "anchor_page": 2,
+                    "page_labels": ["2"],
+                    "section_node_id": "sec-1",
+                    "raw_tokens": 2,
+                    "context_hash": "ctx",
+                }
+            ],
+        },
+    )
+    assert store.book_structure(workspace.id, "book-v2")["nodes"][0]["title"] == "Grundlagen"
+    restored = store.book_knowledge_snapshot(workspace.id, "book-v2")
+    assert restored["schema_version"] == "2"
+    assert restored["evidence"][0]["evidence_id"] == "ev-one"
+
+    routed = store.route_book_knowledge(workspace.id, "Grundlagen", limit=4)
+    assert routed[0]["section_node_id"] == "sec-1"
+    assert routed[0]["retrieval_path"] == "book-section"
+    routed_evidence = store.route_book_knowledge(workspace.id, "Belegbegriff", limit=4)
+    assert routed_evidence[0]["evidence_id"] == "ev-one"
+    assert routed_evidence[0]["chunk_id"] == "haiku-chunk"
+
+    report = store.validate_index_generation(workspace.id, "gen-v2")
+    assert report["valid"] is True
+    store.update_index_generation(workspace.id, "gen-v2", status="ready")
+    assert store.workspace_index_generation(workspace.id)["status"] == "ready"
+
+    store.clear_workspace_index(workspace.id, preserve_books=True)
+    assert store.book_records(workspace.id)
+    assert store.chunk_manifest(workspace.id) == []
+    assert store.book_structure(workspace.id, "book-v2") is None
+    store.close()
+
+
+def test_legacy_store_migrates_v2_columns_and_session_claims(tmp_path: Path) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    store = StateStore(database)
+    workspace = WorkspaceService(tmp_path / "workspaces", store).create(
+        CreateWorkspaceRequest(name="Session claims")
+    )
+    first = store.create_run(
+        "run-first",
+        workspace.id,
+        {
+            "session_id": "session-one",
+            "question": "Was ist Beton?",
+            "evidence_mode": "strict",
+        },
+    )
+    store.update_run(
+        first.id,
+        status=JobStatus.COMPLETED,
+        answer="Ein Baustoff.",
+        claims=[
+            {
+                "id": "claim-one",
+                "text": "Beton ist ein Baustoff.",
+                "evidence_ids": [],
+                "status": "supported",
+            }
+        ],
+    )
+    current = store.create_run(
+        "run-current",
+        workspace.id,
+        {
+            "session_id": "session-one",
+            "question": "Und woraus?",
+            "evidence_mode": "strict",
+        },
+    )
+    recent = store.recent_completed_session_runs(workspace.id, "session-one", current.id, limit=4)
+    assert [run.id for run in recent] == [first.id]
+    assert recent[0].claims[0].status == "supported"
+    store._db.execute(
+        "UPDATE runs SET created_at = datetime('now', '-25 hours') WHERE id = ?", (first.id,)
+    )
+    assert not store.recent_completed_session_runs(
+        workspace.id, "session-one", current.id, max_age_hours=24
+    )
+    store.close()
+
+    reopened = StateStore(database)
+    columns = {
+        row["name"] for row in reopened._db.execute("PRAGMA table_info(chunk_manifest)").fetchall()
+    }
+    assert {"evidence_id", "section_node_id", "context_hash"} <= columns
+    assert "claims_json" in {
+        row["name"] for row in reopened._db.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    assert {"claims_json", "metadata_json"} <= {
+        row["name"] for row in reopened._db.execute("PRAGMA table_info(answer_cache)").fetchall()
+    }
+    reopened.close()
+
+
+def test_actual_legacy_tables_receive_additive_v2_migration(tmp_path: Path) -> None:
+    database = tmp_path / "pre-v2.sqlite3"
+    legacy = sqlite3.connect(database)
+    legacy.executescript(
+        """
+        CREATE TABLE runs (
+            id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            status TEXT NOT NULL, question TEXT NOT NULL, evidence_mode TEXT NOT NULL,
+            answer TEXT NOT NULL DEFAULT '', citations_json TEXT NOT NULL DEFAULT '[]',
+            receipt_json TEXT, error_json TEXT, request_json TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_event_id INTEGER
+        );
+        CREATE TABLE document_segments (
+            workspace_id TEXT NOT NULL, logical_document_id TEXT NOT NULL,
+            generation_id TEXT NOT NULL, segment_document_id TEXT NOT NULL,
+            page_start INTEGER NOT NULL, page_end INTEGER NOT NULL,
+            PRIMARY KEY(workspace_id, segment_document_id)
+        );
+        CREATE TABLE chunk_manifest (
+            workspace_id TEXT NOT NULL, logical_document_id TEXT NOT NULL,
+            segment_document_id TEXT NOT NULL, chunk_id TEXT NOT NULL,
+            chunk_order INTEGER NOT NULL, content_hash TEXT NOT NULL,
+            pages_json TEXT NOT NULL DEFAULT '[]', headings_json TEXT NOT NULL DEFAULT '[]',
+            labels_json TEXT NOT NULL DEFAULT '[]', refs_json TEXT NOT NULL DEFAULT '[]',
+            PRIMARY KEY(workspace_id, chunk_id)
+        );
+        """
+    )
+    legacy.close()
+
+    migrated = StateStore(database)
+    assert "claims_json" in {
+        row["name"] for row in migrated._db.execute("PRAGMA table_info(runs)").fetchall()
+    }
+    assert {
+        "core_start",
+        "core_end",
+        "conversion_start",
+        "conversion_end",
+        "page_number_mode",
+    } <= {
+        row["name"]
+        for row in migrated._db.execute("PRAGMA table_info(document_segments)").fetchall()
+    }
+    assert {"evidence_id", "section_node_id", "quality_flags_json"} <= {
+        row["name"] for row in migrated._db.execute("PRAGMA table_info(chunk_manifest)").fetchall()
+    }
+    assert migrated._db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'book_structures'"
+    ).fetchone()
+    migrated.close()
