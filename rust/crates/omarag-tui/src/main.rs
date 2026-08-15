@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
     let model_api = ModelApi::new(args.url.clone(), args.token.clone())?;
     let client = Arc::new(HttpOmaRagClient::new(args.url, args.token)?);
     let mut state = AppState::default();
-    let preferences_path = oracle_config_dir().join("ui-state.json");
+    let preferences_path = omarag_config_dir().join("ui-state.json");
     if let Ok(preferences) = load_preferences(&preferences_path) {
         state.apply_preferences(preferences);
     }
@@ -1727,7 +1727,7 @@ fn render_pdf_page(path: &str, page: u32) -> Result<std::path::PathBuf, String> 
     if !std::path::Path::new(path).exists() {
         return Err(format!("PDF no longer exists: {path}"));
     }
-    let cache = std::env::temp_dir().join("oracle-of-daedalus-previews");
+    let cache = std::env::temp_dir().join("omarag-previews");
     std::fs::create_dir_all(&cache)
         .map_err(|error| format!("Could not create preview cache: {error}"))?;
     let mut hasher = DefaultHasher::new();
@@ -2248,7 +2248,7 @@ fn copy_text(value: &str) -> Result<(), String> {
 }
 
 fn export_chat(workspace: &str, session: &omarag_app::ChatSession) -> Result<(), String> {
-    let directory = oracle_data_dir().join("exports");
+    let directory = omarag_data_dir().join("exports");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let safe = workspace
         .chars()
@@ -2297,24 +2297,24 @@ fn open_pdf_or_path(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn oracle_config_dir() -> std::path::PathBuf {
+fn omarag_config_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
         })
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("oracle-of-daedalus")
+        .join("omarag")
 }
 
-fn oracle_data_dir() -> std::path::PathBuf {
+fn omarag_data_dir() -> std::path::PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/share"))
         })
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("oracle-of-daedalus")
+        .join("omarag")
 }
 
 fn load_preferences(path: &std::path::Path) -> Result<UiPreferences, String> {

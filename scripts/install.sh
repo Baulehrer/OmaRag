@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${OMARAG_REPOSITORY:-${ORACLE_REPOSITORY:-Baulehrer/OmaRag}}
+REPOSITORY=${OMARAG_REPOSITORY:-Baulehrer/OmaRag}
 VERSION=1.2.0
-PREFIX=${ORACLE_PREFIX:-"$HOME/.local"}
+PREFIX=${OMARAG_PREFIX:-"$HOME/.local"}
 INSTALL_SERVICE=1
 INSTALL_UPDATER=1
 DRY_RUN=0
@@ -33,10 +33,10 @@ case "$(uname -m)" in
 esac
 
 TAG="v$VERSION"
-BASE_URL=${ORACLE_BASE_URL:-"https://github.com/$REPOSITORY/releases/download/$TAG"}
+BASE_URL=${OMARAG_BASE_URL:-"https://github.com/$REPOSITORY/releases/download/$TAG"}
 ARCHIVE="omarag-$VERSION-linux-$ARCH.tar.gz"
 WHEEL="omarag_bridge-$VERSION-py3-none-any.whl"
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/oracle-install.XXXXXX")
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/omarag-install.XXXXXX")
 CANDIDATE_VENV=
 cleanup() {
     rm -rf "$WORK_DIR"
@@ -46,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-printf 'OmaRag %s · Oracle of Metis & Aletheia -> %s\n' "$VERSION" "$PREFIX"
+printf 'OmaRag %s -> %s\n' "$VERSION" "$PREFIX"
 if [ "$DRY_RUN" -eq 1 ]; then
     printf 'Would download %s and %s, verify SHA-256, install the daemon, client and updater.\n' \
         "$ARCHIVE" "$WHEEL"
@@ -66,10 +66,10 @@ curl --fail --location --retry 3 "$BASE_URL/SHA256SUMS" --output "$WORK_DIR/SHA2
 (cd "$WORK_DIR" && sha256sum --check --ignore-missing SHA256SUMS)
 tar -xzf "$WORK_DIR/$ARCHIVE" -C "$WORK_DIR"
 
-mkdir -p "$PREFIX/bin" "$PREFIX/share/oracle-of-daedalus"
-install -m755 "$WORK_DIR/oracle-bin" "$PREFIX/bin/oracle-bin"
-install -m755 "$WORK_DIR/oracle-cli-bin" "$PREFIX/bin/oracle-cli-bin"
-printf '%s\n' "$VERSION" > "$PREFIX/share/oracle-of-daedalus/VERSION"
+mkdir -p "$PREFIX/bin" "$PREFIX/share/omarag"
+install -m755 "$WORK_DIR/omarag-bin" "$PREFIX/bin/omarag-bin"
+install -m755 "$WORK_DIR/omarag-cli-bin" "$PREFIX/bin/omarag-cli-bin"
+printf '%s\n' "$VERSION" > "$PREFIX/share/omarag/VERSION"
 
 if ! command -v uv >/dev/null 2>&1; then
     curl --fail --location --retry 3 https://astral.sh/uv/install.sh --output "$WORK_DIR/install-uv.sh"
@@ -81,9 +81,9 @@ command -v uv >/dev/null 2>&1 || {
     exit 1
 }
 
-VENV="$PREFIX/share/oracle-of-daedalus/venv"
-CANDIDATE_VENV="$PREFIX/share/oracle-of-daedalus/.venv-candidate-$$"
-PREVIOUS_VENV="$PREFIX/share/oracle-of-daedalus/venv-previous"
+VENV="$PREFIX/share/omarag/venv"
+CANDIDATE_VENV="$PREFIX/share/omarag/.venv-candidate-$$"
+PREVIOUS_VENV="$PREFIX/share/omarag/venv-previous"
 uv venv --python 3.12 "$CANDIDATE_VENV"
 uv pip install --python "$CANDIDATE_VENV/bin/python" --torch-backend=cpu \
     "$WORK_DIR/$WHEEL" 'haiku-rag-slim[docling,cross-encoder]>=0.72' 'pypdfium2>=5,<6'
@@ -91,7 +91,7 @@ printf 'Checking public Haiku compatibility...\n'
 "$CANDIDATE_VENV/bin/python" -m omarag_bridge.compat_probe
 
 # The running environment stays untouched until the newest dependency set has
-# passed Oracle's public-API gate. Keep the last known-good runtime for repair.
+# passed OmaRag's public-API gate. Keep the last known-good runtime for repair.
 if [ -d "$PREVIOUS_VENV" ]; then
     mv "$PREVIOUS_VENV" "$WORK_DIR/older-venv"
 fi
@@ -108,11 +108,11 @@ fi
 CANDIDATE_VENV=
 
 CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
-CONFIG_DIR="$CONFIG_HOME/oracle-of-daedalus"
+CONFIG_DIR="$CONFIG_HOME/omarag"
 DATA_HOME=${XDG_DATA_HOME:-"$HOME/.local/share"}
-DATA_DIR="$DATA_HOME/oracle-of-daedalus"
+DATA_DIR="$DATA_HOME/omarag"
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
-ENV_FILE="$CONFIG_DIR/oracle.env"
+ENV_FILE="$CONFIG_DIR/omarag.env"
 if [ ! -s "$ENV_FILE" ]; then
     TOKEN=$("$VENV/bin/python" -c 'import secrets; print(secrets.token_urlsafe(32))')
     umask 077
@@ -135,7 +135,7 @@ write_wrapper() {
         # These expressions belong to the generated launcher.
         # shellcheck disable=SC2016
         printf '%s\n' 'if [ -r "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi'
-        printf 'export ORACLE_VERSION=%s\n' "$version"
+        printf 'export OMARAG_VERSION=%s\n' "$version"
         # shellcheck disable=SC2016
         printf '%s\n' \
             'export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-2}' \
@@ -151,10 +151,10 @@ write_wrapper() {
     chmod 755 "$temporary"
     mv "$temporary" "$target"
 }
-write_wrapper "$PREFIX/bin/oracle" "$PREFIX/bin/oracle-bin" "$VERSION"
-write_wrapper "$PREFIX/bin/oracle-cli" "$PREFIX/bin/oracle-cli-bin" "$VERSION"
+write_wrapper "$PREFIX/bin/omarag" "$PREFIX/bin/omarag-bin" "$VERSION"
+write_wrapper "$PREFIX/bin/omarag-cli" "$PREFIX/bin/omarag-cli-bin" "$VERSION"
 
-install -m755 "$WORK_DIR/oracle-update" "$PREFIX/bin/oracle-update"
+install -m755 "$WORK_DIR/omarag-update" "$PREFIX/bin/omarag-update"
 
 if [ "$INSTALL_SERVICE" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
     USER_UNITS="$CONFIG_HOME/systemd/user"
@@ -163,20 +163,20 @@ if [ "$INSTALL_SERVICE" -eq 1 ] && command -v systemctl >/dev/null 2>&1; then
         -e "s|@VENV@|$VENV|g" \
         -e "s|@ENV_FILE@|$ENV_FILE|g" \
         -e "s|@DATA_DIR@|$DATA_DIR|g" \
-        "$WORK_DIR/oracle-daedalus.service" > "$USER_UNITS/oracle-daedalus.service"
+        "$WORK_DIR/omarag.service" > "$USER_UNITS/omarag.service"
     if [ "$INSTALL_UPDATER" -eq 1 ]; then
         sed -e "s|@PREFIX@|$PREFIX|g" \
-            "$WORK_DIR/oracle-daedalus-update.service" \
-            > "$USER_UNITS/oracle-daedalus-update.service"
-        install -m644 "$WORK_DIR/oracle-daedalus-update.timer" \
-            "$USER_UNITS/oracle-daedalus-update.timer"
+            "$WORK_DIR/omarag-update.service" \
+            > "$USER_UNITS/omarag-update.service"
+        install -m644 "$WORK_DIR/omarag-update.timer" \
+            "$USER_UNITS/omarag-update.timer"
     fi
     systemctl --user daemon-reload
-    systemctl --user enable --now oracle-daedalus.service
+    systemctl --user enable --now omarag.service
     if [ "$INSTALL_UPDATER" -eq 1 ]; then
-        systemctl --user enable --now oracle-daedalus-update.timer
+        systemctl --user enable --now omarag-update.timer
     fi
 fi
 
-printf '\nInstalled. Start the console with: %s/bin/oracle\n' "$PREFIX"
+printf '\nInstalled. Start the console with: %s/bin/omarag\n' "$PREFIX"
 printf 'Your libraries remain in: %s\n' "$DATA_DIR"

@@ -44,7 +44,6 @@ mcp = [
 
 [project.scripts]
 omaragd = "omarag_bridge.main:cli"
-oracle-daedalusd = "omarag_bridge.main:cli"
 omarag-mcp = "omarag_bridge.mcp_server:main"
 
 [project.urls]

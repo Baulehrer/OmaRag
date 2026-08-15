@@ -12,15 +12,15 @@ rm -rf "$STAGING"
 mkdir -p "$STAGING"
 
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --workspace --release --locked
-install -m755 "$ROOT_DIR/target/release/omarag" "$STAGING/oracle-bin"
-install -m755 "$ROOT_DIR/target/release/omarag-cli" "$STAGING/oracle-cli-bin"
-install -m755 "$ROOT_DIR/scripts/oracle-update.sh" "$STAGING/oracle-update"
-install -m644 "$ROOT_DIR/deploy/systemd/oracle-daedalus.service.in" \
-    "$STAGING/oracle-daedalus.service"
-install -m644 "$ROOT_DIR/deploy/systemd/oracle-daedalus-update.service.in" \
-    "$STAGING/oracle-daedalus-update.service"
-install -m644 "$ROOT_DIR/deploy/systemd/oracle-daedalus-update.timer" \
-    "$STAGING/oracle-daedalus-update.timer"
+install -m755 "$ROOT_DIR/target/release/omarag" "$STAGING/omarag-bin"
+install -m755 "$ROOT_DIR/target/release/omarag-cli" "$STAGING/omarag-cli-bin"
+install -m755 "$ROOT_DIR/scripts/omarag-update.sh" "$STAGING/omarag-update"
+install -m644 "$ROOT_DIR/deploy/systemd/omarag.service.in" \
+    "$STAGING/omarag.service"
+install -m644 "$ROOT_DIR/deploy/systemd/omarag-update.service.in" \
+    "$STAGING/omarag-update.service"
+install -m644 "$ROOT_DIR/deploy/systemd/omarag-update.timer" \
+    "$STAGING/omarag-update.timer"
 
 tar -C "$STAGING" -czf \
     "$OUTPUT_DIR/omarag-$VERSION-linux-$ARCH.tar.gz" .

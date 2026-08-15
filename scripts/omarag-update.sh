@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${OMARAG_REPOSITORY:-${ORACLE_REPOSITORY:-Baulehrer/OmaRag}}
+REPOSITORY=${OMARAG_REPOSITORY:-Baulehrer/OmaRag}
 API_URL="https://api.github.com/repos/$REPOSITORY/releases/latest"
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 PREFIX=$(CDPATH='' cd -- "$SCRIPT_DIR/.." && pwd)
-VERSION_FILE="$PREFIX/share/oracle-of-daedalus/VERSION"
-CURRENT_VERSION=${ORACLE_VERSION:-$(cat "$VERSION_FILE" 2>/dev/null || printf '0.0.0')}
+VERSION_FILE="$PREFIX/share/omarag/VERSION"
+CURRENT_VERSION=${OMARAG_VERSION:-$(cat "$VERSION_FILE" 2>/dev/null || printf '0.0.0')}
 ASSUME_YES=0
 
 if [ "${1:-}" = "--yes" ]; then
@@ -37,7 +37,7 @@ if [ "$ASSUME_YES" -ne 1 ]; then
     esac
 fi
 
-installer=$(mktemp "${TMPDIR:-/tmp}/oracle-install.XXXXXX")
+installer=$(mktemp "${TMPDIR:-/tmp}/omarag-install.XXXXXX")
 trap 'rm -f "$installer"' EXIT HUP INT TERM
 curl --fail --location --retry 3 \
     "https://github.com/$REPOSITORY/releases/download/$LATEST_TAG/install.sh" \

@@ -19,9 +19,9 @@ mkdir -p "$OUTPUT_DIR"
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
     "$APPDIR/usr/share/icons/hicolor/scalable/apps"
-install -m755 "$BINARY" "$APPDIR/usr/bin/oracle"
-install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/omarag.desktop"
-install -m644 "$ROOT_DIR/deploy/oracle-of-daedalus.desktop" "$APPDIR/usr/share/applications/omarag.desktop"
+install -m755 "$BINARY" "$APPDIR/usr/bin/omarag"
+install -m644 "$ROOT_DIR/deploy/omarag.desktop" "$APPDIR/omarag.desktop"
+install -m644 "$ROOT_DIR/deploy/omarag.desktop" "$APPDIR/usr/share/applications/omarag.desktop"
 install -m644 "$ROOT_DIR/assets/omarag.svg" "$APPDIR/omarag.svg"
 install -m644 "$ROOT_DIR/assets/omarag.svg" "$APPDIR/usr/share/icons/hicolor/scalable/apps/omarag.svg"
 
@@ -30,13 +30,13 @@ install -m644 "$ROOT_DIR/assets/omarag.svg" "$APPDIR/usr/share/icons/hicolor/sca
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
     'HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)' \
-    'ENV_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/oracle-of-daedalus/oracle.env' \
+    'ENV_FILE=${XDG_CONFIG_HOME:-$HOME/.config}/omarag/omarag.env' \
     'if [ -r "$ENV_FILE" ]; then' \
     '  set -a' \
     '  . "$ENV_FILE"' \
     '  set +a' \
     'fi' \
-    'exec "$HERE/usr/bin/oracle" "$@"' > "$APPDIR/AppRun"
+    'exec "$HERE/usr/bin/omarag" "$@"' > "$APPDIR/AppRun"
 chmod 755 "$APPDIR/AppRun"
 
 if [ ! -x "$APPIMAGETOOL" ]; then

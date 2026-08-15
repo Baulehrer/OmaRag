@@ -21,14 +21,14 @@ LABEL org.opencontainers.image.title="OmaRag" \
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates libgl1 libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 10001 oracle \
-    && useradd --uid 10001 --gid oracle --home-dir /var/lib/oracle-of-daedalus \
-        --shell /usr/sbin/nologin oracle \
-    && install -d -o oracle -g oracle /var/lib/oracle-of-daedalus
+    && groupadd --gid 10001 omarag \
+    && useradd --uid 10001 --gid omarag --home-dir /var/lib/omarag \
+        --shell /usr/sbin/nologin omarag \
+    && install -d -o omarag -g omarag /var/lib/omarag
 COPY --from=builder /opt/omarag-venv /opt/omarag-venv
 ENV PATH=/opt/omarag-venv/bin:$PATH \
-    HOME=/var/lib/oracle-of-daedalus \
-    OMARAG_DATA_DIR=/var/lib/oracle-of-daedalus \
+    HOME=/var/lib/omarag \
+    OMARAG_DATA_DIR=/var/lib/omarag \
     MALLOC_ARENA_MAX=2 \
     MALLOC_TRIM_THRESHOLD_=131072 \
     TOKENIZERS_PARALLELISM=false \
@@ -38,8 +38,8 @@ ENV PATH=/opt/omarag-venv/bin:$PATH \
     NUMEXPR_NUM_THREADS=4 \
     RAYON_NUM_THREADS=4 \
     PYTHONUNBUFFERED=1
-WORKDIR /var/lib/oracle-of-daedalus
-VOLUME ["/var/lib/oracle-of-daedalus"]
+WORKDIR /var/lib/omarag
+VOLUME ["/var/lib/omarag"]
 USER 10001:10001
 EXPOSE 8765
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \

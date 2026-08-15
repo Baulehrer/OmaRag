@@ -4,4 +4,4 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=@PREFIX@/bin/oracle-update --yes
+ExecStart=@PREFIX@/bin/omarag-update --yes

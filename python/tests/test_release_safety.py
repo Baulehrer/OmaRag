@@ -20,6 +20,51 @@ from omarag_bridge.services.workspace_service import WorkspaceService
 from omarag_bridge.store import StateStore
 
 
+def test_retired_branding_is_absent() -> None:
+    root = Path(__file__).resolve().parents[2]
+    retired_name = "dae" + "dalus"
+    retired_ligature = "dæ" + "dalus"
+    blocked = (
+        f"oracle of {retired_name}",
+        f"oracle of {retired_ligature}",
+        f"oracle-of-{retired_name}",
+        f"oracle-{retired_name}",
+    )
+    text_suffixes = {
+        ".desktop",
+        ".in",
+        ".json",
+        ".md",
+        ".py",
+        ".rs",
+        ".sh",
+        ".toml",
+        ".yaml",
+        ".yml",
+    }
+    violations: list[str] = []
+    for base in (".github", "deploy", "docs", "python", "rust", "scripts"):
+        for path in (root / base).rglob("*"):
+            if not path.is_file() or path.name == "rerank_proxy.py":
+                continue
+            relative = path.relative_to(root)
+            if any(part in {".venv", "__pycache__"} for part in relative.parts):
+                continue
+            lowered_path = str(relative).casefold()
+            if any(value in lowered_path for value in blocked):
+                violations.append(lowered_path)
+                continue
+            if path.suffix.casefold() not in text_suffixes:
+                continue
+            content = path.read_text(encoding="utf-8").casefold()
+            if any(value in content for value in blocked):
+                violations.append(lowered_path)
+    readme = (root / "README.md").read_text(encoding="utf-8").casefold()
+    if any(value in readme for value in blocked):
+        violations.append("readme.md")
+    assert violations == []
+
+
 def test_offline_worker_environment_removes_proxy_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -11,7 +11,7 @@ curl http://127.0.0.1:8765/v1/health
 ```
 
 Ollama stays on the host and is reached through `host.docker.internal`. The container is non-root,
-the API binds to loopback, and the `oracle-data` volume survives upgrades.
+the API binds to loopback, and the `omarag-data` volume survives upgrades.
 
 ## Native user service
 
@@ -20,7 +20,7 @@ supported native installation path; the `.in` files under `deploy/systemd` are t
 that installer.
 
 ```bash
-systemctl --user status oracle-daedalus.service
-journalctl --user -u oracle-daedalus.service -f
-systemctl --user list-timers oracle-daedalus-update.timer
+systemctl --user status omarag.service
+journalctl --user -u omarag.service -f
+systemctl --user list-timers omarag-update.timer
 ```

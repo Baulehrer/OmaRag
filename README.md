@@ -50,13 +50,13 @@ curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.
 Start OmaRag with:
 
 ```bash
-oracle
+omarag
 ```
 
 ## Update
 
 ```bash
-oracle-update
+omarag-update
 ```
 
 A major update may require reindexing. Your original books are preserved.
@@ -64,7 +64,7 @@ A major update may require reindexing. Your original books are preserved.
 ## Get help
 
 ```bash
-oracle-cli doctor
+omarag-cli doctor
 ```
 
 If the problem continues, open a [GitHub issue](https://github.com/Baulehrer/OmaRag/issues). Do not

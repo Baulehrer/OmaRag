@@ -54,7 +54,7 @@ def test_segment_ledger_and_document_fingerprint_survive_restart(tmp_path: Path)
         job_id="job-segments",
         workspace_id=workspace.id,
         kind="ingest",
-        payload={"sources": [{"path": "/books/daedalus.pdf"}]},
+        payload={"sources": [{"path": "/books/omarag.pdf"}]},
         idempotency_key="segments-key",
     )
     segment = {
@@ -78,7 +78,7 @@ def test_segment_ledger_and_document_fingerprint_survive_restart(tmp_path: Path)
             "embedding_digest": "sha256:abc",
         },
     }
-    store.upsert_document(workspace.id, "/books/daedalus.pdf", "abc123", result)
+    store.upsert_document(workspace.id, "/books/omarag.pdf", "abc123", result)
     store.close()
 
     reopened = StateStore(database)
