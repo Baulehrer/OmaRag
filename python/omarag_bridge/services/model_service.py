@@ -908,9 +908,7 @@ class ModelService:
             "model.fp16.onnx",
         }
         return any(
-            candidate.is_file()
-            and candidate.stat().st_size > 0
-            and candidate.name in weight_names
+            candidate.is_file() and candidate.stat().st_size > 0 and candidate.name in weight_names
             for candidate in snapshot.rglob("*")
         )
 
@@ -1898,8 +1896,7 @@ class ModelService:
                 if source == ModelSource.HUGGING_FACE:
                     artifact = pinned_hugging_face.get(model)
                     model_installed = bool(
-                        artifact
-                        and self._hugging_face_revision_present(model, artifact.revision)
+                        artifact and self._hugging_face_revision_present(model, artifact.revision)
                     )
                 else:
                     model_installed = any(

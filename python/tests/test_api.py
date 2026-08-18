@@ -31,9 +31,7 @@ async def test_preset_cross_encoder_install_is_catalog_pinned_and_streams_progre
     client: httpx2.AsyncClient, app: FastAPI
 ) -> None:
     model = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
-    installed = await client.post(
-        "/v1/models/install-hugging-face", json={"model": model}
-    )
+    installed = await client.post("/v1/models/install-hugging-face", json={"model": model})
     assert installed.status_code == 200
     lines = [line for line in installed.text.splitlines() if line]
     assert "downloading pinned cross-encoder" in lines[0]

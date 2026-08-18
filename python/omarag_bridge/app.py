@@ -376,9 +376,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=__version__,
         openapi_version="3.1.0",
         lifespan=lifespan,
-        description=(
-            "Stable operations and quality layer for vanilla Haiku RAG"
-        ),
+        description=("Stable operations and quality layer for vanilla Haiku RAG"),
     )
     app.state.services = services
     security = HTTPBearer(auto_error=False)

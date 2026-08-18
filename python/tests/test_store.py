@@ -17,9 +17,9 @@ from omarag_bridge.models.book import (
     TermTarget,
 )
 from omarag_bridge.models.domain import JobStatus
+from omarag_bridge.models.errors import NotFoundError
 from omarag_bridge.services.book_snapshot_service import build_book_knowledge_snapshot
 from omarag_bridge.services.workspace_service import WorkspaceService
-from omarag_bridge.models.errors import NotFoundError
 from omarag_bridge.store import StateStore
 
 

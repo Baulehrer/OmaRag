@@ -189,9 +189,11 @@ class ResourceCoordinator:
         await self._wait_for_memory()
         async with self._condition:
             await self._condition.wait_for(
-                lambda: not self._chat_active
-                and self._waiting_chats == 0
-                and self._active_indexers < self.conversion_slots()
+                lambda: (
+                    not self._chat_active
+                    and self._waiting_chats == 0
+                    and self._active_indexers < self.conversion_slots()
+                )
             )
             self._active_indexers += 1
         try:

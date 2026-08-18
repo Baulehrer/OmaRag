@@ -196,9 +196,7 @@ def test_three_hardware_fitting_packages_preserve_retrieval_family_synergy(
     assert [package.recommended_rank for package in packages] == [1, 2, 3]
     assert all(package.fit == ModelFit.COMFORTABLE for package in packages)
     assert {item.role for item in packages[0].models} == set(ModelCategory)
-    assert next(
-        item for item in packages[0].models if item.role == ModelCategory.RERANK
-    ).installed
+    assert next(item for item in packages[0].models if item.role == ModelCategory.RERANK).installed
     assert "Qwen" in packages[0].synergy
     assert "cross-encoder" in packages[2].synergy
 
@@ -208,12 +206,7 @@ def test_hugging_face_revision_is_not_installed_until_weights_are_complete(
 ) -> None:
     model = "cross-encoder/example"
     revision = "revision-1"
-    snapshot = (
-        tmp_path
-        / "models--cross-encoder--example"
-        / "snapshots"
-        / revision
-    )
+    snapshot = tmp_path / "models--cross-encoder--example" / "snapshots" / revision
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_text("{}")
     monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
@@ -229,9 +222,7 @@ async def test_reranker_install_downloads_only_transformer_runtime_files(
 ) -> None:
     service = ModelService.__new__(ModelService)
     artifact = next(
-        item
-        for item in service.curated_catalog().artifacts
-        if CatalogRole.RERANK in item.roles
+        item for item in service.curated_catalog().artifacts if CatalogRole.RERANK in item.roles
     )
     assignment = ModelAssignment(
         role=CatalogRole.RERANK,

@@ -1354,8 +1354,16 @@ def _partial_text_field(buffer: str) -> str:
         if cursor + 1 >= len(buffer):
             break
         code = buffer[cursor + 1]
-        simple = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
-                  "n": "\n", "r": "\r", "t": "\t"}
+        simple = {
+            '"': '"',
+            "\\": "\\",
+            "/": "/",
+            "b": "\b",
+            "f": "\f",
+            "n": "\n",
+            "r": "\r",
+            "t": "\t",
+        }
         if code in simple:
             out.append(simple[code])
             cursor += 2
