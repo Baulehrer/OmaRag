@@ -166,44 +166,22 @@ async def test_chat_gets_next_heavy_resource_slot() -> None:
     assert order == ["index-1", "chat", "index-2"]
 
 
-async def test_a_second_conversion_only_starts_when_memory_clearly_allows_it() -> None:
-    """Parallel conversion is a memory bet; it must be refused unless it is safe.
+async def test_conversions_never_overlap_so_a_question_is_always_served_next() -> None:
+    """One conversion at a time, whatever the machine has spare.
 
-    Two conversions roughly double the peak, so a second slot requires free
-    memory covering that peak twice over on top of the reserve.
+    A second slot lets an indexer take it in the window before a question
+    registers as waiting, so the question waits behind two conversion units.
+    Interactive priority is worth more than the throughput.
     """
-    from omarag_bridge.services import resource_coordinator as coordinator_module
     from omarag_bridge.services.resource_coordinator import MemorySnapshot
 
     resources = ResourceCoordinator()
-    peak = coordinator_module._CONVERSION_PEAK_BYTES
+    for available in (1024**3, 8 * 1024**3, 512 * 1024**3):
+        resources.memory = lambda available=available: MemorySnapshot(  # type: ignore[method-assign]
+            total=512 * 1024**3, available=available, reserve=1024**3
+        )
+        assert resources.conversion_slots() == 1
 
-    # Plenty of room: a second conversion is allowed.
-    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
-        total=64 * 1024**3, available=peak * 2 + 8 * 1024**3, reserve=1024**3
-    )
-    assert resources.conversion_slots() == 2
-
-    # Tight: fall back to one at a time.
-    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
-        total=8 * 1024**3, available=peak, reserve=1024**3
-    )
-    assert resources.conversion_slots() == 1
-
-    # Under pressure the answer is one, whatever the arithmetic says.
-    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
-        total=8 * 1024**3, available=1024**3, reserve=1024**3
-    )
-    assert resources.conversion_slots() == 1
-
-
-async def test_conversions_overlap_only_up_to_the_permitted_slots() -> None:
-    from omarag_bridge.services.resource_coordinator import MemorySnapshot
-
-    resources = ResourceCoordinator()
-    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
-        total=64 * 1024**3, available=60 * 1024**3, reserve=1024**3
-    )
     peak_seen = 0
     release = asyncio.Event()
 
@@ -219,7 +197,7 @@ async def test_conversions_overlap_only_up_to_the_permitted_slots() -> None:
     release.set()
     await asyncio.gather(*tasks)
 
-    assert peak_seen == 2, "two slots were granted, so two must overlap — and no more"
+    assert peak_seen == 1
 
 
 async def test_a_question_still_excludes_indexing_entirely() -> None:

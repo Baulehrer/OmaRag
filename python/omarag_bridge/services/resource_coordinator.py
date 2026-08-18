@@ -70,20 +70,21 @@ class ResourceCoordinator:
         return self._active_indexers
 
     def conversion_slots(self) -> int:
-        """How many document conversions may run at once.
+        """How many document conversions may run at once. Currently always one.
 
-        Two conversions roughly double the peak, so a second slot is only handed
-        out when the free memory covers that peak twice over *on top of* the
-        reserve. Anything less and this returns 1 — the safe default the rest of
-        the pipeline was built around.
+        Handing out a second slot breaks the guarantee that a question is served
+        next: an indexer can take the free slot in the window before a question
+        registers as waiting, so the question ends up behind two conversion units
+        instead of one. That showed up as `index-1, index-2, chat` on a machine
+        with enough memory for two slots.
+
+        The counting lease below is kept because it expresses the rule directly,
+        but the count stays at one until two things are true: the conversion loop
+        in `book_v2.py` actually runs ranges concurrently (it is sequential, so
+        today a second slot would never be used anyway), and admission reserves
+        capacity for an imminent question rather than racing it.
         """
-        snapshot = self.memory()
-        if snapshot.state != "ready":
-            return 1
-        # A conversion unit is sized by `segment_pages`; budget its worst case.
-        peak = _CONVERSION_PEAK_BYTES
-        headroom = snapshot.available - snapshot.reserve
-        return 2 if headroom >= peak * 2 else 1
+        return 1
 
     @property
     def waiting_chats(self) -> int:
