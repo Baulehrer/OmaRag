@@ -1,0 +1,64 @@
+# Hacks — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Hacks"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#000000"
+foreground = "#f8f8f2"
+muted = "#615250"
+accent = "#6532ff"
+selection = "#ff8d34"
+gradient = ["#00ff00", "#afff00"]
+
+[sidebar]
+fg = "#f8f8f2"
+bg = "#000000"
+border = "#afff00"
+border_active = "#6532ff"
+title = "#afff00"
+divider = "#615250"
+item_selected_fg = "#000000"
+item_selected_bg = "#ff8d34"
+
+[workspace]
+fg = "#f8f8f2"
+bg = "#000000"
+border = "#afff00"
+border_active = "#6532ff"
+title = "#afff00"
+item_selected_fg = "#ff8d34"
+item_selected_bg = "#524549"
+
+[footer]
+fg = "#f8f8f2"
+bg = "#000000"
+border = "#afff00"
+border_active = "#6532ff"
+
+[modal]
+fg = "#f8f8f2"
+bg = "#000000"
+border_active = "#6532ff"
+cancel_fg = "#f9f9fe"
+cancel_bg = "#000042"
+confirm_fg = "#f9f9fe"
+confirm_bg = "#ffb86c"
+
+[status]
+cursor = "#ff0000"
+correct = "#47ef7d"
+error = "#d70000"
+hint = "#5bd9f3"
+cancel = "#6575ab"
+hotkey = "#ff8d34"
+
+[ansi]
+red = "#d70000"
+orange = "#6575ab"
+yellow = "#6575ab"
+green = "#47ef7d"
+cyan = "#5bd9f3"
+blue = "#6532ff"
+magenta = "#afff00"

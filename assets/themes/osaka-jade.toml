@@ -1,0 +1,64 @@
+# Osaka Jade — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Osaka Jade"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#111c18"
+foreground = "#c1c497"
+muted = "#53685b"
+accent = "#509475"
+selection = "#32473b"
+gradient = ["#509475", "#d2689c"]
+
+[sidebar]
+fg = "#c1c497"
+bg = "#0c1512"
+border = "#4a5342"
+border_active = "#509475"
+title = "#509475"
+divider = "#53685b"
+item_selected_fg = "#c1c497"
+item_selected_bg = "#32473b"
+
+[workspace]
+fg = "#c1c497"
+bg = "#111c18"
+border = "#575f4b"
+border_active = "#509475"
+title = "#509475"
+item_selected_fg = "#c1c497"
+item_selected_bg = "#32473b"
+
+[footer]
+fg = "#81b8a8"
+bg = "#0c1512"
+border = "#4a5342"
+border_active = "#509475"
+
+[modal]
+fg = "#c1c497"
+bg = "#23372b"
+border_active = "#509475"
+cancel_fg = "#111c18"
+cancel_bg = "#ff5345"
+confirm_fg = "#111c18"
+confirm_bg = "#549e6a"
+
+[status]
+cursor = "#509475"
+correct = "#549e6a"
+error = "#ff5345"
+hint = "#2dd5b7"
+cancel = "#a2734b"
+hotkey = "#509475"
+
+[ansi]
+red = "#ff5345"
+orange = "#a2734b"
+yellow = "#459451"
+green = "#549e6a"
+cyan = "#2dd5b7"
+blue = "#509475"
+magenta = "#d2689c"

@@ -1,0 +1,64 @@
+# Dracula — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Dracula"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#282a36"
+foreground = "#f8f8f2"
+muted = "#868686"
+accent = "#44475a"
+selection = "#2e303e"
+gradient = ["#50fa7b", "#ff5555"]
+
+[sidebar]
+fg = "#f8f8f2"
+bg = "#282a36"
+border = "#66686e"
+border_active = "#44475a"
+title = "#bd93f9"
+divider = "#868686"
+item_selected_fg = "#ffb86c"
+item_selected_bg = "#2e303e"
+
+[workspace]
+fg = "#f8f8f2"
+bg = "#282a36"
+border = "#6272a4"
+border_active = "#44475a"
+title = "#8be9fd"
+item_selected_fg = "#ffb86c"
+item_selected_bg = "#2e303e"
+
+[footer]
+fg = "#f8f8f2"
+bg = "#282a36"
+border = "#6272a4"
+border_active = "#44475a"
+
+[modal]
+fg = "#f8f8f2"
+bg = "#282a36"
+border_active = "#44475a"
+cancel_fg = "#f8f8f2"
+cancel_bg = "#6272a4"
+confirm_fg = "#f8f8f2"
+confirm_bg = "#ffb86c"
+
+[status]
+cursor = "#ff79c6"
+correct = "#50fa7b"
+error = "#ff5555"
+hint = "#8be9fd"
+cancel = "#6272a4"
+hotkey = "#ffb86c"
+
+[ansi]
+red = "#ff5555"
+orange = "#6272a4"
+yellow = "#6272a4"
+green = "#50fa7b"
+cyan = "#8be9fd"
+blue = "#44475a"
+magenta = "#bd93f9"

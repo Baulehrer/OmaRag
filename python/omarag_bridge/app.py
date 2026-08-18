@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import secrets
 import shutil
 import tempfile
@@ -93,9 +94,11 @@ from .models.domain import (
     ImportPreflightBatch,
     JobSnapshot,
     JobStatus,
+    ModelAssignment,
     ModelCatalogResponse,
     ModelCategory,
     ModelDefaultsPreflight,
+    ModelInstallState,
     ModelOperationResult,
     ModelProfilePreflight,
     ModelRuntimeResponse,
@@ -374,7 +377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_version="3.1.0",
         lifespan=lifespan,
         description=(
-            "Oracle of Metis & Aletheia; stable operations and quality layer for vanilla Haiku RAG"
+            "Stable operations and quality layer for vanilla Haiku RAG"
         ),
     )
     app.state.services = services
@@ -1529,6 +1532,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await mutation_lease.aclose()
 
         return StreamingResponse(stream_pull(), media_type="application/x-ndjson")
+
+    @app.post("/v1/models/install-hugging-face", dependencies=protected)
+    async def install_hugging_face_model(request: PullModelRequest) -> StreamingResponse:
+        """Install one revision-pinned Hugging Face artifact from the release catalog.
+
+        Presets may combine Ollama and cross-encoder artifacts.  This endpoint keeps
+        arbitrary repository downloads disabled: only an exact model from the signed,
+        release-bound catalog can be installed.
+        """
+
+        artifact = next(
+            (
+                candidate
+                for candidate in services.models.curated_catalog().artifacts
+                if candidate.provider == CatalogProvider.HUGGING_FACE
+                and candidate.model == request.model
+            ),
+            None,
+        )
+        if artifact is None:
+            raise ConflictError(
+                "Hugging Face preset model is not pinned in the release catalog",
+                details={"model": request.model},
+            )
+        assignment = ModelAssignment(
+            role=artifact.roles[0],
+            artifact_id=artifact.id,
+            provider=artifact.provider,
+            model=artifact.model,
+            revision=artifact.revision,
+            digest=artifact.digest,
+            quantization=artifact.quantization,
+            install_state=ModelInstallState.NOT_INSTALLED,
+            installed_digest=None,
+            download_bytes=artifact.download_bytes,
+        )
+        mutation_lease = await acquire_model_mutation_lease()
+
+        async def stream_install():
+            try:
+                yield (
+                    json.dumps(
+                        {
+                            "status": "downloading pinned cross-encoder",
+                            "completed": 0,
+                            "total": artifact.download_bytes,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+                await services.models.install_assignments([assignment])
+                yield (
+                    json.dumps(
+                        {
+                            "status": "verified",
+                            "completed": artifact.download_bytes,
+                            "total": artifact.download_bytes,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            except Exception as exc:
+                yield (json.dumps({"error": str(exc)}) + "\n").encode()
+            finally:
+                services.runs.invalidate_model_inventory()
+                await mutation_lease.aclose()
+
+        return StreamingResponse(stream_install(), media_type="application/x-ndjson")
 
     @app.post(
         "/v1/models/load",

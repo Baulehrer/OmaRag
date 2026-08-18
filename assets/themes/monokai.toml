@@ -1,0 +1,64 @@
+# Monokai — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Monokai"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#272822"
+foreground = "#f8f8f2"
+muted = "#75715e"
+accent = "#66d9ef"
+selection = "#354f4f"
+gradient = ["#66d9ef", "#ae81ff"]
+
+[sidebar]
+fg = "#f8f8f2"
+bg = "#272822"
+border = "#75715e"
+border_active = "#f92672"
+title = "#66d9ef"
+divider = "#75715e"
+item_selected_fg = "#66d9ef"
+item_selected_bg = "#354f4f"
+
+[workspace]
+fg = "#f8f8f2"
+bg = "#272822"
+border = "#75715e"
+border_active = "#66d9ef"
+title = "#e6db74"
+item_selected_fg = "#66d9ef"
+item_selected_bg = "#2e2e2e"
+
+[footer]
+fg = "#f8f8f2"
+bg = "#272822"
+border = "#75715e"
+border_active = "#a9dc76"
+
+[modal]
+fg = "#f8f8f2"
+bg = "#272822"
+border_active = "#66d9ef"
+cancel_fg = "#75715e"
+cancel_bg = "#f92672"
+confirm_fg = "#75715e"
+confirm_bg = "#66d9ef"
+
+[status]
+cursor = "#66d9ef"
+correct = "#a6e22e"
+error = "#f92672"
+hint = "#66d9ef"
+cancel = "#e6db74"
+hotkey = "#66d9ef"
+
+[ansi]
+red = "#f92672"
+orange = "#e6db74"
+yellow = "#e6db74"
+green = "#a6e22e"
+cyan = "#66d9ef"
+blue = "#66d9ef"
+magenta = "#ae81ff"

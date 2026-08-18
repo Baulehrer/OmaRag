@@ -1,0 +1,64 @@
+# Retro 82 — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Retro 82"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#05182e"
+foreground = "#f6dcac"
+muted = "#2a6b78"
+accent = "#faa968"
+selection = "#134e5a"
+gradient = ["#faa968", "#3f8f8a"]
+
+[sidebar]
+fg = "#f6dcac"
+bg = "#031222"
+border = "#535857"
+border_active = "#faa968"
+title = "#faa968"
+divider = "#2a6b78"
+item_selected_fg = "#f6dcac"
+item_selected_bg = "#134e5a"
+
+[workspace]
+fg = "#f6dcac"
+bg = "#05182e"
+border = "#535857"
+border_active = "#faa968"
+title = "#faa968"
+item_selected_fg = "#f6dcac"
+item_selected_bg = "#134e5a"
+
+[footer]
+fg = "#3f8f8a"
+bg = "#031222"
+border = "#535857"
+border_active = "#faa968"
+
+[modal]
+fg = "#f6dcac"
+bg = "#0a2540"
+border_active = "#faa968"
+cancel_fg = "#05182e"
+cancel_bg = "#f85525"
+confirm_fg = "#05182e"
+confirm_bg = "#028391"
+
+[status]
+cursor = "#faa968"
+correct = "#028391"
+error = "#f85525"
+hint = "#8cbfb8"
+cancel = "#faa968"
+hotkey = "#faa968"
+
+[ansi]
+red = "#f85525"
+orange = "#faa968"
+yellow = "#e97b3c"
+green = "#028391"
+cyan = "#8cbfb8"
+blue = "#3f8f8a"
+magenta = "#3f8f8a"

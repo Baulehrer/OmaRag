@@ -1290,7 +1290,13 @@ class JobService:
                 # transaction. Queries obtain their segment IDs under the same
                 # resource lease and therefore see either the old mapping or
                 # this complete one.
-                self.store.upsert_document(
+                # Publishing a textbook writes thousands of rows in one
+                # transaction. The store is thread-safe (check_same_thread=False
+                # behind an RLock), so run it off the event loop or the daemon
+                # stops answering health, SSE and every other request while a
+                # book is being committed.
+                await asyncio.to_thread(
+                    self.store.upsert_document,
                     job.workspace_id,
                     source_path,
                     fingerprint,
@@ -1748,6 +1754,11 @@ class JobService:
             return False
         progress = (source_index + end / max(pages, 1)) / max(source_total, 1)
         checkpoint = f"source-{source_index}-pages-{start + 1}-{end}"
+        segments = self.store.list_segments(job_id, source_index)
+        cache_hits = sum(bool(item.get("metadata", {}).get("cache_hit")) for item in segments)
+        recovered_segments = sum(
+            bool(item.get("metadata", {}).get("recovered")) for item in segments
+        )
         self.store.update_job(
             job_id,
             progress=progress,
@@ -1758,14 +1769,10 @@ class JobService:
                 "page_start": start + 1,
                 "page_end": end,
                 "total_pages": pages,
-                "cache_hits": sum(
-                    bool(item.get("metadata", {}).get("cache_hit"))
-                    for item in self.store.list_segments(job_id, source_index)
-                ),
-                "recovered_segments": sum(
-                    bool(item.get("metadata", {}).get("recovered"))
-                    for item in self.store.list_segments(job_id, source_index)
-                ),
+                # One read, two counters. This fires several times per range, so
+                # listing the segments twice doubled the query for no reason.
+                "cache_hits": cache_hits,
+                "recovered_segments": recovered_segments,
                 "memory_state": self.resources.memory().state,
             },
         )

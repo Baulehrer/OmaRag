@@ -1,0 +1,64 @@
+# Catppuccin — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Catppuccin"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#1e1e2e"
+foreground = "#cdd6f4"
+muted = "#585b70"
+accent = "#89b4fa"
+selection = "#45475a"
+gradient = ["#89b4fa", "#f5c2e7"]
+
+[sidebar]
+fg = "#cdd6f4"
+bg = "#161622"
+border = "#575a6f"
+border_active = "#89b4fa"
+title = "#89b4fa"
+divider = "#585b70"
+item_selected_fg = "#cdd6f4"
+item_selected_bg = "#45475a"
+
+[workspace]
+fg = "#cdd6f4"
+bg = "#1e1e2e"
+border = "#575a6f"
+border_active = "#89b4fa"
+title = "#89b4fa"
+item_selected_fg = "#cdd6f4"
+item_selected_bg = "#45475a"
+
+[footer]
+fg = "#6c7086"
+bg = "#161622"
+border = "#575a6f"
+border_active = "#89b4fa"
+
+[modal]
+fg = "#cdd6f4"
+bg = "#313244"
+border_active = "#89b4fa"
+cancel_fg = "#1e1e2e"
+cancel_bg = "#f38ba8"
+confirm_fg = "#1e1e2e"
+confirm_bg = "#a6e3a1"
+
+[status]
+cursor = "#89b4fa"
+correct = "#a6e3a1"
+error = "#f38ba8"
+hint = "#94e2d5"
+cancel = "#f6b6ab"
+hotkey = "#89b4fa"
+
+[ansi]
+red = "#f38ba8"
+orange = "#f6b6ab"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+cyan = "#94e2d5"
+blue = "#89b4fa"
+magenta = "#f5c2e7"

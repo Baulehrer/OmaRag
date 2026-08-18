@@ -17,49 +17,50 @@
 
 ## What is OmaRag?
 
-OmaRag turns PDF textbooks into a private knowledge library. Ask a question and it finds relevant
-passages, answers in plain language, and shows the exact book and page. Your books and questions
-stay on your computer by default.
+OmaRag turns PDF textbooks into a private knowledge library. Ask a question and it finds the
+relevant passages, answers in plain language, and shows the exact book and page. Your books and
+your questions stay on your computer.
 
 ## Get started
 
 1. Start OmaRag.
-2. Choose **Fast**, **Normal**, or **Quality**.
-3. Add PDF books.
-4. Ask a question and inspect the original sources.
+2. Name your first library.
+3. Add PDF books with `I`.
+4. Ask a question, then open a cited page to check it.
 
-On first launch, OmaRag checks your hardware and recommends suitable models. It never downloads
-models without your confirmation. Advanced model settings remain available in Expert mode.
-
-The source panel shows cited pages first, followed by up to four relevant figures or tables when
-available.
-
-Version 1.2 keeps simple searches small and expands them only when evidence is missing. Device-only
-mode blocks content from being sent to external services. Existing libraries are never silently
-deleted or reindexed.
+On first launch OmaRag looks at your hardware and suggests models. It never downloads anything
+without asking.
 
 ## Install
 
-You need a Linux x86-64 computer and [Ollama](https://ollama.com/). The smallest profile needs 8 GB
-of RAM; 16 GB or more is recommended.
+You need Linux x86-64 and [Ollama](https://ollama.com/). 8 GB of RAM works; 16 GB is better.
 
 ```bash
 curl -fsSL https://github.com/Baulehrer/OmaRag/releases/latest/download/install.sh | sh
 ```
 
-Start OmaRag with:
+Start it with `omarag`, update it with `omarag-update`.
 
-```bash
-omarag
-```
+## Keys
 
-## Update
+`?` shows everything. The ones worth remembering:
 
-```bash
-omarag-update
-```
+| Key | Does |
+| --- | --- |
+| `Tab` | Move between the three panes |
+| `I` | Add PDFs |
+| `Enter` | Ask, or open what is selected |
+| `Ctrl+T` | Next colour theme |
+| `:` | Command palette |
 
-A major update may require reindexing. Your original books are preserved.
+## Appearance
+
+36 colour themes are included. On an [Omarchy](https://omarchy.org) desktop, the *Omarchy System*
+theme follows whatever your desktop is using.
+
+Drop your own theme into `~/.config/omarag/themes/` as a `.toml` file and it appears in the list —
+copy one from `assets/themes/` to start. Icons can be set to full, restrained, or off under
+**Settings › Appearance**, with a plain-text fallback if your terminal has no Nerd Font.
 
 ## Get help
 
@@ -67,9 +68,11 @@ A major update may require reindexing. Your original books are preserved.
 omarag-cli doctor
 ```
 
-If the problem continues, open a [GitHub issue](https://github.com/Baulehrer/OmaRag/issues). Do not
-upload private books or credentials.
+If that does not explain it, open an [issue](https://github.com/Baulehrer/OmaRag/issues). Please do
+not upload private books or credentials.
 
 ## License
 
-OmaRag is released under the MIT License.
+MIT. Bundled colour themes come from [superfile](https://github.com/yorukot/superfile) and
+[Omarchy](https://github.com/basecamp/omarchy), both MIT — see
+[assets/themes/ATTRIBUTION.md](assets/themes/ATTRIBUTION.md).

@@ -1,0 +1,64 @@
+# Rose Pine — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Rose Pine"
+source = "omarchy"
+mode = "light"
+
+[base]
+background = "#faf4ed"
+foreground = "#575279"
+muted = "#cecacd"
+accent = "#56949f"
+selection = "#dfdad9"
+gradient = ["#56949f", "#907aa9"]
+
+[sidebar]
+fg = "#575279"
+bg = "#ede7e1"
+border = "#948fa4"
+border_active = "#56949f"
+title = "#56949f"
+divider = "#cecacd"
+item_selected_fg = "#575279"
+item_selected_bg = "#dfdad9"
+
+[workspace]
+fg = "#575279"
+bg = "#faf4ed"
+border = "#a09bad"
+border_active = "#56949f"
+title = "#56949f"
+item_selected_fg = "#575279"
+item_selected_bg = "#dfdad9"
+
+[footer]
+fg = "#9893a5"
+bg = "#ede7e1"
+border = "#948fa4"
+border_active = "#56949f"
+
+[modal]
+fg = "#575279"
+bg = "#f2e9e1"
+border_active = "#56949f"
+cancel_fg = "#faf4ed"
+cancel_bg = "#b4637a"
+confirm_fg = "#faf4ed"
+confirm_bg = "#286983"
+
+[status]
+cursor = "#56949f"
+correct = "#286983"
+error = "#b4637a"
+hint = "#d7827e"
+cancel = "#cf8057"
+hotkey = "#56949f"
+
+[ansi]
+red = "#b4637a"
+orange = "#cf8057"
+yellow = "#ea9d34"
+green = "#286983"
+cyan = "#d7827e"
+blue = "#56949f"
+magenta = "#907aa9"

@@ -1,0 +1,64 @@
+# Vantablack — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Vantablack"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#000000"
+foreground = "#ffffff"
+muted = "#7a7a7a"
+accent = "#8d8d8d"
+selection = "#1a1a1a"
+gradient = ["#8d8d8d", "#9b9b9b"]
+
+[sidebar]
+fg = "#ffffff"
+bg = "#090909"
+border = "#535353"
+border_active = "#8d8d8d"
+title = "#8d8d8d"
+divider = "#7a7a7a"
+item_selected_fg = "#ffffff"
+item_selected_bg = "#1a1a1a"
+
+[workspace]
+fg = "#ffffff"
+bg = "#000000"
+border = "#535353"
+border_active = "#8d8d8d"
+title = "#8d8d8d"
+item_selected_fg = "#ffffff"
+item_selected_bg = "#1a1a1a"
+
+[footer]
+fg = "#505050"
+bg = "#090909"
+border = "#535353"
+border_active = "#8d8d8d"
+
+[modal]
+fg = "#ffffff"
+bg = "#1a1a1a"
+border_active = "#8d8d8d"
+cancel_fg = "#000000"
+cancel_bg = "#a4a4a4"
+confirm_fg = "#000000"
+confirm_bg = "#b6b6b6"
+
+[status]
+cursor = "#8d8d8d"
+correct = "#b6b6b6"
+error = "#a4a4a4"
+hint = "#b0b0b0"
+cancel = "#b9b9b9"
+hotkey = "#8d8d8d"
+
+[ansi]
+red = "#a4a4a4"
+orange = "#b9b9b9"
+yellow = "#cecece"
+green = "#b6b6b6"
+cyan = "#b0b0b0"
+blue = "#8d8d8d"
+magenta = "#9b9b9b"

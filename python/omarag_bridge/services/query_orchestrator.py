@@ -55,6 +55,9 @@ from .query_v2 import (
 from .reranker_service import DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION, _model_digest
 
 EmitClaim = Callable[[AnswerClaim, list[Citation]], Awaitable[None]]
+# Provisional prose from the block currently being written. Delivered as the
+# full draft each time, not a diff, so a dropped event cannot desynchronise it.
+EmitDraft = Callable[[str], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +136,7 @@ class QueryOrchestrator:
         resolved_model_identity: OllamaModelIdentity | None = None,
         images: list[str] | None = None,
         emit_claim: EmitClaim | None = None,
+        emit_draft: EmitDraft | None = None,
         memory_enabled: bool = True,
         allowed_document_ids: set[str] | None = None,
         keep_alive: str | int = "120s",
@@ -478,7 +482,12 @@ class QueryOrchestrator:
                 final_event = event
                 if not event.content:
                     continue
-                for block in parser.feed(event.content):
+                blocks = parser.feed(event.content)
+                if emit_draft is not None:
+                    # Publish the prose so far. When a block completes the draft
+                    # is empty again and the committed claim replaces it.
+                    await emit_draft(parser.draft_text())
+                for block in blocks:
                     validation = validate_claim(
                         block,
                         evidence,

@@ -1,0 +1,64 @@
+# Hackerman — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Hackerman"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#0b0c16"
+foreground = "#ddf7ff"
+muted = "#2d3450"
+accent = "#82fb9c"
+selection = "#1f253a"
+gradient = ["#82fb9c", "#86a7df"]
+
+[sidebar]
+fg = "#ddf7ff"
+bg = "#080910"
+border = "#505962"
+border_active = "#82fb9c"
+title = "#82fb9c"
+divider = "#2d3450"
+item_selected_fg = "#ddf7ff"
+item_selected_bg = "#1f253a"
+
+[workspace]
+fg = "#ddf7ff"
+bg = "#0b0c16"
+border = "#505962"
+border_active = "#82fb9c"
+title = "#82fb9c"
+item_selected_fg = "#ddf7ff"
+item_selected_bg = "#1f253a"
+
+[footer]
+fg = "#6a6e95"
+bg = "#080910"
+border = "#505962"
+border_active = "#82fb9c"
+
+[modal]
+fg = "#ddf7ff"
+bg = "#151828"
+border_active = "#82fb9c"
+cancel_fg = "#0b0c16"
+cancel_bg = "#50f872"
+confirm_fg = "#0b0c16"
+confirm_bg = "#4fe88f"
+
+[status]
+cursor = "#82fb9c"
+correct = "#4fe88f"
+error = "#50f872"
+hint = "#7cf8f7"
+cancel = "#50f7a3"
+hotkey = "#82fb9c"
+
+[ansi]
+red = "#50f872"
+orange = "#50f7a3"
+yellow = "#50f7d4"
+green = "#4fe88f"
+cyan = "#7cf8f7"
+blue = "#829dd4"
+magenta = "#86a7df"

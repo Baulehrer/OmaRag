@@ -37,6 +37,11 @@ def _memory_snapshot() -> MemorySnapshot:
     return MemorySnapshot(total=total, available=available, reserve=reserve)
 
 
+# Worst-case resident bytes for one conversion unit. Derived from the per-page
+# budget in `segment_pages` at the largest unit it will hand out.
+_CONVERSION_PEAK_BYTES = 2 * 1024**3
+
+
 class ResourceCoordinator:
     """Serialize memory-heavy work and prioritize interactive questions."""
 
@@ -44,7 +49,10 @@ class ResourceCoordinator:
         if not 0.0 <= max_residency_seconds <= 600.0:
             raise ValueError("max_residency_seconds must be between 0 and 600")
         self._condition = asyncio.Condition()
-        self._busy = False
+        # Interactive work is exclusive; indexing is counted, so a second
+        # conversion may start when — and only when — memory clearly allows it.
+        self._chat_active = False
+        self._active_indexers = 0
         self._waiting_chats = 0
         self._max_residency_seconds = max_residency_seconds
         self._recent_query_uses = 0
@@ -55,7 +63,27 @@ class ResourceCoordinator:
 
     @property
     def busy(self) -> bool:
-        return self._busy
+        return self._chat_active or self._active_indexers > 0
+
+    @property
+    def active_indexers(self) -> int:
+        return self._active_indexers
+
+    def conversion_slots(self) -> int:
+        """How many document conversions may run at once.
+
+        Two conversions roughly double the peak, so a second slot is only handed
+        out when the free memory covers that peak twice over *on top of* the
+        reserve. Anything less and this returns 1 — the safe default the rest of
+        the pipeline was built around.
+        """
+        snapshot = self.memory()
+        if snapshot.state != "ready":
+            return 1
+        # A conversion unit is sized by `segment_pages`; budget its worst case.
+        peak = _CONVERSION_PEAK_BYTES
+        headroom = snapshot.available - snapshot.reserve
+        return 2 if headroom >= peak * 2 else 1
 
     @property
     def waiting_chats(self) -> int:
@@ -111,8 +139,10 @@ class ResourceCoordinator:
         async with self._condition:
             self._waiting_chats += 1
             try:
-                await self._condition.wait_for(lambda: not self._busy)
-                self._busy = True
+                await self._condition.wait_for(
+                    lambda: not self._chat_active and self._active_indexers == 0
+                )
+                self._chat_active = True
             finally:
                 self._waiting_chats -= 1
         completed = False
@@ -123,7 +153,7 @@ class ResourceCoordinator:
             if completed:
                 self._record_query_use()
             async with self._condition:
-                self._busy = False
+                self._chat_active = False
                 self._condition.notify_all()
 
     @asynccontextmanager
@@ -133,10 +163,10 @@ class ResourceCoordinator:
             yield "skipped_memory"
             return
         async with self._condition:
-            if self._busy or self._waiting_chats:
+            if self.busy or self._waiting_chats:
                 admission = "skipped_busy"
             else:
-                self._busy = True
+                self._chat_active = True
                 admission = "ready"
         if admission != "ready":
             yield admission
@@ -145,18 +175,28 @@ class ResourceCoordinator:
             yield "ready"
         finally:
             async with self._condition:
-                self._busy = False
+                self._chat_active = False
                 self._condition.notify_all()
 
     @asynccontextmanager
     async def indexing(self) -> AsyncIterator[None]:
+        """Admit one conversion unit.
+
+        Questions keep absolute priority: a waiting chat blocks new admissions,
+        and an active chat excludes indexing entirely. Beyond that, `slots`
+        conversions may overlap — 1 unless memory is plainly abundant.
+        """
         await self._wait_for_memory()
         async with self._condition:
-            await self._condition.wait_for(lambda: not self._busy and self._waiting_chats == 0)
-            self._busy = True
+            await self._condition.wait_for(
+                lambda: not self._chat_active
+                and self._waiting_chats == 0
+                and self._active_indexers < self.conversion_slots()
+            )
+            self._active_indexers += 1
         try:
             yield
         finally:
             async with self._condition:
-                self._busy = False
+                self._active_indexers -= 1
                 self._condition.notify_all()

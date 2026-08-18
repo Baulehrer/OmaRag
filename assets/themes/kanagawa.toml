@@ -1,0 +1,64 @@
+# Kanagawa — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Kanagawa"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#1f1f28"
+foreground = "#dcd7ba"
+muted = "#54546d"
+accent = "#dcd7ba"
+selection = "#363646"
+gradient = ["#dcd7ba", "#957fb8"]
+
+[sidebar]
+fg = "#dcd7ba"
+bg = "#17171e"
+border = "#5c5b57"
+border_active = "#dcd7ba"
+title = "#dcd7ba"
+divider = "#54546d"
+item_selected_fg = "#dcd7ba"
+item_selected_bg = "#363646"
+
+[workspace]
+fg = "#dcd7ba"
+bg = "#1f1f28"
+border = "#5c5b57"
+border_active = "#dcd7ba"
+title = "#dcd7ba"
+item_selected_fg = "#dcd7ba"
+item_selected_bg = "#363646"
+
+[footer]
+fg = "#727169"
+bg = "#17171e"
+border = "#5c5b57"
+border_active = "#dcd7ba"
+
+[modal]
+fg = "#dcd7ba"
+bg = "#223249"
+border_active = "#dcd7ba"
+cancel_fg = "#1f1f28"
+cancel_bg = "#c34043"
+confirm_fg = "#1f1f28"
+confirm_bg = "#76946a"
+
+[status]
+cursor = "#dcd7ba"
+correct = "#76946a"
+error = "#c34043"
+hint = "#6a9589"
+cancel = "#c17158"
+hotkey = "#dcd7ba"
+
+[ansi]
+red = "#c34043"
+orange = "#c17158"
+yellow = "#c0a36e"
+green = "#76946a"
+cyan = "#6a9589"
+blue = "#7e9cd8"
+magenta = "#957fb8"

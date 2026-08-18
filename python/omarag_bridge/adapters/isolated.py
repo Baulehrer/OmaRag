@@ -250,7 +250,7 @@ class _ChildCallbacks:
         self.connection.send({"type": "callback", "id": callback_id, "name": name, "args": args})
         response = self.connection.recv()
         if response.get("type") != "callback_result" or response.get("id") != callback_id:
-            raise RuntimeError("Invalid callback response from Oracle daemon")
+            raise RuntimeError("Invalid callback response from the OmaRag daemon")
         if response.get("error"):
             raise _remote_error(response["error"])
         return response.get("result")

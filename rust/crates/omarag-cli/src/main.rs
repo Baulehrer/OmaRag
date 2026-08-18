@@ -127,10 +127,7 @@ async fn main() -> Result<()> {
             if args.json {
                 print_json(&meta)?;
             } else {
-                println!(
-                    "OmaRag {} · Oracle of Metis & Aletheia · API {}",
-                    meta.omarag_version, meta.api_version
-                );
+                println!("OmaRag {} · API {}", meta.omarag_version, meta.api_version);
                 println!("Backend: {}", meta.backend_id);
                 println!(
                     "Haiku RAG: {}",

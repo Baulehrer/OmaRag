@@ -1,0 +1,64 @@
+# Ethereal — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Ethereal"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#060b1e"
+foreground = "#ffcead"
+muted = "#6d7db6"
+accent = "#7d82d9"
+selection = "#252e56"
+gradient = ["#7d82d9", "#c89dc1"]
+
+[sidebar]
+fg = "#ffcead"
+bg = "#040816"
+border = "#574b4d"
+border_active = "#7d82d9"
+title = "#7d82d9"
+divider = "#6d7db6"
+item_selected_fg = "#ffcead"
+item_selected_bg = "#252e56"
+
+[workspace]
+fg = "#ffcead"
+bg = "#060b1e"
+border = "#574b4d"
+border_active = "#7d82d9"
+title = "#7d82d9"
+item_selected_fg = "#ffcead"
+item_selected_bg = "#252e56"
+
+[footer]
+fg = "#6d7db6"
+bg = "#040816"
+border = "#574b4d"
+border_active = "#7d82d9"
+
+[modal]
+fg = "#ffcead"
+bg = "#131a3a"
+border_active = "#7d82d9"
+cancel_fg = "#060b1e"
+cancel_bg = "#ed5b5a"
+confirm_fg = "#060b1e"
+confirm_bg = "#92a593"
+
+[status]
+cursor = "#7d82d9"
+correct = "#92a593"
+error = "#ed5b5a"
+hint = "#a3bfd1"
+cancel = "#eb8b54"
+hotkey = "#7d82d9"
+
+[ansi]
+red = "#ed5b5a"
+orange = "#eb8b54"
+yellow = "#e9bb4f"
+green = "#92a593"
+cyan = "#a3bfd1"
+blue = "#7d82d9"
+magenta = "#c89dc1"

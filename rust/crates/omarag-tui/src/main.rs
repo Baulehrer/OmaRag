@@ -54,7 +54,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "OmaRag · Oracle of Metis & Aletheia")]
+#[command(version, about = "OmaRag · answers from your own books")]
 struct Args {
     #[arg(long, env = "OMARAG_URL", default_value = "http://127.0.0.1:8765")]
     url: Url,
@@ -116,6 +116,12 @@ enum BackendMessage {
         model: String,
         operation: ModelOperation,
         result: Result<(), String>,
+    },
+    ModelPackageFinished {
+        name: String,
+        installed_models: Vec<String>,
+        activation_status: String,
+        result: Result<Option<ConfigDocument>, String>,
     },
     WarmupFinished,
     FilesystemChanged,
@@ -283,6 +289,12 @@ struct PullProgress {
     error: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelDefaultsPreflightResponse {
+    #[serde(default)]
+    requires_reindex: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // OmaRag is an explicitly themed full-screen application. Some desktop
@@ -297,10 +309,24 @@ async fn main() -> Result<()> {
     Theme::refresh_omarchy();
     let model_api = ModelApi::new(args.url.clone(), args.token.clone())?;
     let client = Arc::new(HttpOmaRagClient::new(args.url, args.token)?);
-    let mut state = AppState::default();
+    // The registry must be known before preferences are applied, so a stored
+    // index can be clamped and a stored name resolved.
+    let mut state = AppState {
+        theme_count: Theme::count(),
+        ..AppState::default()
+    };
     let preferences_path = omarag_config_dir().join("ui-state.json");
     if let Ok(preferences) = load_preferences(&preferences_path) {
         state.apply_preferences(preferences);
+    }
+    // A name survives the theme list changing; an index does not.
+    if let Some(index) = Theme::index_of(&state.theme_name) {
+        state.theme_index = index;
+        state.theme_cursor = index;
+    }
+    state.theme_name = Theme::at(state.theme_index).name.to_owned();
+    for problem in Theme::problems() {
+        notify_error(&mut state, format!("Theme not loaded — {problem}"));
     }
     bootstrap(client.as_ref(), &mut state).await;
 
@@ -308,7 +334,7 @@ async fn main() -> Result<()> {
     let image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
     execute!(
         stdout(),
-        SetTitle("OmaRag · Oracle of Metis & Aletheia"),
+        SetTitle("OmaRag"),
         EnableBracketedPaste,
         EnableMouseCapture
     )
@@ -501,6 +527,8 @@ async fn main() -> Result<()> {
                     }
                 }
                 _ = preferences_refresh.tick() => {
+                    // Persist the theme by name; the index is only a cache.
+                    state.theme_name = Theme::at(state.theme_index).name.to_owned();
                     let preferences = state.preferences();
                     if let Ok(encoded) = serde_json::to_vec_pretty(&preferences)
                         && encoded != saved_preferences
@@ -877,9 +905,27 @@ async fn pull_model(
     model: String,
     tx: mpsc::Sender<BackendMessage>,
 ) -> Result<(), String> {
-    let result = async {
+    let result = stream_model_install(api, "/v1/models/pull", &model, None, tx.clone()).await;
+    let _ = tx
+        .send(BackendMessage::ModelOperationFinished {
+            model,
+            operation: ModelOperation::Download,
+            result: result.clone(),
+        })
+        .await;
+    result
+}
+
+async fn stream_model_install(
+    api: &ModelApi,
+    path: &str,
+    model: &str,
+    transfer_label: Option<&str>,
+    tx: mpsc::Sender<BackendMessage>,
+) -> Result<(), String> {
+    async {
         let mut response = api
-            .request(reqwest::Method::POST, "/v1/models/pull")?
+            .request(reqwest::Method::POST, path)?
             .json(&serde_json::json!({ "model": model }))
             .send()
             .await?
@@ -895,7 +941,7 @@ async fn pull_model(
                 }
                 let _ = tx
                     .send(BackendMessage::ModelTransfer(ModelTransfer {
-                        model: model.clone(),
+                        model: transfer_label.unwrap_or(model).to_owned(),
                         status: progress.status,
                         completed: progress.completed,
                         total: progress.total,
@@ -906,15 +952,7 @@ async fn pull_model(
         Ok::<(), anyhow::Error>(())
     }
     .await
-    .map_err(|error| error.to_string());
-    let _ = tx
-        .send(BackendMessage::ModelOperationFinished {
-            model,
-            operation: ModelOperation::Download,
-            result: result.clone(),
-        })
-        .await;
-    result
+    .map_err(|error| error.to_string())
 }
 
 async fn import_gguf(
@@ -1414,15 +1452,16 @@ fn spawn_command(
             UiCommand::PullPackage {
                 name,
                 models,
+                hugging_face_models,
                 workspace,
                 defaults,
                 vector_dim,
-                etag,
             } => {
-                let status = if models.is_empty() {
-                    "applying model defaults".into()
+                let install_count = models.len() + hugging_face_models.len();
+                let status = if install_count == 0 {
+                    "package already installed · preparing activation".into()
                 } else {
-                    format!("installing {} models", models.len())
+                    format!("installing selected package · {install_count} artifacts")
                 };
                 let _ = tx
                     .send(BackendMessage::ModelTransfer(ModelTransfer {
@@ -1432,13 +1471,48 @@ fn spawn_command(
                         total: 0,
                     }))
                     .await;
-                let mut result = Ok(());
+                let mut installed_models = Vec::new();
+                let mut result = Ok(None);
                 for model in models {
-                    if let Err(error) = pull_model(&model_api, model, tx.clone()).await {
+                    let label = format!("Package {name} · {model}");
+                    if let Err(error) = stream_model_install(
+                        &model_api,
+                        "/v1/models/pull",
+                        &model,
+                        Some(&label),
+                        tx.clone(),
+                    )
+                    .await
+                    {
                         result = Err(error);
                         break;
                     }
+                    installed_models.push(model);
                 }
+                for model in hugging_face_models {
+                    if result.is_err() {
+                        break;
+                    }
+                    let label = format!("Package {name} · {model}");
+                    if let Err(error) = stream_model_install(
+                        &model_api,
+                        "/v1/models/install-hugging-face",
+                        &model,
+                        Some(&label),
+                        tx.clone(),
+                    )
+                    .await
+                    {
+                        result = Err(error);
+                        break;
+                    }
+                    installed_models.push(model);
+                }
+                let mut activation_status = if workspace.is_some() {
+                    "installed · preparing activation".to_owned()
+                } else {
+                    "installed · choose a library later to activate it".to_owned()
+                };
                 if result.is_ok() {
                     let role = |wanted: ModelCategory| {
                         defaults
@@ -1457,6 +1531,12 @@ fn spawn_command(
                         "vector_dim": vector_dim,
                     });
                     let apply = async {
+                        let Some(workspace) = workspace else {
+                            return Ok::<(Option<ConfigDocument>, String), anyhow::Error>((
+                                None,
+                                "installed · choose a library later to activate it".into(),
+                            ));
+                        };
                         let preflight = model_api
                             .request(
                                 reqwest::Method::POST,
@@ -1466,31 +1546,52 @@ fn spawn_command(
                             .send()
                             .await?
                             .error_for_status()?;
-                        let _: serde_json::Value = preflight.json().await?;
+                        let preflight: ModelDefaultsPreflightResponse = preflight.json().await?;
+                        if preflight.requires_reindex {
+                            return Ok((
+                                None,
+                                "installed · activation requires a full library reindex".into(),
+                            ));
+                        }
+                        let current = model_api
+                            .request(
+                                reqwest::Method::GET,
+                                &format!("/v1/workspaces/{workspace}/config"),
+                            )?
+                            .send()
+                            .await?
+                            .error_for_status()?
+                            .json::<ConfigDocument>()
+                            .await?;
                         let response = model_api
                             .request(
                                 reqwest::Method::POST,
                                 &format!("/v1/workspaces/{workspace}/model-defaults/apply"),
                             )?
-                            .header("If-Match", etag)
+                            .header("If-Match", current.etag)
                             .json(&payload)
                             .send()
                             .await?
                             .error_for_status()?;
-                        Ok::<ConfigDocument, anyhow::Error>(response.json().await?)
+                        Ok::<(Option<ConfigDocument>, String), anyhow::Error>((
+                            Some(response.json().await?),
+                            "installed and activated for the current library".into(),
+                        ))
                     }
                     .await;
                     match apply {
-                        Ok(config) => {
-                            let _ = tx.send(BackendMessage::ConfigSaved(Ok(config))).await;
+                        Ok((config, status)) => {
+                            result = Ok(config);
+                            activation_status = status;
                         }
                         Err(error) => result = Err(error.to_string()),
                     }
                 }
                 let _ = tx
-                    .send(BackendMessage::ModelOperationFinished {
-                        model: name,
-                        operation: ModelOperation::Download,
+                    .send(BackendMessage::ModelPackageFinished {
+                        name,
+                        installed_models,
+                        activation_status,
                         result,
                     })
                     .await;
@@ -2393,6 +2494,11 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 });
                 state.workspace_cursor = state.workspaces.len().saturating_sub(1);
                 update(state, Action::WorkspaceOpened(id));
+                // The user only opened this dialog because they wanted to add
+                // books; carry them straight on to the file browser.
+                if std::mem::take(&mut state.import_after_library) {
+                    omarag_tui::input::open_import_browser(state);
+                }
                 update(
                     state,
                     Action::Notify(Notification {
@@ -2803,6 +2909,57 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 }
             }
         }
+        BackendMessage::ModelPackageFinished {
+            name,
+            installed_models,
+            activation_status,
+            result,
+        } => {
+            state.model_manager.busy = false;
+            state.model_manager.transfer_completed = 0;
+            state.model_manager.transfer_total = 0;
+            for package in &mut state.model_manager.packages {
+                for package_model in &mut package.models {
+                    if installed_models
+                        .iter()
+                        .any(|installed| installed == &package_model.download_name)
+                    {
+                        package_model.installed = true;
+                    }
+                }
+            }
+            match result {
+                Ok(config) => {
+                    if let Some(config) = config {
+                        update(state, Action::ConfigSaved(config));
+                    }
+                    state.model_manager.transfer_status = format!("{name}: {activation_status}");
+                    update(
+                        state,
+                        Action::Notify(Notification {
+                            level: if activation_status.contains("requires") {
+                                NotificationLevel::Warning
+                            } else {
+                                NotificationLevel::Info
+                            },
+                            message: format!("Package {name} {activation_status}."),
+                        }),
+                    );
+                }
+                Err(error) => {
+                    let error = if error.contains("404 Not Found") {
+                        format!(
+                            "{error} · The backend does not provide the package installer yet; restart the OmaRag daemon."
+                        )
+                    } else {
+                        error
+                    };
+                    state.model_manager.transfer_status =
+                        format!("Package {name} failed · {error}");
+                    notify_error(state, error);
+                }
+            }
+        }
         BackendMessage::FilesystemChanged => {}
     }
     false
@@ -2862,6 +3019,63 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_library_closes_the_dialog_and_activates_it() {
+        // The whole point of the flow: after the backend confirms, the dialog
+        // must go away and the new library must become active. If it does not,
+        // the user presses Enter again and creates duplicates.
+        let mut state = AppState {
+            overlay: Some(omarag_app::Overlay::Workspaces),
+            creating_workspace: true,
+            ..AppState::default()
+        };
+        state.workspace_name.set("Bautechnik".to_owned());
+
+        let command = omarag_tui::input::handle_event(
+            &mut state,
+            crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
+        );
+        assert!(
+            matches!(command, Some(UiCommand::CreateWorkspace(_))),
+            "Enter must ask the backend to create the library"
+        );
+
+        apply_backend_message(
+            &mut state,
+            BackendMessage::WorkspaceCreated(Ok(WorkspaceManifest {
+                schema_version: 1,
+                id: "ws-bautechnik-1".into(),
+                name: "Bautechnik".into(),
+                created_at: "2026-08-18T06:00:00Z".into(),
+                updated_at: "2026-08-18T06:00:00Z".into(),
+                path: "/tmp/ws".into(),
+                read_only: false,
+                haiku_compatible_range: "latest-gated".into(),
+                haiku_update_policy: "latest-gated".into(),
+                haiku_last_verified: None,
+                database_schema_version: "detected".into(),
+                embedding_provider: "ollama".into(),
+                embedding_model: "qwen3-embedding:0.6b".into(),
+                vector_dimension: Some(1024),
+                processing_profile: "default".into(),
+                evidence_mode: omarag_domain::EvidenceMode::default(),
+                document_policy: "prefer-current".into(),
+                privacy_mode: omarag_domain::PrivacyMode::DeviceOnly,
+                cloud_acknowledged: false,
+                etag: "etag".into(),
+            })),
+        );
+
+        assert_eq!(state.overlay, None, "dialog must close after creation");
+        assert!(!state.creating_workspace, "creation mode must end");
+        assert!(!state.operation.active, "spinner must stop");
+        assert_eq!(state.active_workspace.as_deref(), Some("ws-bautechnik-1"));
+        assert_eq!(state.workspaces.len(), 1);
+    }
+
+    #[test]
     fn copied_chat_selection_gets_a_specific_toast() {
         let mut state = AppState::default();
 
@@ -2876,6 +3090,31 @@ mod tests {
         assert_eq!(
             state.notifications.last().map(|item| item.message.as_str()),
             Some("Selection copied.")
+        );
+    }
+
+    #[test]
+    fn package_endpoint_mismatch_tells_the_user_to_restart_the_daemon() {
+        let mut state = AppState::default();
+        state.model_manager.busy = true;
+
+        apply_backend_message(
+            &mut state,
+            BackendMessage::ModelPackageFinished {
+                name: "Balanced".into(),
+                installed_models: Vec::new(),
+                activation_status: String::new(),
+                result: Err("HTTP status client error (404 Not Found)".into()),
+            },
+        );
+
+        assert!(!state.model_manager.busy);
+        assert!(state.model_manager.transfer_status.contains("restart"));
+        assert!(
+            state
+                .notifications
+                .last()
+                .is_some_and(|item| item.message.contains("restart the OmaRag daemon"))
         );
     }
 

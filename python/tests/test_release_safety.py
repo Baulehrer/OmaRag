@@ -166,6 +166,91 @@ async def test_chat_gets_next_heavy_resource_slot() -> None:
     assert order == ["index-1", "chat", "index-2"]
 
 
+async def test_a_second_conversion_only_starts_when_memory_clearly_allows_it() -> None:
+    """Parallel conversion is a memory bet; it must be refused unless it is safe.
+
+    Two conversions roughly double the peak, so a second slot requires free
+    memory covering that peak twice over on top of the reserve.
+    """
+    from omarag_bridge.services import resource_coordinator as coordinator_module
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
+    resources = ResourceCoordinator()
+    peak = coordinator_module._CONVERSION_PEAK_BYTES
+
+    # Plenty of room: a second conversion is allowed.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=64 * 1024**3, available=peak * 2 + 8 * 1024**3, reserve=1024**3
+    )
+    assert resources.conversion_slots() == 2
+
+    # Tight: fall back to one at a time.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=peak, reserve=1024**3
+    )
+    assert resources.conversion_slots() == 1
+
+    # Under pressure the answer is one, whatever the arithmetic says.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=1024**3, reserve=1024**3
+    )
+    assert resources.conversion_slots() == 1
+
+
+async def test_conversions_overlap_only_up_to_the_permitted_slots() -> None:
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
+    resources = ResourceCoordinator()
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=64 * 1024**3, available=60 * 1024**3, reserve=1024**3
+    )
+    peak_seen = 0
+    release = asyncio.Event()
+
+    async def convert() -> None:
+        nonlocal peak_seen
+        async with resources.indexing():
+            peak_seen = max(peak_seen, resources.active_indexers)
+            await release.wait()
+
+    tasks = [asyncio.create_task(convert()) for _ in range(3)]
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert peak_seen == 2, "two slots were granted, so two must overlap — and no more"
+
+
+async def test_a_question_still_excludes_indexing_entirely() -> None:
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
+    resources = ResourceCoordinator()
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=64 * 1024**3, available=60 * 1024**3, reserve=1024**3
+    )
+    overlapped = False
+    release = asyncio.Event()
+
+    async def question() -> None:
+        async with resources.chat():
+            await release.wait()
+
+    async def convert() -> None:
+        nonlocal overlapped
+        async with resources.indexing():
+            overlapped = True
+
+    asking = asyncio.create_task(question())
+    await asyncio.sleep(0)
+    converting = asyncio.create_task(convert())
+    await asyncio.sleep(0)
+    assert not overlapped, "indexing must never run beside an active question"
+    release.set()
+    await asyncio.gather(asking, converting)
+    assert overlapped
+
+
 async def test_speculative_warmup_never_waits_behind_foreground_work() -> None:
     resources = ResourceCoordinator()
 

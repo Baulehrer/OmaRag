@@ -1,11 +1,11 @@
 use crate::{
     FoundryControl, VisualInspectorState, VisualInspectorTab, app_areas, catalog_filter_areas,
-    centered, chat_answer_offset, chat_bold_term_at, chat_selection_text, confirm_import_area,
-    confirm_quit_area, delete_model_confirm_area, evidence_tiles, file_browser_areas,
-    foundry_catalog_areas, foundry_controls, foundry_setup_areas, model_center_areas,
-    performance_profile, related_image_refs, related_page_refs, screen_areas,
-    sidebar_navigation_rows, source_citation_row_offset, source_inspector_areas,
-    visual_inspector_areas,
+    centered, chat_answer_offset, chat_areas, chat_bold_term_at, chat_selection_text,
+    confirm_import_area, confirm_quit_area, delete_model_confirm_area, evidence_tiles,
+    file_browser_areas, foundry_catalog_areas, foundry_controls, foundry_setup_areas,
+    model_center_areas, pane_inner, performance_profile, related_image_refs, related_page_refs,
+    screen_areas, section_inner, sidebar_navigation_rows, source_citation_row_offset,
+    source_inspector_areas, visual_inspector_areas,
 };
 use crossterm::{
     event::{
@@ -22,7 +22,7 @@ use omarag_app::{
     Action, AppState, ChatSession, ChatTextSelection, CustomLibraryProfile, EditorState, FocusPane,
     FocusPanel, HardwareProfile, ImportPreflight, InputMode, InteractionLevel, LibraryFilter,
     ModelCategory, ModelMemoryPolicy, ModelQuantization, ModelSource, Notification,
-    NotificationLevel, Overlay, Route, THEME_COUNT, UndoAction, View, WorkspaceProfile, update,
+    NotificationLevel, Overlay, Route, UndoAction, View, WorkspaceProfile, update,
 };
 use omarag_domain::{
     CreateSource, CreateWorkspace, DocumentSummary, EvidenceMode, IngestRequest, JobId, JobStatus,
@@ -106,10 +106,10 @@ pub enum UiCommand {
     PullPackage {
         name: String,
         models: Vec<String>,
-        workspace: WorkspaceId,
+        hugging_face_models: Vec<String>,
+        workspace: Option<WorkspaceId>,
         defaults: Vec<omarag_app::ModelPackageItem>,
         vector_dim: u32,
-        etag: String,
     },
     PreloadModel {
         model: String,
@@ -317,9 +317,13 @@ fn handle_visual_inspector_event(
     event: &Event,
     screen: Rect,
 ) -> Option<Option<UiCommand>> {
-    if state.overlay.is_some()
-        || state.focus_pane != FocusPane::Inspector
-        || !matches!(state.view, View::Conversation | View::Retrieval)
+    if state.overlay.is_some() || !matches!(state.view, View::Conversation | View::Retrieval) {
+        return None;
+    }
+    // Keys act on the pane that already owns focus; a click may also be the
+    // thing that gives it focus, and must still hit-test accurately.
+    if state.focus_pane != FocusPane::Inspector
+        && !matches!(event, Event::Mouse(mouse) if mouse.kind == MouseEventKind::Down(MouseButton::Left))
     {
         return None;
     }
@@ -366,8 +370,17 @@ fn handle_visual_inspector_event(
             if inspector.width == 0 || !contains(inspector, mouse) {
                 return None;
             }
-            let inner = bordered_inner(inspector);
-            let layout = visual_inspector_areas(inner, compact_shell, visual.sources_collapsed);
+            update(state, Action::SetFocusPane(FocusPane::Inspector));
+            let inner = pane_inner(inspector);
+            let media_count = visual
+                .evidence
+                .media
+                .iter()
+                .filter(|asset| asset.is_individual_asset())
+                .take(omarag_domain::VisualEvidenceResponse::MAX_MEDIA)
+                .count();
+            let layout =
+                visual_inspector_areas(inner, compact_shell, visual.sources_collapsed, media_count);
             if compact_shell && contains(layout.tabs, mouse) {
                 let relative = mouse.column.saturating_sub(layout.tabs.x);
                 let slot =
@@ -381,12 +394,22 @@ fn handle_visual_inspector_event(
             }
             let active_pages = !compact_shell || visual.tab == VisualInspectorTab::Pages;
             if active_pages && contains(layout.pages, mouse) {
-                let inner = bordered_inner(layout.pages);
+                let inner = section_inner(layout.pages);
                 let refs = related_page_refs(state, Some(&visual.evidence));
-                if let Some(slot) = evidence_tiles(inner, refs.len())
+                // Only the page of tiles around the selection is drawn, so a
+                // click resolves within that page, not the whole list.
+                let selected_slot = refs
+                    .iter()
+                    .position(|(citation, page, _)| {
+                        *citation == state.citation_cursor && *page == state.citation_page_cursor
+                    })
+                    .unwrap_or(0);
+                let start = crate::evidence_page_start(selected_slot);
+                let visible = refs.len().saturating_sub(start).min(crate::EVIDENCE_PAGE);
+                if let Some(offset) = evidence_tiles(inner, visible)
                     .iter()
                     .position(|tile| contains(*tile, mouse))
-                    && let Some((citation_index, page_index, _)) = refs.get(slot).copied()
+                    && let Some((citation_index, page_index, _)) = refs.get(start + offset).copied()
                 {
                     state.citation_cursor = citation_index;
                     state.citation_page_cursor = page_index;
@@ -396,13 +419,21 @@ fn handle_visual_inspector_event(
             }
             let active_figures = !compact_shell || visual.tab == VisualInspectorTab::Figures;
             if active_figures && contains(layout.figures, mouse) {
-                let count = visual.evidence.media.len().min(4);
-                let inner = bordered_inner(layout.figures);
-                if let Some(slot) = evidence_tiles(inner, count)
+                let total = visual
+                    .evidence
+                    .media
+                    .iter()
+                    .filter(|asset| asset.is_individual_asset())
+                    .count();
+                let inner = section_inner(layout.figures);
+                let start =
+                    crate::evidence_page_start(visual.selected_media.min(total.saturating_sub(1)));
+                let visible = total.saturating_sub(start).min(crate::EVIDENCE_PAGE);
+                if let Some(offset) = evidence_tiles(inner, visible)
                     .iter()
                     .position(|tile| contains(*tile, mouse))
                 {
-                    visual.selected_media = slot;
+                    visual.selected_media = start + offset;
                 }
                 return Some(None);
             }
@@ -411,14 +442,15 @@ fn handle_visual_inspector_event(
                 if visual.sources_collapsed {
                     return Some(None);
                 }
-                let sources_inner = bordered_inner(layout.sources);
+                let sources_inner = section_inner(layout.sources);
                 let row = mouse
                     .row
                     .saturating_sub(sources_inner.y)
                     .saturating_add(state.inspector_scroll);
                 let citation_start = source_citation_row_offset(state);
                 if row >= citation_start && !state.chat.citations.is_empty() {
-                    let index = (row.saturating_sub(citation_start) as usize / 2)
+                    let index = (row.saturating_sub(citation_start) as usize
+                        / crate::SOURCE_CITATION_ROW_HEIGHT as usize)
                         .min(state.chat.citations.len().saturating_sub(1));
                     state.citation_cursor = index;
                     state.citation_page_cursor = 0;
@@ -510,7 +542,7 @@ fn handle_mouse_primary(
     let areas = app_areas(body, state.focus_pane);
     if areas.sidebar.width > 0 && contains(areas.sidebar, &mouse) {
         update(state, Action::SetFocusPane(FocusPane::Sidebar));
-        let inner = bordered_inner(areas.sidebar);
+        let inner = pane_inner(areas.sidebar);
         let row = mouse.row.saturating_sub(inner.y) as usize;
         let navigation = sidebar_navigation_rows(state);
         if let Some(Some(view)) = navigation.get(row) {
@@ -521,26 +553,26 @@ fn handle_mouse_primary(
     }
     if areas.workspace.width > 0 && contains(areas.workspace, &mouse) {
         update(state, Action::SetFocusPane(FocusPane::Workspace));
-        let inner = bordered_inner(areas.workspace);
+        let inner = pane_inner(areas.workspace);
         match state.view {
             View::Conversation => {
-                let input_height = if inner.height >= 9 { 3 } else { 1 };
-                let input_y = inner.bottom().saturating_sub(input_height);
-                if mouse.row >= input_y {
+                let chat = chat_areas(inner, state);
+                if mouse.row >= chat.composer.y {
                     state.chat.selection = None;
                     state.input_mode = InputMode::Text;
                     set_editor_cursor_from_column(
                         &mut state.chat.question,
-                        mouse.column.saturating_sub(inner.x) as usize,
+                        mouse.column.saturating_sub(chat.editor.x) as usize,
                     );
                 } else if !state.chat.answer.is_empty()
+                    && mouse.row >= chat.answer.y
                     && let Some(offset) = chat_answer_offset(
                         &state.chat.answer,
                         state.citation_cursor,
-                        inner.width,
+                        chat.answer.width,
                         state.chat_scroll,
-                        mouse.column.saturating_sub(inner.x),
-                        mouse.row.saturating_sub(inner.y),
+                        mouse.column.saturating_sub(chat.answer.x),
+                        mouse.row.saturating_sub(chat.answer.y),
                     )
                 {
                     state.input_mode = InputMode::Nav;
@@ -569,7 +601,11 @@ fn handle_mouse_primary(
                 }
             }
             View::Indexing | View::Activity => {
-                let intro = if state.view == View::Indexing { 3 } else { 0 };
+                let intro = if state.view == View::Indexing {
+                    crate::INDEXING_INTRO_HEIGHT
+                } else {
+                    0
+                };
                 let index = mouse.row.saturating_sub(inner.y.saturating_add(intro)) as usize;
                 if index < state.jobs.len() {
                     state.job_cursor = index;
@@ -633,19 +669,14 @@ fn handle_mouse_primary(
                 }
             }
             View::Themes => {
-                let grid_y = inner.y.saturating_add(3).saturating_add(1);
-                let column_rows = THEME_COUNT.div_ceil(2) as u16;
-                let rows = if inner.width >= 64 {
-                    column_rows
-                } else {
-                    THEME_COUNT as u16
-                };
-                if mouse.row >= grid_y && mouse.row < grid_y.saturating_add(rows) {
-                    let row = mouse.row.saturating_sub(grid_y) as usize;
-                    let column =
-                        usize::from(inner.width >= 64 && mouse.column >= inner.x + inner.width / 2);
-                    let index = row + column * column_rows as usize;
-                    if index < THEME_COUNT {
+                // One row per palette, scrolled by the list widget, so the row
+                // under the pointer is the cursor offset plus the scroll.
+                let list_y = inner.y.saturating_add(crate::THEME_INTRO_HEIGHT);
+                let height = inner.height.saturating_sub(crate::THEME_INTRO_HEIGHT);
+                if mouse.row >= list_y && mouse.row < list_y.saturating_add(height) {
+                    let offset = mouse.row.saturating_sub(list_y) as usize;
+                    let index = crate::theme_list_scroll(state, height) + offset;
+                    if index < crate::Theme::count() {
                         preview_theme(state, index);
                         if activate {
                             apply_theme_preview(state);
@@ -664,11 +695,11 @@ fn handle_mouse_primary(
         return None;
     }
     if areas.inspector.width > 0 && contains(areas.inspector, &mouse) {
-        let inner = bordered_inner(areas.inspector);
+        let inner = pane_inner(areas.inspector);
         if matches!(state.view, View::Conversation | View::Retrieval) {
             update(state, Action::SetFocusPane(FocusPane::Inspector));
             let [images, sources] = source_inspector_areas(inner);
-            let image_inner = bordered_inner(images);
+            let image_inner = section_inner(images);
             if contains(image_inner, &mouse) {
                 let column = usize::from(
                     mouse.column >= image_inner.x.saturating_add(image_inner.width / 2),
@@ -685,16 +716,16 @@ fn handle_mouse_primary(
                         return selected_citation_command(state, true);
                     }
                 }
-            } else if contains(bordered_inner(sources), &mouse) && !state.chat.citations.is_empty()
-            {
-                let sources_inner = bordered_inner(sources);
+            } else if contains(section_inner(sources), &mouse) && !state.chat.citations.is_empty() {
+                let sources_inner = section_inner(sources);
                 let row = mouse
                     .row
                     .saturating_sub(sources_inner.y)
                     .saturating_add(state.inspector_scroll);
                 let citation_start = source_citation_row_offset(state);
                 if row >= citation_start {
-                    let index = (row.saturating_sub(citation_start) as usize / 2)
+                    let index = (row.saturating_sub(citation_start) as usize
+                        / crate::SOURCE_CITATION_ROW_HEIGHT as usize)
                         .min(state.chat.citations.len().saturating_sub(1));
                     state.citation_cursor = index;
                     state.citation_page_cursor = 0;
@@ -719,18 +750,19 @@ fn finish_chat_selection(
     }
     let [_header, body, _footer] = screen_areas(screen);
     let areas = app_areas(body, state.focus_pane);
-    let inner = bordered_inner(areas.workspace);
-    let input_height = if inner.height >= 9 { 3 } else { 1 };
-    let answer_bottom = inner.bottom().saturating_sub(input_height);
-    let released_on_answer = contains(areas.workspace, &mouse) && mouse.row < answer_bottom;
+    let inner = pane_inner(areas.workspace);
+    let chat = chat_areas(inner, state);
+    let released_on_answer = contains(areas.workspace, &mouse)
+        && mouse.row >= chat.answer.y
+        && mouse.row < chat.answer.bottom();
     if released_on_answer
         && let Some(offset) = chat_answer_offset(
             &state.chat.answer,
             state.citation_cursor,
-            inner.width,
+            chat.answer.width,
             state.chat_scroll,
-            mouse.column.saturating_sub(inner.x),
-            mouse.row.saturating_sub(inner.y),
+            mouse.column.saturating_sub(chat.answer.x),
+            mouse.row.saturating_sub(chat.answer.y),
         )
         && let Some(selection) = state.chat.selection.as_mut()
     {
@@ -742,7 +774,7 @@ fn finish_chat_selection(
         let selected = chat_selection_text(
             &state.chat.answer,
             state.citation_cursor,
-            inner.width,
+            chat.answer.width,
             selection,
         )?;
         return Some(UiCommand::CopySelection(selected));
@@ -758,10 +790,10 @@ fn finish_chat_selection(
     let term = chat_bold_term_at(
         &state.chat.answer,
         state.citation_cursor,
-        inner.width,
+        chat.answer.width,
         state.chat_scroll,
-        mouse.column.saturating_sub(inner.x),
-        mouse.row.saturating_sub(inner.y),
+        mouse.column.saturating_sub(chat.answer.x),
+        mouse.row.saturating_sub(chat.answer.y),
     )?;
     let context = if state.chat.submitted_question.trim().is_empty() {
         state.chat.question.value.trim()
@@ -1264,15 +1296,6 @@ fn compact_control_at(
     None
 }
 
-fn bordered_inner(area: Rect) -> Rect {
-    Rect::new(
-        area.x.saturating_add(1),
-        area.y.saturating_add(1),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    )
-}
-
 fn set_editor_cursor_from_column(editor: &mut EditorState, column: usize) {
     let mut width = 0;
     editor.cursor = editor.value.len();
@@ -1380,7 +1403,10 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             update(state, Action::SetFocusPane(FocusPane::Workspace));
             Some(refresh_model_catalog_command(state))
         }
-        KeyCode::Char('m') => {
+        // Ctrl+K as well as Ctrl+M: a terminal sends Ctrl+M as carriage return,
+        // so it arrives as Enter and never reaches this shortcut. Ctrl+M is kept
+        // for terminals that report enhanced keys.
+        KeyCode::Char('m' | 'k') => {
             update(state, Action::NavigateView(View::Models));
             update(state, Action::SetFocusPane(FocusPane::Workspace));
             Some(refresh_model_catalog_command(state))
@@ -1418,7 +1444,10 @@ fn handle_ctrl_shortcut(state: &mut AppState, code: KeyCode) -> Option<Option<Ui
             state.overlay = Some(Overlay::ConfirmQuit);
             None
         }
-        KeyCode::Char('i') => {
+        // Ctrl+O as well as Ctrl+I: a terminal sends Ctrl+I as a tab, so it
+        // arrives as Tab and never reaches this shortcut. Ctrl+I is kept for
+        // terminals that report enhanced keys.
+        KeyCode::Char('i' | 'o') => {
             open_file_browser(state);
             None
         }
@@ -2105,15 +2134,14 @@ fn apply_cross_encoder_default(state: &mut AppState, value: String) -> Option<Ui
         );
         return None;
     };
-    let Some(config) = state.config.as_ref() else {
+    if state.config.is_none() {
         notify(
             state,
             NotificationLevel::Warning,
             "The library configuration is not loaded yet.",
         );
         return None;
-    };
-    let etag = config.etag.clone();
+    }
     let configured = crate::configured_models(state);
     if configured
         .iter()
@@ -2159,10 +2187,10 @@ fn apply_cross_encoder_default(state: &mut AppState, value: String) -> Option<Ui
     Some(UiCommand::PullPackage {
         name: "Custom reranker".into(),
         models: Vec::new(),
-        workspace,
+        hugging_face_models: Vec::new(),
+        workspace: Some(workspace),
         defaults,
         vector_dim: crate::configured_vector_dim(state),
-        etag,
     })
 }
 
@@ -2642,6 +2670,7 @@ fn start_workspace_creation(state: &mut AppState) {
 
 fn cancel_workspace_creation(state: &mut AppState) {
     state.creating_workspace = false;
+    state.import_after_library = false;
     state.workspace_name = EditorState::default();
     state.overlay = Some(Overlay::Workspaces);
 }
@@ -2661,7 +2690,24 @@ fn create_workspace_command(state: &mut AppState) -> Option<UiCommand> {
     }))
 }
 
-fn open_file_browser(state: &mut AppState) {
+/// Opens the import browser, or — when there is no library to import into —
+/// the library dialog first, remembering to resume the import afterwards.
+pub fn open_file_browser(state: &mut AppState) {
+    if state.active_workspace.is_none() {
+        state.import_after_library = true;
+        notify(
+            state,
+            NotificationLevel::Info,
+            "Books need a library. Name one and the import continues.",
+        );
+        start_workspace_creation(state);
+        return;
+    }
+    open_import_browser(state);
+}
+
+/// Opens the import browser unconditionally.
+pub fn open_import_browser(state: &mut AppState) {
     let start = if !state.file_browser.current_dir.is_empty()
         && Path::new(&state.file_browser.current_dir).is_dir()
     {
@@ -3390,17 +3436,30 @@ fn pull_selected_package(state: &mut AppState) -> Option<UiCommand> {
             models.push(model.download_name.clone());
         }
     }
-    let workspace = state.active_workspace.clone()?;
-    let etag = state.config.as_ref()?.etag.clone();
+    let mut hugging_face_models = Vec::new();
+    for model in package
+        .models
+        .iter()
+        .filter(|model| !model.installed && model.source == ModelSource::HuggingFace)
+    {
+        if !hugging_face_models.contains(&model.download_name) {
+            hugging_face_models.push(model.download_name.clone());
+        }
+    }
     state.model_manager.busy = true;
-    state.model_manager.transfer_status = format!("Installing and applying {}", package.name);
+    state.model_manager.transfer_completed = 0;
+    state.model_manager.transfer_total = 0;
+    state.model_manager.transfer_status = format!(
+        "Installing selected package {} · activation follows after verification",
+        package.name
+    );
     Some(UiCommand::PullPackage {
         name: package.name,
         models,
-        workspace,
+        hugging_face_models,
+        workspace: state.active_workspace.clone(),
         defaults: package.models,
         vector_dim: 1024,
-        etag,
     })
 }
 
@@ -3941,6 +4000,16 @@ fn handle_navigation(state: &mut AppState, key: KeyEvent) -> Option<UiCommand> {
         return None;
     }
 
+    if state.view == View::Settings && matches!(key.code, KeyCode::Char('k' | 'K')) {
+        update(state, Action::CycleIconMode);
+        return None;
+    }
+
+    if state.view == View::Settings && matches!(key.code, KeyCode::Char('g' | 'G')) {
+        update(state, Action::CycleIconSet);
+        return None;
+    }
+
     if state.view == View::Settings && matches!(key.code, KeyCode::Char('m' | 'a')) {
         update(state, Action::ToggleInteractionLevel);
         update(state, Action::SetInputMode(InputMode::Nav));
@@ -4380,15 +4449,15 @@ fn preview_theme(state: &mut AppState, index: usize) {
     if state.theme_preview_origin.is_none() {
         state.theme_preview_origin = Some(state.theme_index);
     }
-    state.theme_cursor = index % THEME_COUNT;
+    state.theme_cursor = index % crate::Theme::count();
     state.theme_index = state.theme_cursor;
 }
 
 fn move_theme_preview(state: &mut AppState, next: bool) {
     let index = if next {
-        (state.theme_cursor + 1) % THEME_COUNT
+        (state.theme_cursor + 1) % crate::Theme::count()
     } else {
-        (state.theme_cursor + THEME_COUNT - 1) % THEME_COUNT
+        (state.theme_cursor + crate::Theme::count() - 1) % crate::Theme::count()
     };
     preview_theme(state, index);
 }
@@ -4604,6 +4673,193 @@ mod tests {
         Event::Key(KeyEvent::new(code, modifiers))
     }
 
+    /// Renders the shell and returns each screen row as text, so a hit-test can
+    /// be checked against what is actually drawn rather than against the same
+    /// helper the production code uses. A geometry helper that drifts from the
+    /// renderer would pass the latter and fail this.
+    fn rendered_screen(width: u16, height: u16, state: &AppState) -> Vec<String> {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::render_with_metrics(
+                    frame,
+                    state,
+                    &crate::Theme::default(),
+                    &crate::RuntimeMetrics::default(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn clicking_a_rendered_citation_selects_that_citation() {
+        let screen = Rect::new(0, 0, 160, 44);
+        let mut state = AppState {
+            view: View::Conversation,
+            focus_pane: FocusPane::Workspace,
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        state.chat.answer = "answer [E1] and [E2]".into();
+        state.chat.citations = vec![
+            test_citation("E1", "First Book", 11),
+            test_citation("E2", "Second Book", 22),
+        ];
+        state.chat.receipt = Some(test_receipt());
+
+        let rows = rendered_screen(160, 44, &state);
+        let [_header, body, _footer] = screen_areas(screen);
+        let inspector = app_areas(body, FocusPane::Workspace).inspector;
+        // Slice by characters: the rendered rows contain multi-byte box glyphs.
+        let left = inspector.x as usize;
+        let find = |needle: &str| {
+            rows.iter()
+                .position(|row| row.chars().skip(left).collect::<String>().contains(needle))
+                .unwrap_or_else(|| panic!("{needle} never rendered"))
+        };
+        // Target the citation row specifically: the document title also appears
+        // in the page-preview tiles above, so a bare title match finds those.
+        let second_row = find("E2 Second Book") as u16;
+        let first_row = find("E1 First Book") as u16;
+        assert!(second_row > first_row, "sources must be listed in order");
+
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                inspector.x + 4,
+                second_row,
+            ),
+            screen,
+        );
+        assert_eq!(
+            state.citation_cursor, 1,
+            "clicking the row that renders the second source must select it"
+        );
+    }
+
+    #[test]
+    fn clicking_a_rendered_palette_selects_that_palette() {
+        let screen = Rect::new(0, 0, 160, 44);
+        let mut state = AppState {
+            view: View::Themes,
+            focus_pane: FocusPane::Workspace,
+            ..AppState::default()
+        };
+        let rows = rendered_screen(160, 44, &state);
+        let [_header, body, _footer] = screen_areas(screen);
+        let workspace = app_areas(body, FocusPane::Workspace).workspace;
+        let left = workspace.x as usize;
+        let width = workspace.width as usize;
+        let wanted = crate::Theme::at(2).name;
+        let row = rows
+            .iter()
+            .position(|row| {
+                row.chars()
+                    .skip(left)
+                    .take(width)
+                    .collect::<String>()
+                    .contains(wanted)
+            })
+            .unwrap_or_else(|| panic!("{wanted} never rendered")) as u16;
+
+        handle_mouse(
+            &mut state,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                workspace.x + 12,
+                row,
+            ),
+            screen,
+        );
+        assert_eq!(
+            crate::Theme::at(state.theme_cursor).name,
+            wanted,
+            "clicking a palette row must preview that palette"
+        );
+    }
+
+    fn test_citation(evidence: &str, title: &str, page: u32) -> omarag_domain::Citation {
+        omarag_domain::Citation {
+            evidence_id: Some(evidence.into()),
+            prompt_evidence_id: Some(evidence.into()),
+            chunk_id: format!("{title}-chunk"),
+            chunk_ids: vec![format!("{title}-chunk")],
+            document_id: Some(title.into()),
+            logical_document_id: Some(title.into()),
+            source_uri: Some(format!("/tmp/{title}.pdf")),
+            document_title: Some(title.into()),
+            pages: vec![page],
+            headings: Vec::new(),
+            element_types: vec!["text".into()],
+            doc_item_refs: Vec::new(),
+            picture_refs: Vec::new(),
+            primary_anchors: Vec::new(),
+            context_anchors: Vec::new(),
+            excerpt: "excerpt".into(),
+            excerpt_char_start: Some(0),
+            excerpt_char_end: Some(7),
+            chunk_content_hash: None,
+            retrieval_rank: Some(1),
+            rerank_score: Some(0.5),
+            claim_ids: Vec::new(),
+            retrieval_paths: Vec::new(),
+            relevance_score: Some(0.5),
+            book: None,
+            verification_status: "verified".into(),
+        }
+    }
+
+    fn test_receipt() -> omarag_domain::RunReceipt {
+        omarag_domain::RunReceipt {
+            session_id: "s".into(),
+            turn: 2,
+            cache_status: omarag_domain::AnswerCacheStatus::Hit,
+            total_ms: 12.0,
+            source_count: 2,
+            reused_source_count: 1,
+            new_source_count: 1,
+            source_check: omarag_domain::SourceCheck::Verified,
+            phase_timings_ms: Default::default(),
+            retrieval_mode: "hybrid".into(),
+            rerank_status: "applied".into(),
+            complexity: "standard".into(),
+            route: "hybrid".into(),
+            facets: Vec::new(),
+            budgets: Default::default(),
+            candidate_count: 4,
+            selected_count: 2,
+            cut_reason: "gap".into(),
+            facet_coverage: Default::default(),
+            fallbacks: Vec::new(),
+            model_digests: Default::default(),
+            prompt_tokens: Some(10),
+            output_tokens: Some(10),
+            tokens_per_second: Some(10.0),
+            time_to_first_token_ms: Some(10.0),
+            singleflight_status: "none".into(),
+            abstention: "none".into(),
+            rejected_claims: 0,
+            done_reason: "stop".into(),
+            retrieval_stages: Vec::new(),
+            escalation_reasons: Vec::new(),
+            calibrator_digest: None,
+            calibrator_status: "unknown".into(),
+            verifier_digest: None,
+            verifier_status: "not-run".into(),
+            typed_evidence_status: "unknown".into(),
+        }
+    }
+
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind,
@@ -4808,9 +5064,9 @@ mod tests {
         ));
 
         let [_header, body, _footer] = screen_areas(screen);
-        let inspector = bordered_inner(app_areas(body, FocusPane::Inspector).inspector);
+        let inspector = pane_inner(app_areas(body, FocusPane::Inspector).inspector);
         let [images, sources] = source_inspector_areas(inspector);
-        let images = bordered_inner(images);
+        let images = section_inner(images);
         let image_command = handle_mouse(
             &mut state,
             mouse(
@@ -4827,7 +5083,7 @@ mod tests {
                 if path == "/tmp/second.pdf"
         ));
 
-        let sources = bordered_inner(sources);
+        let sources = section_inner(sources);
         let second_source_row = sources.y + source_citation_row_offset(&state) + 2;
         let command = handle_mouse(
             &mut state,
@@ -5047,7 +5303,11 @@ mod tests {
 
     #[test]
     fn arrows_tab_and_ctrl_shortcuts_cover_all_panels() {
-        let mut state = AppState::default();
+        // Ctrl+T wraps on the loaded theme count.
+        let mut state = AppState {
+            theme_count: crate::Theme::count(),
+            ..AppState::default()
+        };
         handle_event(&mut state, key(KeyCode::Down));
         assert_eq!(state.chat_scroll, 1);
         handle_event(&mut state, key(KeyCode::Char('k')));
@@ -5094,13 +5354,15 @@ mod tests {
         let [_header, body, _footer] = screen_areas(screen);
         let mut state = AppState::default();
         let areas = app_areas(body, state.focus_pane);
+        // Clicking the composer focuses the workspace and starts typing.
+        let composer = chat_areas(pane_inner(areas.workspace), &state).composer;
 
         handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                areas.workspace.x + 3,
-                areas.workspace.bottom() - 2,
+                composer.x + 3,
+                composer.y,
             ),
             screen,
         );
@@ -5112,7 +5374,7 @@ mod tests {
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 areas.sidebar.x + 3,
-                areas.sidebar.y + 7,
+                areas.sidebar.y + 9,
             ),
             screen,
         );
@@ -5125,11 +5387,14 @@ mod tests {
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
                 areas.sidebar.x + 3,
-                areas.sidebar.y + 4,
+                areas.sidebar.y + 5,
             ),
             screen,
         );
         assert_eq!(state.view, View::Books);
+        // Importing needs somewhere to import into; with a library present the
+        // browser opens directly.
+        state.active_workspace = Some("library-1".into());
         handle_event(&mut state, key(KeyCode::Char('i')));
         assert_eq!(state.overlay, Some(Overlay::FileBrowser));
     }
@@ -5138,7 +5403,11 @@ mod tests {
     fn mouse_wheel_and_middle_button_cover_chat_and_themes() {
         let screen = Rect::new(0, 0, 160, 40);
         let [_header, body, _footer] = screen_areas(screen);
-        let mut state = AppState::default();
+        // The middle button cycles the theme, which wraps on the loaded count.
+        let mut state = AppState {
+            theme_count: crate::Theme::count(),
+            ..AppState::default()
+        };
         let workspace = app_areas(body, state.focus_pane).workspace;
 
         handle_mouse(
@@ -5260,6 +5529,85 @@ mod tests {
     }
 
     #[test]
+    fn shortcuts_shadowed_by_terminal_control_codes_have_working_aliases() {
+        // A terminal encodes Ctrl+I as tab and Ctrl+M as carriage return, so
+        // those two never arrive as Ctrl chords. The aliases must work.
+        let mut state = AppState {
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+        handle_event(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            state.overlay,
+            Some(Overlay::FileBrowser),
+            "Ctrl+O must add PDFs, because Ctrl+I cannot reach us"
+        );
+
+        let mut state = AppState::default();
+        handle_event(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+        );
+        assert_eq!(
+            state.view,
+            View::Models,
+            "Ctrl+K must open the catalog, because Ctrl+M cannot reach us"
+        );
+
+        // And the keys those chords actually arrive as must keep their meaning.
+        let mut state = AppState::default();
+        handle_event(
+            &mut state,
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        assert_eq!(
+            state.focus_pane,
+            FocusPane::Inspector,
+            "Tab still moves focus"
+        );
+    }
+
+    #[test]
+    fn adding_books_without_a_library_asks_for_one_first() {
+        let mut state = AppState::default();
+        assert!(state.active_workspace.is_none());
+
+        open_file_browser(&mut state);
+
+        assert_eq!(
+            state.overlay,
+            Some(Overlay::Workspaces),
+            "the library dialog must open instead of an import with no target"
+        );
+        assert!(state.creating_workspace, "it must be ready for a name");
+        assert!(state.import_after_library, "the import must be remembered");
+    }
+
+    #[test]
+    fn cancelling_the_library_dialog_forgets_the_pending_import() {
+        let mut state = AppState::default();
+        open_file_browser(&mut state);
+        cancel_workspace_creation(&mut state);
+        assert!(!state.import_after_library);
+    }
+
+    #[test]
+    fn adding_books_with_a_library_opens_the_browser_directly() {
+        let mut state = AppState {
+            active_workspace: Some("library-1".into()),
+            ..AppState::default()
+        };
+
+        open_file_browser(&mut state);
+
+        assert_eq!(state.overlay, Some(Overlay::FileBrowser));
+        assert!(!state.import_after_library);
+    }
+
+    #[test]
     fn chat_drag_copies_rendered_text_and_bold_click_starts_an_explanation() {
         let screen = Rect::new(0, 0, 160, 40);
         let mut state = AppState {
@@ -5271,14 +5619,17 @@ mod tests {
         state.chat.answer = "plain **Beton** end".into();
         state.chat.question.set("Was ist Beton?");
         let [_header, body, _footer] = screen_areas(screen);
-        let workspace = bordered_inner(app_areas(body, FocusPane::Workspace).workspace);
+        let workspace = pane_inner(app_areas(body, FocusPane::Workspace).workspace);
+        // Selection resolves against the answer's own origin, which sits below
+        // the question block and the speaker label.
+        let answer = chat_areas(workspace, &state).answer;
 
         handle_mouse(
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                workspace.x + 6,
-                workspace.y,
+                answer.x + 6,
+                answer.y,
             ),
             screen,
         );
@@ -5286,8 +5637,8 @@ mod tests {
             &mut state,
             mouse(
                 MouseEventKind::Drag(MouseButton::Left),
-                workspace.x + 10,
-                workspace.y,
+                answer.x + 10,
+                answer.y,
             ),
             screen,
         );
@@ -5295,8 +5646,8 @@ mod tests {
             &mut state,
             mouse(
                 MouseEventKind::Up(MouseButton::Left),
-                workspace.x + 10,
-                workspace.y,
+                answer.x + 10,
+                answer.y,
             ),
             screen,
         );
@@ -5306,8 +5657,8 @@ mod tests {
             &mut state,
             mouse(
                 MouseEventKind::Down(MouseButton::Left),
-                workspace.x + 7,
-                workspace.y,
+                answer.x + 7,
+                answer.y,
             ),
             screen,
         );
@@ -5315,8 +5666,8 @@ mod tests {
             &mut state,
             mouse(
                 MouseEventKind::Up(MouseButton::Left),
-                workspace.x + 7,
-                workspace.y,
+                answer.x + 7,
+                answer.y,
             ),
             screen,
         );
@@ -5413,7 +5764,7 @@ mod tests {
             .collect();
 
         let panes = app_areas(body, FocusPane::Workspace);
-        let workspace = bordered_inner(panes.workspace);
+        let workspace = pane_inner(panes.workspace);
         let [filters, _search, _list, _status] = foundry_catalog_areas(workspace);
         let [source, role, _count] = catalog_filter_areas(filters);
         let command = handle_mouse(
@@ -5464,7 +5815,7 @@ mod tests {
         state.focus_pane = FocusPane::Workspace;
         state.model_manager.busy = false;
         let panes = app_areas(body, FocusPane::Workspace);
-        let workspace = bordered_inner(panes.workspace);
+        let workspace = pane_inner(panes.workspace);
         let [_summary, _rail, packages, _status] = foundry_setup_areas(workspace);
         handle_mouse(
             &mut state,
@@ -5562,14 +5913,9 @@ mod tests {
     }
 
     #[test]
-    fn model_stack_install_deduplicates_shared_chat_and_vl_model() {
+    fn model_stack_install_works_without_a_library_and_deduplicates_artifacts() {
         let mut state = AppState {
             view: View::FoundryOverview,
-            active_workspace: Some("ws-test".into()),
-            config: Some(omarag_domain::ConfigDocument {
-                content: "embeddings:\nqa:\n".into(),
-                etag: "etag-1".into(),
-            }),
             ..AppState::default()
         };
         state.model_manager.packages.push(omarag_app::ModelPackage {
@@ -5580,6 +5926,13 @@ mod tests {
                     model: "qwen3.5:2b".into(),
                     download_name: "qwen3.5:2b".into(),
                     source: ModelSource::Ollama,
+                    installed: false,
+                },
+                omarag_app::ModelPackageItem {
+                    role: ModelCategory::Rerank,
+                    model: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1".into(),
+                    download_name: "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1".into(),
+                    source: ModelSource::HuggingFace,
                     installed: false,
                 },
                 omarag_app::ModelPackageItem {
@@ -5602,10 +5955,18 @@ mod tests {
         let command = handle_event(&mut state, key(KeyCode::Char('a')));
         assert!(matches!(
             command,
-            Some(UiCommand::PullPackage { name, models, .. })
+            Some(UiCommand::PullPackage { name, models, hugging_face_models, workspace, .. })
                 if name == "Qwen Unified"
                     && models == vec!["qwen3.5:2b", "qwen3-embedding:0.6b"]
+                    && hugging_face_models == vec!["cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"]
+                    && workspace.is_none()
         ));
+        assert!(
+            state
+                .model_manager
+                .transfer_status
+                .contains("activation follows")
+        );
     }
 
     #[test]

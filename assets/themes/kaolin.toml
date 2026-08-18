@@ -1,0 +1,64 @@
+# Kaolin — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Kaolin"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#17171a"
+foreground = "#efefef"
+muted = "#868686"
+accent = "#74b09a"
+selection = "#2b3936"
+gradient = ["#74b09a", "#c74a4d"]
+
+[sidebar]
+fg = "#efefef"
+bg = "#17171a"
+border = "#58585a"
+border_active = "#57b2c2"
+title = "#f5c791"
+divider = "#868686"
+item_selected_fg = "#ba667d"
+item_selected_bg = "#2b3936"
+
+[workspace]
+fg = "#efefef"
+bg = "#17171a"
+border = "#4e645d"
+border_active = "#74b09a"
+title = "#d7936d"
+item_selected_fg = "#4fa8a3"
+item_selected_bg = "#2b3936"
+
+[footer]
+fg = "#efefef"
+bg = "#17171a"
+border = "#74b09a"
+border_active = "#57b2c2"
+
+[modal]
+fg = "#efefef"
+bg = "#17171a"
+border_active = "#868686"
+cancel_fg = "#eedcc1"
+cancel_bg = "#c74a4d"
+confirm_fg = "#eedcc1"
+confirm_bg = "#3e594a"
+
+[status]
+cursor = "#f5c791"
+correct = "#74b09a"
+error = "#c74a4d"
+hint = "#4fa8a3"
+cancel = "#d7936d"
+hotkey = "#4fa8a3"
+
+[ansi]
+red = "#c74a4d"
+orange = "#d7936d"
+yellow = "#d7936d"
+green = "#74b09a"
+cyan = "#4fa8a3"
+blue = "#74b09a"
+magenta = "#f5c791"

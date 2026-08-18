@@ -1,0 +1,64 @@
+# Catppuccin Mocha — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Catppuccin Mocha"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#1e1e2e"
+foreground = "#a6adc8"
+muted = "#868686"
+accent = "#b4befe"
+selection = "#3f415c"
+gradient = ["#89b4fa", "#cba6f7"]
+
+[sidebar]
+fg = "#a6adc8"
+bg = "#1e1e2e"
+border = "#54576c"
+border_active = "#f38ba8"
+title = "#74c7ec"
+divider = "#868686"
+item_selected_fg = "#a6dbf7"
+item_selected_bg = "#3f415c"
+
+[workspace]
+fg = "#a6adc8"
+bg = "#1e1e2e"
+border = "#6c7086"
+border_active = "#b4befe"
+title = "#89b5fa"
+item_selected_fg = "#98d0fd"
+item_selected_bg = "#3f415c"
+
+[footer]
+fg = "#a6adc8"
+bg = "#1e1e2e"
+border = "#6c7086"
+border_active = "#a6e3a1"
+
+[modal]
+fg = "#a6adc8"
+bg = "#1e1e2e"
+border_active = "#868686"
+cancel_fg = "#383838"
+cancel_bg = "#eba0ac"
+confirm_fg = "#383838"
+confirm_bg = "#89dceb"
+
+[status]
+cursor = "#f5e0dc"
+correct = "#a6e3a1"
+error = "#f38ba8"
+hint = "#73c7ec"
+cancel = "#eba0ac"
+hotkey = "#89dceb"
+
+[ansi]
+red = "#f38ba8"
+orange = "#eba0ac"
+yellow = "#eba0ac"
+green = "#a6e3a1"
+cyan = "#73c7ec"
+blue = "#b4befe"
+magenta = "#eba0ac"

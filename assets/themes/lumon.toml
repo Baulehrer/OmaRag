@@ -1,0 +1,64 @@
+# Lumon — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Lumon"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#16242d"
+foreground = "#d6e2ee"
+muted = "#304860"
+accent = "#8bc9eb"
+selection = "#243d56"
+gradient = ["#8bc9eb", "#b4e4f6"]
+
+[sidebar]
+fg = "#d6e2ee"
+bg = "#101b21"
+border = "#46545d"
+border_active = "#8bc9eb"
+title = "#8bc9eb"
+divider = "#304860"
+item_selected_fg = "#d6e2ee"
+item_selected_bg = "#243d56"
+
+[workspace]
+fg = "#d6e2ee"
+bg = "#16242d"
+border = "#54626c"
+border_active = "#8bc9eb"
+title = "#8bc9eb"
+item_selected_fg = "#d6e2ee"
+item_selected_bg = "#243d56"
+
+[footer]
+fg = "#4d86b0"
+bg = "#101b21"
+border = "#46545d"
+border_active = "#8bc9eb"
+
+[modal]
+fg = "#d6e2ee"
+bg = "#1b2d40"
+border_active = "#8bc9eb"
+cancel_fg = "#16242d"
+cancel_bg = "#4d86b0"
+confirm_fg = "#16242d"
+confirm_bg = "#5e95bc"
+
+[status]
+cursor = "#8bc9eb"
+correct = "#5e95bc"
+error = "#4d86b0"
+hint = "#b4e4f6"
+cancel = "#8bc9eb"
+hotkey = "#8bc9eb"
+
+[ansi]
+red = "#4d86b0"
+orange = "#8bc9eb"
+yellow = "#6fa4c9"
+green = "#5e95bc"
+cyan = "#b4e4f6"
+blue = "#6fb8e3"
+magenta = "#8bc9eb"

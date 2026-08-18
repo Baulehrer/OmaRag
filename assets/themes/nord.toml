@@ -1,0 +1,64 @@
+# Nord — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Nord"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#2e3440"
+foreground = "#d8dee9"
+muted = "#4c566a"
+accent = "#81a1c1"
+selection = "#434c5e"
+gradient = ["#81a1c1", "#b48ead"]
+
+[sidebar]
+fg = "#d8dee9"
+bg = "#222730"
+border = "#585e6a"
+border_active = "#81a1c1"
+title = "#81a1c1"
+divider = "#4c566a"
+item_selected_fg = "#d8dee9"
+item_selected_bg = "#434c5e"
+
+[workspace]
+fg = "#d8dee9"
+bg = "#2e3440"
+border = "#656b77"
+border_active = "#81a1c1"
+title = "#81a1c1"
+item_selected_fg = "#d8dee9"
+item_selected_bg = "#434c5e"
+
+[footer]
+fg = "#667080"
+bg = "#222730"
+border = "#585e6a"
+border_active = "#81a1c1"
+
+[modal]
+fg = "#d8dee9"
+bg = "#3b4252"
+border_active = "#81a1c1"
+cancel_fg = "#2e3440"
+cancel_bg = "#bf616a"
+confirm_fg = "#2e3440"
+confirm_bg = "#a3be8c"
+
+[status]
+cursor = "#81a1c1"
+correct = "#a3be8c"
+error = "#bf616a"
+hint = "#88c0d0"
+cancel = "#d5967a"
+hotkey = "#81a1c1"
+
+[ansi]
+red = "#bf616a"
+orange = "#d5967a"
+yellow = "#ebcb8b"
+green = "#a3be8c"
+cyan = "#88c0d0"
+blue = "#81a1c1"
+magenta = "#b48ead"

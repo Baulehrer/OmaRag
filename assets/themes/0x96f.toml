@@ -1,0 +1,64 @@
+# 0x96f — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "0x96f"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#262427"
+foreground = "#fcfcfc"
+muted = "#757075"
+accent = "#ffca58"
+selection = "#564932"
+gradient = ["#ff7272", "#bcdf59"]
+
+[sidebar]
+fg = "#fcfcfc"
+bg = "#262427"
+border = "#757075"
+border_active = "#baebf6"
+title = "#64d2e8"
+divider = "#757075"
+item_selected_fg = "#c6e472"
+item_selected_bg = "#564932"
+
+[workspace]
+fg = "#fcfcfc"
+bg = "#262427"
+border = "#757075"
+border_active = "#ffca58"
+title = "#fcfcfc"
+item_selected_fg = "#c6e472"
+item_selected_bg = "#564932"
+
+[footer]
+fg = "#fcfcfc"
+bg = "#262427"
+border = "#757075"
+border_active = "#ffca58"
+
+[modal]
+fg = "#fcfcfc"
+bg = "#262427"
+border_active = "#ffca58"
+cancel_fg = "#262427"
+cancel_bg = "#ff8787"
+confirm_fg = "#262427"
+confirm_bg = "#bcdf59"
+
+[status]
+cursor = "#ffca58"
+correct = "#c6e472"
+error = "#ff8787"
+hint = "#baebf6"
+cancel = "#fcfcfc"
+hotkey = "#ff8787"
+
+[ansi]
+red = "#ff8787"
+orange = "#fcfcfc"
+yellow = "#fcfcfc"
+green = "#c6e472"
+cyan = "#baebf6"
+blue = "#ffca58"
+magenta = "#64d2e8"

@@ -1,0 +1,64 @@
+# Catppuccin Latte — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Catppuccin Latte"
+source = "omarchy"
+mode = "light"
+
+[base]
+background = "#eff1f5"
+foreground = "#4c4f69"
+muted = "#acb0be"
+accent = "#1e66f5"
+selection = "#ccd0da"
+gradient = ["#1e66f5", "#ea76cb"]
+
+[sidebar]
+fg = "#4c4f69"
+bg = "#e3e4e8"
+border = "#9598a8"
+border_active = "#1e66f5"
+title = "#1e66f5"
+divider = "#acb0be"
+item_selected_fg = "#4c4f69"
+item_selected_bg = "#ccd0da"
+
+[workspace]
+fg = "#4c4f69"
+bg = "#eff1f5"
+border = "#9598a8"
+border_active = "#1e66f5"
+title = "#1e66f5"
+item_selected_fg = "#4c4f69"
+item_selected_bg = "#ccd0da"
+
+[footer]
+fg = "#9ca0b0"
+bg = "#e3e4e8"
+border = "#9598a8"
+border_active = "#1e66f5"
+
+[modal]
+fg = "#4c4f69"
+bg = "#dce0e8"
+border_active = "#1e66f5"
+cancel_fg = "#eff1f5"
+cancel_bg = "#d20f39"
+confirm_fg = "#eff1f5"
+confirm_bg = "#40a02b"
+
+[status]
+cursor = "#1e66f5"
+correct = "#40a02b"
+error = "#d20f39"
+hint = "#179299"
+cancel = "#d84e2b"
+hotkey = "#1e66f5"
+
+[ansi]
+red = "#d20f39"
+orange = "#d84e2b"
+yellow = "#df8e1d"
+green = "#40a02b"
+cyan = "#179299"
+blue = "#1e66f5"
+magenta = "#ea76cb"

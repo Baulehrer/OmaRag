@@ -1,0 +1,64 @@
+# Everforest — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Everforest"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#2d353b"
+foreground = "#d3c6aa"
+muted = "#475258"
+accent = "#7fbbb3"
+selection = "#3d484d"
+gradient = ["#7fbbb3", "#d699b6"]
+
+[sidebar]
+fg = "#d3c6aa"
+bg = "#21272c"
+border = "#62645f"
+border_active = "#7fbbb3"
+title = "#7fbbb3"
+divider = "#475258"
+item_selected_fg = "#d3c6aa"
+item_selected_bg = "#3d484d"
+
+[workspace]
+fg = "#d3c6aa"
+bg = "#2d353b"
+border = "#6f6f68"
+border_active = "#7fbbb3"
+title = "#7fbbb3"
+item_selected_fg = "#d3c6aa"
+item_selected_bg = "#3d484d"
+
+[footer]
+fg = "#4f585e"
+bg = "#21272c"
+border = "#62645f"
+border_active = "#7fbbb3"
+
+[modal]
+fg = "#d3c6aa"
+bg = "#343f44"
+border_active = "#7fbbb3"
+cancel_fg = "#2d353b"
+cancel_bg = "#e67e80"
+confirm_fg = "#2d353b"
+confirm_bg = "#a7c080"
+
+[status]
+cursor = "#7fbbb3"
+correct = "#a7c080"
+error = "#e67e80"
+hint = "#83c092"
+cancel = "#e09d7f"
+hotkey = "#7fbbb3"
+
+[ansi]
+red = "#e67e80"
+orange = "#e09d7f"
+yellow = "#dbbc7f"
+green = "#a7c080"
+cyan = "#83c092"
+blue = "#7fbbb3"
+magenta = "#d699b6"

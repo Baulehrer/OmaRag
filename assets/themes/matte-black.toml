@@ -1,0 +1,64 @@
+# Matte Black — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Matte Black"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#121212"
+foreground = "#bebebe"
+muted = "#333333"
+accent = "#e68e0d"
+selection = "#2a2a2a"
+gradient = ["#e68e0d", "#d35f5f"]
+
+[sidebar]
+fg = "#bebebe"
+bg = "#0d0d0d"
+border = "#575757"
+border_active = "#e68e0d"
+title = "#e68e0d"
+divider = "#333333"
+item_selected_fg = "#bebebe"
+item_selected_bg = "#2a2a2a"
+
+[workspace]
+fg = "#bebebe"
+bg = "#121212"
+border = "#575757"
+border_active = "#e68e0d"
+title = "#e68e0d"
+item_selected_fg = "#bebebe"
+item_selected_bg = "#2a2a2a"
+
+[footer]
+fg = "#555555"
+bg = "#0d0d0d"
+border = "#575757"
+border_active = "#e68e0d"
+
+[modal]
+fg = "#bebebe"
+bg = "#1e1e1e"
+border_active = "#e68e0d"
+cancel_fg = "#121212"
+cancel_bg = "#d35f5f"
+confirm_fg = "#121212"
+confirm_bg = "#ffc107"
+
+[status]
+cursor = "#e68e0d"
+correct = "#ffc107"
+error = "#d35f5f"
+hint = "#bebebe"
+cancel = "#c63d3d"
+hotkey = "#e68e0d"
+
+[ansi]
+red = "#d35f5f"
+orange = "#c63d3d"
+yellow = "#b91c1c"
+green = "#ffc107"
+cyan = "#bebebe"
+blue = "#e68e0d"
+magenta = "#d35f5f"

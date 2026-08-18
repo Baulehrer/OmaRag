@@ -2432,22 +2432,17 @@ class StateStore:
                         ),
                     )
                     segment_ids[int(segment.get("segment_index", 0))] = segment_id
+                # A textbook produces thousands of chunks; inserting them one
+                # statement at a time dominated the publish transaction. Collect
+                # the rows and hand them to SQLite in one call.
+                chunk_rows = []
                 for chunk in result.get("chunk_manifest", []):
                     chunk_id = str(chunk.get("chunk_id", ""))
                     segment_id = segment_ids.get(int(chunk.get("segment_index", 0)))
                     if not chunk_id or not segment_id:
                         continue
                     pages = chunk.get("pages", [])
-                    self._db.execute(
-                        """INSERT OR REPLACE INTO chunk_manifest(
-                               workspace_id, logical_document_id, segment_document_id, chunk_id,
-                               chunk_order, content_hash, pages_json, headings_json, labels_json,
-                               refs_json, generation_id, evidence_id, global_order, anchor_page,
-                               page_labels_json, section_node_id, raw_tokens, context_hash,
-                               previous_evidence_id, next_evidence_id, quality_flags_json
-                           ) VALUES (
-                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-                           )""",
+                    chunk_rows.append(
                         (
                             workspace_id,
                             logical_id,
@@ -2470,7 +2465,20 @@ class StateStore:
                             chunk.get("previous_evidence_id"),
                             chunk.get("next_evidence_id"),
                             json.dumps(chunk.get("quality_flags", [])),
-                        ),
+                        )
+                    )
+                if chunk_rows:
+                    self._db.executemany(
+                        """INSERT OR REPLACE INTO chunk_manifest(
+                               workspace_id, logical_document_id, segment_document_id, chunk_id,
+                               chunk_order, content_hash, pages_json, headings_json, labels_json,
+                               refs_json, generation_id, evidence_id, global_order, anchor_page,
+                               page_labels_json, section_node_id, raw_tokens, context_hash,
+                               previous_evidence_id, next_evidence_id, quality_flags_json
+                           ) VALUES (
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                           )""",
+                        chunk_rows,
                     )
                 if knowledge_snapshot is not None:
                     self._write_book_knowledge_snapshot(
@@ -2547,10 +2555,33 @@ class StateStore:
         ]
 
     def book_record(self, workspace_id: str, logical_document_id: str) -> dict[str, Any]:
-        for record in self.book_records(workspace_id):
-            if record["logical_document_id"] == logical_document_id:
-                return record
-        raise NotFoundError(f"Document {logical_document_id} was not found")
+        """One book, fetched directly.
+
+        This used to load every book in the library and JSON-parse all of their
+        metadata just to linear-scan for one row. It is called per document when
+        building visual evidence and per citation preview, so the cost scaled
+        with library size on a path that only ever needs a single record.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM book_records WHERE workspace_id = ? AND logical_document_id = ?",
+                (workspace_id, logical_document_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Document {logical_document_id} was not found")
+            segments = self._db.execute(
+                """SELECT logical_document_id, segment_document_id, page_start, page_end
+                   FROM document_segments
+                   WHERE workspace_id = ? AND logical_document_id = ?
+                   ORDER BY page_start""",
+                (workspace_id, logical_document_id),
+            ).fetchall()
+        return {
+            **dict(row),
+            "metadata": json.loads(row["metadata_json"]),
+            "quality": json.loads(row["quality_json"]),
+            "segments": [dict(segment) for segment in segments],
+        }
 
     def document_purge_state(self, workspace_id: str, logical_document_id: str) -> dict[str, Any]:
         """Return the exact live identity and blockers for a destructive preflight."""

@@ -7,6 +7,8 @@ use omarag_domain::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Fallback count used only when the TUI's theme registry is unavailable
+/// (headless tests). The real number is dynamic — see `Theme::count()`.
 pub const THEME_COUNT: usize = 15;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +24,72 @@ impl InteractionLevel {
         match self {
             Self::Simple => "Simple",
             Self::Workshop => "Advanced",
+        }
+    }
+}
+
+/// How many icons the interface shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IconMode {
+    /// An icon wherever one exists.
+    Full,
+    /// Only icons that tell you something the neighbouring text does not.
+    #[default]
+    Recommended,
+    /// Text only.
+    None,
+}
+
+impl IconMode {
+    pub const ALL: [Self; 3] = [Self::Full, Self::Recommended, Self::None];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full => "Full",
+            Self::Recommended => "Recommended",
+            Self::None => "None",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Full => Self::Recommended,
+            Self::Recommended => Self::None,
+            Self::None => Self::Full,
+        }
+    }
+}
+
+/// Which glyphs the icons are drawn from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IconSet {
+    /// Requires a patched Nerd Font in the terminal.
+    #[default]
+    NerdFont,
+    /// Works in any font with reasonable Unicode coverage.
+    Unicode,
+    /// For terminals that mangle anything beyond ASCII.
+    Ascii,
+}
+
+impl IconSet {
+    pub const ALL: [Self; 3] = [Self::NerdFont, Self::Unicode, Self::Ascii];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NerdFont => "Nerd Font",
+            Self::Unicode => "Unicode",
+            Self::Ascii => "ASCII",
+        }
+    }
+
+    pub const fn next(self) -> Self {
+        match self {
+            Self::NerdFont => Self::Unicode,
+            Self::Unicode => Self::Ascii,
+            Self::Ascii => Self::NerdFont,
         }
     }
 }
@@ -882,10 +950,10 @@ pub enum ConnectionState {
 impl ConnectionState {
     pub const fn label(&self) -> &'static str {
         match self {
-            Self::Connecting => "CONNECTING",
-            Self::Connected => "CONNECTED",
-            Self::Reconnecting { .. } => "RECONNECTING",
-            Self::Disconnected { .. } => "OFFLINE",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Reconnecting { .. } => "reconnecting",
+            Self::Disconnected { .. } => "offline",
         }
     }
 }
@@ -1044,6 +1112,9 @@ pub struct ChatState {
     /// Kept separately so the composer can be cleared immediately after send.
     pub submitted_question: String,
     pub answer: String,
+    /// Provisional prose for the claim currently being written. Replaced by the
+    /// validated claim, never persisted, never part of the saved answer.
+    pub draft: String,
     pub active_run: Option<RunId>,
     pub last_run: Option<RunId>,
     pub request_pending: bool,
@@ -1066,6 +1137,7 @@ impl Default for ChatState {
             question: EditorState::default(),
             submitted_question: String::new(),
             answer: String::new(),
+            draft: String::new(),
             active_run: None,
             last_run: None,
             request_pending: false,
@@ -1181,6 +1253,13 @@ pub struct AppState {
     pub custom_model_input: EditorState,
     pub custom_model_file: bool,
     pub theme_index: usize,
+    /// Name of the active theme, authoritative over `theme_index`.
+    pub theme_name: String,
+    /// How many themes exist. Owned by the TUI, which loads them; kept here so
+    /// state transitions can wrap correctly without knowing the registry.
+    pub theme_count: usize,
+    pub icon_mode: IconMode,
+    pub icon_set: IconSet,
     pub theme_cursor: usize,
     pub theme_preview_origin: Option<usize>,
     pub jobs: BTreeMap<JobId, JobSnapshot>,
@@ -1220,6 +1299,9 @@ pub struct AppState {
     pub history_cursor: usize,
     pub hidden_jobs: BTreeSet<JobId>,
     pub undo: Option<UndoAction>,
+    /// Set when the user asked to add PDFs before any library existed: once the
+    /// library they are prompted to create is open, resume the import.
+    pub import_after_library: bool,
     pub operation: OperationState,
     pub notifications: Vec<Notification>,
     pub last_event_id: Option<u64>,
@@ -1232,7 +1314,13 @@ pub struct UiPreferences {
     pub version: u8,
     pub view: View,
     pub focus_pane: FocusPane,
+    /// Kept for migration from preferences written before themes were named.
     pub theme_index: usize,
+    /// Selected theme by name. Indices shift whenever the theme list changes,
+    /// names do not.
+    pub theme_name: String,
+    pub icon_mode: IconMode,
+    pub icon_set: IconSet,
     pub active_workspace: Option<WorkspaceId>,
     pub focus: FocusPanel,
     pub route: Route,
@@ -1254,7 +1342,18 @@ pub struct UiPreferences {
 
 impl AppState {
     pub fn apply_preferences(&mut self, preferences: UiPreferences) {
-        self.theme_index = preferences.theme_index % THEME_COUNT;
+        // `theme_name` wins; `theme_index` is only the pre-naming fallback and
+        // is resolved by the caller, which owns the theme registry.
+        self.theme_name = preferences.theme_name.clone();
+        self.icon_mode = preferences.icon_mode;
+        self.icon_set = preferences.icon_set;
+        // `theme_count` is 0 until the TUI has loaded its registry; in that
+        // case keep the stored index and let the caller resolve it.
+        self.theme_index = if self.theme_count > 0 {
+            preferences.theme_index.min(self.theme_count - 1)
+        } else {
+            preferences.theme_index
+        };
         self.theme_cursor = self.theme_index;
         self.active_workspace = preferences.active_workspace;
         if preferences.version >= 2 {
@@ -1297,10 +1396,13 @@ impl AppState {
 
     pub fn preferences(&self) -> UiPreferences {
         UiPreferences {
-            version: 5,
+            version: 6,
             view: self.view,
             focus_pane: self.focus_pane,
             theme_index: self.theme_index,
+            theme_name: self.theme_name.clone(),
+            icon_mode: self.icon_mode,
+            icon_set: self.icon_set,
             active_workspace: self.active_workspace.clone(),
             focus: self.focus,
             route: self.route,
@@ -1450,6 +1552,8 @@ pub enum Action {
     SetInteractionLevel(InteractionLevel),
     ToggleInteractionLevel,
     CycleTheme,
+    CycleIconMode,
+    CycleIconSet,
     SetInputMode(InputMode),
     SetFocus(FocusPanel),
     SetFocusPane(FocusPane),
@@ -1565,8 +1669,10 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
                 InteractionLevel::Workshop => InteractionLevel::Simple,
             }
         }
+        Action::CycleIconMode => state.icon_mode = state.icon_mode.next(),
+        Action::CycleIconSet => state.icon_set = state.icon_set.next(),
         Action::CycleTheme => {
-            state.theme_index = (state.theme_index + 1) % THEME_COUNT;
+            state.theme_index = (state.theme_index + 1) % state.theme_count.max(1);
             state.theme_cursor = state.theme_index;
         }
         Action::SetInputMode(mode) => state.input_mode = mode,
@@ -1915,6 +2021,7 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
         "assistant.started"
             | "run.phase"
             | "assistant.delta"
+            | "assistant.draft"
             | "citation.added"
             | "run.completed"
             | "run.cancelled"
@@ -1946,8 +2053,20 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
         }
         "assistant.delta" => {
             if let Some(delta) = event.payload.get("delta").and_then(|value| value.as_str()) {
+                // A committed claim supersedes whatever draft was on screen.
+                state.chat.draft.clear();
                 state.chat.answer.push_str(delta);
             }
+        }
+        "assistant.draft" => {
+            // The payload is the whole draft, not a diff, so a missed event
+            // cannot leave the display out of step with the model.
+            state.chat.draft = event
+                .payload
+                .get("draft")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
         }
         "citation.added" => {
             if let Ok(citation) = serde_json::from_value::<Citation>(event.payload.clone()) {
@@ -2148,11 +2267,81 @@ mod tests {
             r#"{"version":2,"view":"activity","focus_pane":"inspector","theme_index":31}"#,
         )
         .unwrap();
-        let mut state = AppState::default();
+        let mut state = AppState {
+            theme_count: 12,
+            ..AppState::default()
+        };
         state.apply_preferences(preferences);
         assert_eq!(state.view, View::Indexing);
         assert_eq!(state.focus_pane, FocusPane::Workspace);
-        assert_eq!(state.theme_index, 1);
+        // An index beyond the loaded set is clamped, never wrapped: wrapping
+        // would silently pick an unrelated theme.
+        assert_eq!(state.theme_index, 11);
+    }
+
+    #[test]
+    fn a_named_theme_is_preferred_over_a_stored_index() {
+        // Indices shift whenever the theme list changes; the name is what the
+        // caller resolves against the registry.
+        let preferences: UiPreferences =
+            serde_json::from_str(r#"{"version":6,"theme_index":3,"theme_name":"Tokyo Night"}"#)
+                .unwrap();
+        let mut state = AppState {
+            theme_count: 40,
+            ..AppState::default()
+        };
+        state.apply_preferences(preferences);
+        assert_eq!(state.theme_name, "Tokyo Night");
+    }
+
+    #[test]
+    fn a_draft_never_becomes_part_of_the_answer() {
+        // The draft is unverified prose shown while the model writes. A committed
+        // claim must replace it, and it must never leak into the saved answer.
+        let mut state = AppState {
+            chat: ChatState {
+                active_run: Some("run-1".into()),
+                ..ChatState::default()
+            },
+            ..AppState::default()
+        };
+        let event = |id: u64, kind: &str, payload: serde_json::Value| DomainEvent {
+            event_id: id,
+            sequence: id,
+            timestamp: "2026-08-18T06:00:00Z".into(),
+            event_type: kind.into(),
+            workspace_id: None,
+            job_id: None,
+            run_id: Some("run-1".into()),
+            correlation_id: "run-1".into(),
+            schema_version: 1,
+            payload,
+        };
+        let draft = |id: u64, text: &str| {
+            event(id, "assistant.draft", serde_json::json!({ "draft": text }))
+        };
+
+        apply_event(&mut state, draft(1, "Beton härtet"));
+        assert_eq!(state.chat.draft, "Beton härtet");
+        assert_eq!(state.chat.answer, "");
+
+        // The payload is the whole draft, so a later event replaces it.
+        apply_event(&mut state, draft(2, "Beton härtet langsam aus"));
+        assert_eq!(state.chat.draft, "Beton härtet langsam aus");
+
+        apply_event(
+            &mut state,
+            event(
+                3,
+                "assistant.delta",
+                serde_json::json!({ "delta": "Beton härtet langsam aus [E1]." }),
+            ),
+        );
+        assert_eq!(
+            state.chat.draft, "",
+            "the committed claim replaces the draft"
+        );
+        assert_eq!(state.chat.answer, "Beton härtet langsam aus [E1].");
     }
 
     #[test]

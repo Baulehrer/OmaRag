@@ -1305,9 +1305,72 @@ class ClaimBlockParser:
             claims.append(_parse_claim_json(raw))
         return claims
 
+    def draft_text(self) -> str:
+        """Human-readable prose from the block still being received.
+
+        The model streams JSON inside `<claim>` tags, so the raw token stream is
+        unreadable. This decodes the `text` field as far as it has arrived, which
+        is what lets the interface show something the moment the model starts
+        writing instead of waiting for a whole validated claim.
+
+        Returns an empty string until the field begins.
+        """
+        return _partial_text_field(self._buffer)
+
     def finish(self) -> None:
         if self._buffer.strip():
             raise ClaimParseError("claim stream ended with an incomplete block")
+
+
+def _partial_text_field(buffer: str) -> str:
+    """Decode the `"text"` value of a partially received claim block.
+
+    Stops at the closing quote, or at the end of what has arrived. Trailing
+    incomplete escapes are dropped rather than shown as backslashes.
+    """
+    marker = buffer.find('"text"')
+    if marker < 0:
+        return ""
+    cursor = buffer.find(":", marker + len('"text"'))
+    if cursor < 0:
+        return ""
+    cursor += 1
+    while cursor < len(buffer) and buffer[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= len(buffer) or buffer[cursor] != '"':
+        return ""
+    cursor += 1
+
+    out: list[str] = []
+    while cursor < len(buffer):
+        char = buffer[cursor]
+        if char == '"':
+            break
+        if char != "\\":
+            out.append(char)
+            cursor += 1
+            continue
+        # An escape that has not fully arrived yet contributes nothing.
+        if cursor + 1 >= len(buffer):
+            break
+        code = buffer[cursor + 1]
+        simple = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                  "n": "\n", "r": "\r", "t": "\t"}
+        if code in simple:
+            out.append(simple[code])
+            cursor += 2
+            continue
+        if code == "u":
+            if cursor + 6 > len(buffer):
+                break
+            try:
+                out.append(chr(int(buffer[cursor + 2 : cursor + 6], 16)))
+            except ValueError:
+                return "".join(out)
+            cursor += 6
+            continue
+        return "".join(out)
+    return "".join(out)
 
 
 def _parse_claim_json(raw: str) -> ClaimBlock:

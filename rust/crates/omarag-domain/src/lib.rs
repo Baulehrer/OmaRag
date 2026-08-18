@@ -428,10 +428,21 @@ pub struct WorkspaceSummary {
     pub etag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Privacy posture of a library, mirroring the backend contract.
+///
+/// The backend serialises `device-only`, `trusted-endpoint` and `cloud-allowed`,
+/// and still accepts the legacy `local` / `trusted-endpoints` spellings. Missing
+/// a variant here makes the whole `WorkspaceManifest` fail to deserialize, which
+/// surfaces as "creating a library does not work" even though the backend
+/// created it — so keep this in step with `PrivacyMode` in the bridge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrivacyMode {
-    Local,
+    #[default]
+    #[serde(alias = "local")]
+    DeviceOnly,
+    #[serde(alias = "trusted-endpoints")]
+    TrustedEndpoint,
     CloudAllowed,
 }
 
@@ -1709,6 +1720,61 @@ pub enum OmaRagError {
 }
 
 pub type OmaResult<T> = Result<T, OmaRagError>;
+
+#[cfg(test)]
+mod privacy_mode_tests {
+    use super::*;
+
+    /// Verbatim body returned by `POST /v1/workspaces`. If the manifest stops
+    /// deserializing, library creation reports a failure to the user even though
+    /// the backend created it — and the user retries, making duplicates.
+    const CREATE_WORKSPACE_RESPONSE: &str = r#"{
+        "schema_version": 1,
+        "id": "ws-parse-probe-7962da",
+        "name": "Parse Probe",
+        "created_at": "2026-08-18T06:11:31.893589Z",
+        "updated_at": "2026-08-18T06:11:31.893589Z",
+        "path": "/home/user/.local/share/omarag/workspaces/ws-parse-probe.omarag",
+        "read_only": false,
+        "haiku_compatible_range": "latest-gated",
+        "haiku_update_policy": "latest-gated",
+        "haiku_last_verified": "0.74.0",
+        "database_schema_version": "detected",
+        "embedding_provider": "ollama",
+        "embedding_model": "qwen3-embedding:0.6b",
+        "vector_dimension": 1024,
+        "processing_profile": "default",
+        "evidence_mode": "strict",
+        "document_policy": "prefer-current",
+        "privacy_mode": "device-only",
+        "cloud_acknowledged": false,
+        "etag": "57da412d393045c9f8c0c260"
+    }"#;
+
+    #[test]
+    fn create_workspace_response_deserializes() {
+        let manifest: WorkspaceManifest =
+            serde_json::from_str(CREATE_WORKSPACE_RESPONSE).expect("manifest must parse");
+        assert_eq!(manifest.privacy_mode, PrivacyMode::DeviceOnly);
+        assert_eq!(manifest.name, "Parse Probe");
+    }
+
+    #[test]
+    fn every_privacy_mode_the_backend_can_send_is_understood() {
+        for (wire, expected) in [
+            ("device-only", PrivacyMode::DeviceOnly),
+            ("trusted-endpoint", PrivacyMode::TrustedEndpoint),
+            ("cloud-allowed", PrivacyMode::CloudAllowed),
+            // Legacy spellings the bridge still accepts.
+            ("local", PrivacyMode::DeviceOnly),
+            ("trusted-endpoints", PrivacyMode::TrustedEndpoint),
+        ] {
+            let parsed: PrivacyMode = serde_json::from_str(&format!("\"{wire}\""))
+                .unwrap_or_else(|error| panic!("{wire} must parse: {error}"));
+            assert_eq!(parsed, expected, "{wire}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

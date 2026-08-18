@@ -11,3 +11,4 @@ dist/
 *.snap.new
 .omarag-data/
 omarag-data/
+.commandcode/

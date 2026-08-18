@@ -1,0 +1,64 @@
+# Onedark — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Onedark"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#232326"
+foreground = "#a7aab0"
+muted = "#818387"
+accent = "#57a5e5"
+selection = "#2c2d31"
+gradient = ["#68aee8", "#bb70d2"]
+
+[sidebar]
+fg = "#a7aab0"
+bg = "#232326"
+border = "#737994"
+border_active = "#de5d68"
+title = "#57a5e5"
+divider = "#818387"
+item_selected_fg = "#51a8b3"
+item_selected_bg = "#2c2d31"
+
+[workspace]
+fg = "#a7aab0"
+bg = "#232326"
+border = "#737994"
+border_active = "#57a5e5"
+title = "#dbb671"
+item_selected_fg = "#51a8b3"
+item_selected_bg = "#2c2d31"
+
+[footer]
+fg = "#a7aab0"
+bg = "#232326"
+border = "#737994"
+border_active = "#8fb573"
+
+[modal]
+fg = "#a7aab0"
+bg = "#35363b"
+border_active = "#51a8b3"
+cancel_fg = "#414559"
+cancel_bg = "#de5d68"
+confirm_fg = "#414559"
+confirm_bg = "#51a8b3"
+
+[status]
+cursor = "#68aee8"
+correct = "#a6d189"
+error = "#de5d68"
+hint = "#68aee8"
+cancel = "#c49060"
+hotkey = "#51a8b3"
+
+[ansi]
+red = "#de5d68"
+orange = "#c49060"
+yellow = "#c49060"
+green = "#a6d189"
+cyan = "#68aee8"
+blue = "#57a5e5"
+magenta = "#bb70d2"

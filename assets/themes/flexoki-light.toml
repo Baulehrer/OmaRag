@@ -1,0 +1,64 @@
+# Flexoki Light — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Flexoki Light"
+source = "omarchy"
+mode = "light"
+
+[base]
+background = "#fffcf0"
+foreground = "#100f0f"
+muted = "#b7b5ac"
+accent = "#205ea6"
+selection = "#cecdc3"
+gradient = ["#205ea6", "#ce5d97"]
+
+[sidebar]
+fg = "#100f0f"
+bg = "#f2efe4"
+border = "#9f9d96"
+border_active = "#205ea6"
+title = "#205ea6"
+divider = "#b7b5ac"
+item_selected_fg = "#100f0f"
+item_selected_bg = "#cecdc3"
+
+[workspace]
+fg = "#100f0f"
+bg = "#fffcf0"
+border = "#9f9d96"
+border_active = "#205ea6"
+title = "#205ea6"
+item_selected_fg = "#100f0f"
+item_selected_bg = "#cecdc3"
+
+[footer]
+fg = "#878580"
+bg = "#f2efe4"
+border = "#9f9d96"
+border_active = "#205ea6"
+
+[modal]
+fg = "#100f0f"
+bg = "#e6e4d9"
+border_active = "#205ea6"
+cancel_fg = "#fffcf0"
+cancel_bg = "#d14d41"
+confirm_fg = "#fffcf0"
+confirm_bg = "#879a39"
+
+[status]
+cursor = "#205ea6"
+correct = "#879a39"
+error = "#d14d41"
+hint = "#3aa99f"
+cancel = "#d0772b"
+hotkey = "#205ea6"
+
+[ansi]
+red = "#d14d41"
+orange = "#d0772b"
+yellow = "#d0a215"
+green = "#879a39"
+cyan = "#3aa99f"
+blue = "#205ea6"
+magenta = "#ce5d97"

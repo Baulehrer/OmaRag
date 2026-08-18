@@ -1,0 +1,64 @@
+# Poimandres — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Poimandres"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#1b1d24"
+foreground = "#cdd6f4"
+muted = "#6c7086"
+accent = "#7fbbb3"
+selection = "#2a303c"
+gradient = ["#a6e3a1", "#f38ba8"]
+
+[sidebar]
+fg = "#cdd6f4"
+bg = "#1b1d24"
+border = "#5b6273"
+border_active = "#7fbbb3"
+title = "#cba6f7"
+divider = "#6c7086"
+item_selected_fg = "#a6e3a1"
+item_selected_bg = "#2a303c"
+
+[workspace]
+fg = "#cdd6f4"
+bg = "#1b1d24"
+border = "#6c7086"
+border_active = "#7fbbb3"
+title = "#89b4fa"
+item_selected_fg = "#a6e3a1"
+item_selected_bg = "#2a303c"
+
+[footer]
+fg = "#cdd6f4"
+bg = "#1b1d24"
+border = "#6c7086"
+border_active = "#7fbbb3"
+
+[modal]
+fg = "#cdd6f4"
+bg = "#1b1d24"
+border_active = "#7fbbb3"
+cancel_fg = "#cdd6f4"
+cancel_bg = "#6c7086"
+confirm_fg = "#cdd6f4"
+confirm_bg = "#4a4e69"
+
+[status]
+cursor = "#74c7ec"
+correct = "#a6e3a1"
+error = "#f38ba8"
+hint = "#89b4fa"
+cancel = "#6c7086"
+hotkey = "#a6e3a1"
+
+[ansi]
+red = "#f38ba8"
+orange = "#6c7086"
+yellow = "#6c7086"
+green = "#a6e3a1"
+cyan = "#89b4fa"
+blue = "#7fbbb3"
+magenta = "#cba6f7"

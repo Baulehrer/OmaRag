@@ -406,6 +406,46 @@ def test_claim_parser_handles_fragmented_blocks_and_rejects_trailing_partial_dat
         incomplete.finish()
 
 
+def test_draft_text_shows_prose_while_the_claim_is_still_arriving() -> None:
+    """The user must see words, not JSON, while the model is still writing.
+
+    The model streams `<claim>{...}</claim>` blocks, so the raw token stream is
+    unreadable. `draft_text` decodes the prose as far as it has arrived; without
+    it the interface stays blank until a whole claim is complete.
+    """
+    stream = (
+        '<claim>{"id":"C1","facet_id":"F1","evidence_ids":["E1"],'
+        '"text":"Beton h\\u00e4rtet \\"langsam\\" aus.\\nDaher ..."}</claim>'
+    )
+    parser = ClaimBlockParser()
+    drafts = []
+    for character in stream:
+        parser.feed(character)
+        drafts.append(parser.draft_text())
+
+    longest = max(drafts, key=len)
+    # Escapes are decoded, so the reader never sees \u00e4 or \".
+    assert longest == 'Beton härtet "langsam" aus.\nDaher ...'
+    # And no JSON structure leaks into the visible draft.
+    for leak in ('"id"', "{", "evidence_ids", "<claim>", "\\u"):
+        assert all(leak not in draft for draft in drafts), leak
+    # Prose appears well before the block is complete — that is the whole point.
+    first_visible = next(index for index, draft in enumerate(drafts) if draft)
+    assert first_visible < len(stream) * 0.7
+    # Once the block completes the draft is spent; the committed claim takes over.
+    assert drafts[-1] == ""
+
+
+def test_draft_text_is_empty_until_the_text_field_starts() -> None:
+    parser = ClaimBlockParser()
+    parser.feed('<claim>{"id":"C1","facet_id":"F1",')
+    assert parser.draft_text() == ""
+    parser.feed('"evidence_ids":["E1"],"te')
+    assert parser.draft_text() == ""
+    parser.feed('xt":"Anfang')
+    assert parser.draft_text() == "Anfang"
+
+
 def test_claim_validation_is_scoped_to_cited_evidence_and_technical_literals() -> None:
     source = candidate("c1", "Der Grenzwert beträgt 42 mm nach DIN EN 1234-5.")
     evidence = extract_evidence_window(source, "Grenzwert", evidence_id="E1")

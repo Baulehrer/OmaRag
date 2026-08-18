@@ -1,0 +1,64 @@
+# Miasma — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Miasma"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#222222"
+foreground = "#c2c2b0"
+muted = "#666666"
+accent = "#78824b"
+selection = "#383838"
+gradient = ["#78824b", "#bb7744"]
+
+[sidebar]
+fg = "#c2c2b0"
+bg = "#191919"
+border = "#565651"
+border_active = "#78824b"
+title = "#78824b"
+divider = "#666666"
+item_selected_fg = "#c2c2b0"
+item_selected_bg = "#383838"
+
+[workspace]
+fg = "#c2c2b0"
+bg = "#222222"
+border = "#62625b"
+border_active = "#78824b"
+title = "#78824b"
+item_selected_fg = "#c2c2b0"
+item_selected_bg = "#383838"
+
+[footer]
+fg = "#555555"
+bg = "#191919"
+border = "#565651"
+border_active = "#78824b"
+
+[modal]
+fg = "#c2c2b0"
+bg = "#2c2c2c"
+border_active = "#78824b"
+cancel_fg = "#222222"
+cancel_bg = "#685742"
+confirm_fg = "#222222"
+confirm_bg = "#5f875f"
+
+[status]
+cursor = "#78824b"
+correct = "#5f875f"
+error = "#685742"
+hint = "#c9a554"
+cancel = "#8d6242"
+hotkey = "#78824b"
+
+[ansi]
+red = "#685742"
+orange = "#8d6242"
+yellow = "#b36d43"
+green = "#5f875f"
+cyan = "#c9a554"
+blue = "#78824b"
+magenta = "#bb7744"

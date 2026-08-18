@@ -1,0 +1,64 @@
+# White — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "White"
+source = "omarchy"
+mode = "light"
+
+[base]
+background = "#ffffff"
+foreground = "#000000"
+muted = "#808080"
+accent = "#6e6e6e"
+selection = "#c0c0c0"
+gradient = ["#6e6e6e", "#2e2e2e"]
+
+[sidebar]
+fg = "#000000"
+bg = "#f5f5f5"
+border = "#999999"
+border_active = "#6e6e6e"
+title = "#6e6e6e"
+divider = "#808080"
+item_selected_fg = "#000000"
+item_selected_bg = "#c0c0c0"
+
+[workspace]
+fg = "#000000"
+bg = "#ffffff"
+border = "#acacac"
+border_active = "#6e6e6e"
+title = "#6e6e6e"
+item_selected_fg = "#000000"
+item_selected_bg = "#c0c0c0"
+
+[footer]
+fg = "#c0c0c0"
+bg = "#f5f5f5"
+border = "#999999"
+border_active = "#6e6e6e"
+
+[modal]
+fg = "#000000"
+bg = "#c0c0c0"
+border_active = "#6e6e6e"
+cancel_fg = "#ffffff"
+cancel_bg = "#2a2a2a"
+confirm_fg = "#ffffff"
+confirm_bg = "#3a3a3a"
+
+[status]
+cursor = "#6e6e6e"
+correct = "#3a3a3a"
+error = "#2a2a2a"
+hint = "#3e3e3e"
+cancel = "#808080"
+hotkey = "#6e6e6e"
+
+[ansi]
+red = "#2a2a2a"
+orange = "#6e6e6e"
+yellow = "#4a4a4a"
+green = "#3a3a3a"
+cyan = "#3e3e3e"
+blue = "#1a1a1a"
+magenta = "#2e2e2e"

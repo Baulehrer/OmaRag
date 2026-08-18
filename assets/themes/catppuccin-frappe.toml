@@ -1,0 +1,64 @@
+# Catppuccin Frappe — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Catppuccin Frappe"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#303446"
+foreground = "#a5adce"
+muted = "#949cbb"
+accent = "#babbf1"
+selection = "#4e526c"
+gradient = ["#8caaee", "#ca9ee6"]
+
+[sidebar]
+fg = "#a5adce"
+bg = "#303446"
+border = "#6a708a"
+border_active = "#e78284"
+title = "#85c1dc"
+divider = "#949cbb"
+item_selected_fg = "#99d1db"
+item_selected_bg = "#4e526c"
+
+[workspace]
+fg = "#a5adce"
+bg = "#303446"
+border = "#737994"
+border_active = "#babbf1"
+title = "#89b5fa"
+item_selected_fg = "#99d1db"
+item_selected_bg = "#4e526c"
+
+[footer]
+fg = "#a5adce"
+bg = "#303446"
+border = "#737994"
+border_active = "#a6d189"
+
+[modal]
+fg = "#a5adce"
+bg = "#303446"
+border_active = "#949cbb"
+cancel_fg = "#414559"
+cancel_bg = "#ea999c"
+confirm_fg = "#414559"
+confirm_bg = "#99d1db"
+
+[status]
+cursor = "#f2d5cf"
+correct = "#a6d189"
+error = "#e78284"
+hint = "#85c1dc"
+cancel = "#ea999c"
+hotkey = "#99d1db"
+
+[ansi]
+red = "#e78284"
+orange = "#ea999c"
+yellow = "#ea999c"
+green = "#a6d189"
+cyan = "#85c1dc"
+blue = "#babbf1"
+magenta = "#ea999c"

@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut browser = dashboard.clone();
     browser.overlay = Some(Overlay::FileBrowser);
-    browser.file_browser.current_dir = "/home/metis/Knowledge".into();
+    browser.file_browser.current_dir = "/home/anna/Knowledge".into();
     browser.file_browser.entries = vec![
         entry("..", true),
         entry("Concrete", true),
@@ -62,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         entry("Materials and Durability.pdf", false),
     ];
     browser.file_browser.selected = vec![
-        "/home/metis/Knowledge/Concrete Design Handbook.pdf".into(),
-        "/home/metis/Knowledge/Eurocode 2.pdf".into(),
+        "/home/anna/Knowledge/Concrete Design Handbook.pdf".into(),
+        "/home/anna/Knowledge/Eurocode 2.pdf".into(),
     ];
     browser.file_browser.cursor = 4;
     snapshot(&browser, &demo_metrics(), "knowledge-browser", &output)?;
@@ -74,8 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut themes = demo_state();
     themes.navigate_view(View::Themes);
-    themes.theme_index = Theme::COUNT - 1;
-    themes.theme_cursor = Theme::COUNT - 1;
+    themes.theme_index = Theme::count() - 1;
+    themes.theme_cursor = Theme::count() - 1;
     snapshot(&themes, &demo_metrics(), "themes", &output)?;
     Ok(())
 }
@@ -87,7 +87,7 @@ fn demo_state() -> AppState {
         workspaces: vec![WorkspaceSummary {
             id: "ws-concrete".into(),
             name: "Concrete Atlas".into(),
-            path: "/home/metis/.local/share/omarag/libraries/concrete".into(),
+            path: "/home/anna/.local/share/omarag/libraries/concrete".into(),
             read_only: false,
             updated_at: "2026-07-26T20:00:00Z".into(),
             etag: "demo".into(),
@@ -109,7 +109,7 @@ fn demo_state() -> AppState {
             "E1",
             "concrete-design-handbook",
             "Concrete Design Handbook",
-            "/home/metis/Knowledge/Concrete Design Handbook.pdf",
+            "/home/anna/Knowledge/Concrete Design Handbook.pdf",
             &[184, 185],
             true,
         ),
@@ -117,7 +117,7 @@ fn demo_state() -> AppState {
             "E2",
             "eurocode-2",
             "Eurocode 2",
-            "/home/metis/Knowledge/Eurocode 2.pdf",
+            "/home/anna/Knowledge/Eurocode 2.pdf",
             &[72, 73],
             false,
         ),
@@ -208,7 +208,7 @@ fn document(title: &str, pages: u32) -> DocumentSummary {
     DocumentSummary {
         id: title.to_lowercase().replace(' ', "-"),
         title: title.into(),
-        source: format!("/home/metis/Knowledge/{title}"),
+        source: format!("/home/anna/Knowledge/{title}"),
         segment_document_ids: vec![],
         page_count: Some(pages),
         size_bytes: 0,
@@ -269,7 +269,7 @@ fn package(rank: u8, name: &str, summary: &str) -> ModelPackage {
 
 fn entry(name: &str, is_dir: bool) -> FileBrowserEntry {
     FileBrowserEntry {
-        path: format!("/home/metis/Knowledge/{name}"),
+        path: format!("/home/anna/Knowledge/{name}"),
         name: name.into(),
         is_dir,
     }

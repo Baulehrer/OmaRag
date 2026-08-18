@@ -1,0 +1,64 @@
+# Gruvbox Dark Hard — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Gruvbox Dark Hard"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#1d2021"
+foreground = "#fbf1c7"
+muted = "#928374"
+accent = "#98971a"
+selection = "#383a1f"
+gradient = ["#fb4934", "#b8bb26"]
+
+[sidebar]
+fg = "#fbf1c7"
+bg = "#1d2021"
+border = "#928374"
+border_active = "#b16286"
+title = "#b16286"
+divider = "#928374"
+item_selected_fg = "#d65d0e"
+item_selected_bg = "#383a1f"
+
+[workspace]
+fg = "#fbf1c7"
+bg = "#1d2021"
+border = "#fbf1c7"
+border_active = "#98971a"
+title = "#458588"
+item_selected_fg = "#d65d0e"
+item_selected_bg = "#383a1f"
+
+[footer]
+fg = "#fbf1c7"
+bg = "#1d2021"
+border = "#928374"
+border_active = "#d79921"
+
+[modal]
+fg = "#fbf1c7"
+bg = "#1d2021"
+border_active = "#689d6a"
+cancel_fg = "#fb4934"
+cancel_bg = "#98971a"
+confirm_fg = "#b8bb26"
+confirm_bg = "#98971a"
+
+[status]
+cursor = "#689d6a"
+correct = "#98971a"
+error = "#ff6969"
+hint = "#468588"
+cancel = "#838383"
+hotkey = "#689d6a"
+
+[ansi]
+red = "#ff6969"
+orange = "#838383"
+yellow = "#838383"
+green = "#98971a"
+cyan = "#468588"
+blue = "#98971a"
+magenta = "#b16286"

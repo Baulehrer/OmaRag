@@ -373,6 +373,21 @@ class RunService:
                     payload={"delta": prefix + claim.text, "claim_id": claim.id},
                 )
 
+            async def emit_draft(text: str) -> None:
+                """Publish provisional prose while a claim is still being written.
+
+                Deliberately *not* persisted: a draft is not an answer. It exists
+                only so the reader sees words immediately; the validated claim
+                that follows replaces it.
+                """
+                await self.events.emit(
+                    "assistant.draft",
+                    correlation_id=run_id,
+                    workspace_id=run.workspace_id,
+                    run_id=run_id,
+                    payload={"draft": text},
+                )
+
             if cached is not None:
                 # Cache acceptance is a model/index read as well: take the
                 # foreground lease, bypass the two-second inventory cache and
@@ -464,6 +479,7 @@ class RunService:
                             resolved_model_identity=model_identity,
                             images=request.get("images"),
                             emit_claim=emit_committed_claim,
+                            emit_draft=emit_draft,
                             memory_enabled=options.get("memory", "auto") != "off",
                             allowed_document_ids=(
                                 set(segment_ids) if segment_ids is not None else None

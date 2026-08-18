@@ -1,0 +1,64 @@
+# Ristretto — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Ristretto"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#2c2525"
+foreground = "#e6d9db"
+muted = "#72696a"
+accent = "#f38d70"
+selection = "#403e41"
+gradient = ["#f38d70", "#a8a9eb"]
+
+[sidebar]
+fg = "#e6d9db"
+bg = "#211b1b"
+border = "#5a5252"
+border_active = "#f38d70"
+title = "#f38d70"
+divider = "#72696a"
+item_selected_fg = "#e6d9db"
+item_selected_bg = "#403e41"
+
+[workspace]
+fg = "#e6d9db"
+bg = "#2c2525"
+border = "#686060"
+border_active = "#f38d70"
+title = "#f38d70"
+item_selected_fg = "#e6d9db"
+item_selected_bg = "#403e41"
+
+[footer]
+fg = "#72696a"
+bg = "#211b1b"
+border = "#5a5252"
+border_active = "#f38d70"
+
+[modal]
+fg = "#e6d9db"
+bg = "#3d2f2a"
+border_active = "#f38d70"
+cancel_fg = "#2c2525"
+cancel_bg = "#fd6883"
+confirm_fg = "#2c2525"
+confirm_bg = "#adda78"
+
+[status]
+cursor = "#f38d70"
+correct = "#adda78"
+error = "#fd6883"
+hint = "#85dacc"
+cancel = "#fb9a77"
+hotkey = "#f38d70"
+
+[ansi]
+red = "#fd6883"
+orange = "#fb9a77"
+yellow = "#f9cc6c"
+green = "#adda78"
+cyan = "#85dacc"
+blue = "#f38d70"
+magenta = "#a8a9eb"

@@ -1,0 +1,64 @@
+# Sugarplum — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Sugarplum"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#111147"
+foreground = "#db7ddd"
+muted = "#565f89"
+accent = "#53aaa1"
+selection = "#20335b"
+gradient = ["#249a84", "#5ca8dc"]
+
+[sidebar]
+fg = "#d0beee"
+bg = "#111147"
+border = "#a175d4"
+border_active = "#53aaa1"
+title = "#db7ddd"
+divider = "#565f89"
+item_selected_fg = "#249a84"
+item_selected_bg = "#20335b"
+
+[workspace]
+fg = "#db7ddd"
+bg = "#111147"
+border = "#a175d4"
+border_active = "#53aaa1"
+title = "#249a84"
+item_selected_fg = "#53b397"
+item_selected_bg = "#53b397"
+
+[footer]
+fg = "#5ca8dc"
+bg = "#111147"
+border = "#a175d4"
+border_active = "#53aaa1"
+
+[modal]
+fg = "#98c7a3"
+bg = "#111147"
+border_active = "#53aaa1"
+cancel_fg = "#7c4094"
+cancel_bg = "#7c4094"
+confirm_fg = "#7c4094"
+confirm_bg = "#7c4094"
+
+[status]
+cursor = "#53b397"
+correct = "#524094"
+error = "#2082a6"
+hint = "#91d4c2"
+cancel = "#b53dff"
+hotkey = "#7dcfff"
+
+[ansi]
+red = "#2082a6"
+orange = "#b53dff"
+yellow = "#b53dff"
+green = "#524094"
+cyan = "#91d4c2"
+blue = "#53aaa1"
+magenta = "#73daca"

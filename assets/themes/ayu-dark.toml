@@ -1,0 +1,64 @@
+# Ayu Dark — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Ayu Dark"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#0f1419"
+foreground = "#b3b1ad"
+muted = "#242936"
+accent = "#ffcc66"
+selection = "#1f2430"
+gradient = ["#ffb454", "#36a3d9"]
+
+[sidebar]
+fg = "#b3b1ad"
+bg = "#0f1419"
+border = "#4b4e56"
+border_active = "#ff7733"
+title = "#36a3d9"
+divider = "#242936"
+item_selected_fg = "#36a3d9"
+item_selected_bg = "#1f2430"
+
+[workspace]
+fg = "#b3b1ad"
+bg = "#0f1419"
+border = "#4f525a"
+border_active = "#ffcc66"
+title = "#ffcc66"
+item_selected_fg = "#36a3d9"
+item_selected_bg = "#1f2430"
+
+[footer]
+fg = "#b3b1ad"
+bg = "#0f1419"
+border = "#4f525a"
+border_active = "#aad94c"
+
+[modal]
+fg = "#b3b1ad"
+bg = "#0f1419"
+border_active = "#5c6773"
+cancel_fg = "#0f1419"
+cancel_bg = "#f07178"
+confirm_fg = "#0f1419"
+confirm_bg = "#36a3d9"
+
+[status]
+cursor = "#ffcc66"
+correct = "#aad94c"
+error = "#ff3333"
+hint = "#36a3d9"
+cancel = "#f07178"
+hotkey = "#36a3d9"
+
+[ansi]
+red = "#ff3333"
+orange = "#f07178"
+yellow = "#f07178"
+green = "#aad94c"
+cyan = "#36a3d9"
+blue = "#ffcc66"
+magenta = "#f07178"

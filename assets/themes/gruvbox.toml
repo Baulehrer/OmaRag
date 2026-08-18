@@ -1,0 +1,64 @@
+# Gruvbox — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Gruvbox"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#282828"
+foreground = "#d4be98"
+muted = "#665c54"
+accent = "#7daea3"
+selection = "#504945"
+gradient = ["#7daea3", "#d3869b"]
+
+[sidebar]
+fg = "#d4be98"
+bg = "#1e1e1e"
+border = "#60594c"
+border_active = "#7daea3"
+title = "#7daea3"
+divider = "#665c54"
+item_selected_fg = "#d4be98"
+item_selected_bg = "#504945"
+
+[workspace]
+fg = "#d4be98"
+bg = "#282828"
+border = "#6d6455"
+border_active = "#7daea3"
+title = "#7daea3"
+item_selected_fg = "#d4be98"
+item_selected_bg = "#504945"
+
+[footer]
+fg = "#7c6f64"
+bg = "#1e1e1e"
+border = "#60594c"
+border_active = "#7daea3"
+
+[modal]
+fg = "#d4be98"
+bg = "#3c3836"
+border_active = "#7daea3"
+cancel_fg = "#282828"
+cancel_bg = "#ea6962"
+confirm_fg = "#282828"
+confirm_bg = "#a9b665"
+
+[status]
+cursor = "#7daea3"
+correct = "#a9b665"
+error = "#ea6962"
+hint = "#89b482"
+cancel = "#e1875c"
+hotkey = "#7daea3"
+
+[ansi]
+red = "#ea6962"
+orange = "#e1875c"
+yellow = "#d8a657"
+green = "#a9b665"
+cyan = "#89b482"
+blue = "#7daea3"
+magenta = "#d3869b"

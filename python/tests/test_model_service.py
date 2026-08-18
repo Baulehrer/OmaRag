@@ -21,6 +21,7 @@ from omarag_bridge.models.domain import (
     HardwareProfile,
     HardwareReadiness,
     HardwareTier,
+    ModelAssignment,
     ModelCatalogEntry,
     ModelCategory,
     ModelFit,
@@ -175,8 +176,15 @@ def test_recommendations_prefer_trusted_base_models_over_uncensored_tunes() -> N
     assert unsafe.recommended_rank is None
 
 
-def test_three_hardware_fitting_packages_preserve_retrieval_family_synergy() -> None:
+def test_three_hardware_fitting_packages_preserve_retrieval_family_synergy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     service = ModelService.__new__(ModelService)
+    monkeypatch.setattr(
+        service,
+        "_hugging_face_revision_present",
+        lambda model, _revision: model.startswith("cross-encoder/"),
+    )
     hardware = HardwareInfo(memory_total=14 * 1024**3, memory_available=8 * 1024**3)
     packages = service._recommended_packages(
         hardware,
@@ -188,8 +196,69 @@ def test_three_hardware_fitting_packages_preserve_retrieval_family_synergy() -> 
     assert [package.recommended_rank for package in packages] == [1, 2, 3]
     assert all(package.fit == ModelFit.COMFORTABLE for package in packages)
     assert {item.role for item in packages[0].models} == set(ModelCategory)
+    assert next(
+        item for item in packages[0].models if item.role == ModelCategory.RERANK
+    ).installed
     assert "Qwen" in packages[0].synergy
     assert "cross-encoder" in packages[2].synergy
+
+
+def test_hugging_face_revision_is_not_installed_until_weights_are_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = "cross-encoder/example"
+    revision = "revision-1"
+    snapshot = (
+        tmp_path
+        / "models--cross-encoder--example"
+        / "snapshots"
+        / revision
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+
+    assert not ModelService._hugging_face_revision_present(model, revision)
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    assert ModelService._hugging_face_revision_present(model, revision)
+
+
+@pytest.mark.asyncio
+async def test_reranker_install_downloads_only_transformer_runtime_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ModelService.__new__(ModelService)
+    artifact = next(
+        item
+        for item in service.curated_catalog().artifacts
+        if CatalogRole.RERANK in item.roles
+    )
+    assignment = ModelAssignment(
+        role=CatalogRole.RERANK,
+        artifact_id=artifact.id,
+        provider=artifact.provider,
+        model=artifact.model,
+        revision=artifact.revision,
+        digest=artifact.digest,
+        quantization=artifact.quantization,
+        install_state=ModelInstallState.NOT_INSTALLED,
+        download_bytes=artifact.download_bytes,
+    )
+    captured: dict[str, object] = {}
+
+    def snapshot_download(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
+    monkeypatch.setattr(service, "_hugging_face_revision_present", lambda *_: True)
+
+    await service.install_assignments([assignment])
+
+    patterns = captured["allow_patterns"]
+    assert isinstance(patterns, list)
+    assert "model.safetensors" in patterns
+    assert not any("onnx" in pattern for pattern in patterns)
+    assert not any("pytorch_model.bin" in pattern for pattern in patterns)
 
 
 @pytest.mark.asyncio

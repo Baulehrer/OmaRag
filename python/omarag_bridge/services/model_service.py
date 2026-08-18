@@ -894,7 +894,25 @@ class ModelService:
     def _hugging_face_revision_present(cls, model: str, revision: str) -> bool:
         hub = cls.hugging_face_cache_root()
         repo = "models--" + model.replace("/", "--")
-        return (hub / repo / "snapshots" / revision).is_dir()
+        snapshot = hub / repo / "snapshots" / revision
+        if not (snapshot / "config.json").is_file():
+            return False
+        # huggingface_hub creates the revision directory before large files
+        # finish.  Treating that directory alone as installed made interrupted
+        # preset downloads look successful.  A usable transformer snapshot
+        # must contain at least one completed weights file.
+        weight_names = {
+            "model.safetensors",
+            "pytorch_model.bin",
+            "model.onnx",
+            "model.fp16.onnx",
+        }
+        return any(
+            candidate.is_file()
+            and candidate.stat().st_size > 0
+            and candidate.name in weight_names
+            for candidate in snapshot.rglob("*")
+        )
 
     @staticmethod
     def _normalized_model_name(model: str) -> str:
@@ -1184,12 +1202,28 @@ class ModelService:
                     raise ConflictError(
                         "Hugging Face model downloads require the installed Haiku model extra"
                     ) from exc
+                download_options: dict[str, object] = {}
+                if assignment.role == CatalogRole.RERANK:
+                    # Cross-encoder repositories often publish the same weights
+                    # again as PyTorch, ONNX and OpenVINO variants.  Haiku uses
+                    # Transformers/Safetensors, so fetching every export wastes
+                    # several gigabytes and makes the advertised package size
+                    # incorrect.
+                    download_options["allow_patterns"] = [
+                        "config.json",
+                        "model.safetensors",
+                        "sentencepiece.bpe.model",
+                        "special_tokens_map.json",
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                    ]
                 await asyncio.to_thread(
                     snapshot_download,
                     repo_id=assignment.model,
                     revision=assignment.revision,
                     cache_dir=str(self.hugging_face_cache_root()),
                     library_name="omarag",
+                    **download_options,
                 )
                 if not self._hugging_face_revision_present(assignment.model, assignment.revision):
                     raise ConflictError(
@@ -1742,11 +1776,16 @@ class ModelService:
                 [
                     (
                         ModelCategory.CHAT,
-                        f"qwen3.5:{qwen_size[0]}",
+                        f"qwen3.5:{qwen_size[0]}-q4_K_M",
                         ModelSource.OLLAMA,
                         qwen_size[1],
                     ),
-                    (ModelCategory.VL, f"qwen3.5:{qwen_size[0]}", ModelSource.OLLAMA, qwen_size[1]),
+                    (
+                        ModelCategory.VL,
+                        f"qwen3.5:{qwen_size[0]}-q4_K_M",
+                        ModelSource.OLLAMA,
+                        qwen_size[1],
+                    ),
                     (
                         ModelCategory.EMBEDDING,
                         "qwen3-embedding:0.6b",
@@ -1769,13 +1808,13 @@ class ModelService:
                 [
                     (
                         ModelCategory.CHAT,
-                        f"qwen3.5:{deeper_qwen_size[0]}",
+                        f"qwen3.5:{deeper_qwen_size[0]}-q4_K_M",
                         ModelSource.OLLAMA,
                         deeper_qwen_size[1],
                     ),
                     (
                         ModelCategory.VL,
-                        f"qwen3.5:{deeper_qwen_size[0]}",
+                        f"qwen3.5:{deeper_qwen_size[0]}-q4_K_M",
                         ModelSource.OLLAMA,
                         deeper_qwen_size[1],
                     ),
@@ -1799,8 +1838,18 @@ class ModelService:
                 "Stronger generation and reranking while preserving the current vector index.",
                 "A larger cross-encoder improves ranking without forcing an embedding rebuild.",
                 [
-                    (ModelCategory.CHAT, "qwen3.5:4b", ModelSource.OLLAMA, 4_000_000_000),
-                    (ModelCategory.VL, "qwen3.5:4b", ModelSource.OLLAMA, 4_000_000_000),
+                    (
+                        ModelCategory.CHAT,
+                        "qwen3.5:4b-q4_K_M",
+                        ModelSource.OLLAMA,
+                        4_000_000_000,
+                    ),
+                    (
+                        ModelCategory.VL,
+                        "qwen3.5:4b-q4_K_M",
+                        ModelSource.OLLAMA,
+                        4_000_000_000,
+                    ),
                     (
                         ModelCategory.EMBEDDING,
                         "qwen3-embedding:0.6b",
@@ -1809,7 +1858,7 @@ class ModelService:
                     ),
                     (
                         ModelCategory.RERANK,
-                        "BAAI/bge-reranker-v2-m3",
+                        "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
                         ModelSource.HUGGING_FACE,
                         568_000_000,
                     ),
@@ -1817,6 +1866,11 @@ class ModelService:
             ),
         ]
         packages: list[ModelPackage] = []
+        pinned_hugging_face = {
+            artifact.model: artifact
+            for artifact in self.curated_catalog().artifacts
+            if artifact.provider == CatalogProvider.HUGGING_FACE
+        }
         for package_id, name, summary, synergy, raw_models in templates:
             unique_models: dict[str, tuple[ModelCategory, str, ModelSource, int]] = {}
             for role, model, source, parameters in raw_models:
@@ -1841,18 +1895,26 @@ class ModelService:
             items = []
             for role, model, source, _parameters in raw_models:
                 download_name = self._package_download_name(model, source, quantization)
+                if source == ModelSource.HUGGING_FACE:
+                    artifact = pinned_hugging_face.get(model)
+                    model_installed = bool(
+                        artifact
+                        and self._hugging_face_revision_present(model, artifact.revision)
+                    )
+                else:
+                    model_installed = any(
+                        installed == model
+                        or installed.startswith(f"{model}-")
+                        or model.casefold() in installed.casefold()
+                        for installed in installed_names
+                    )
                 items.append(
                     ModelPackageItem(
                         role=role,
                         model=model,
                         download_name=download_name,
                         source=source,
-                        installed=any(
-                            installed == model
-                            or installed.startswith(f"{model}-")
-                            or model.casefold() in installed.casefold()
-                            for installed in installed_names
-                        ),
+                        installed=model_installed,
                     )
                 )
             packages.append(

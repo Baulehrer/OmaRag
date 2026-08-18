@@ -1,0 +1,64 @@
+# Tokyo Night — imported from omarchy. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Tokyo Night"
+source = "omarchy"
+mode = "dark"
+
+[base]
+background = "#1a1b26"
+foreground = "#a9b1d6"
+muted = "#414868"
+accent = "#7aa2f7"
+selection = "#292e42"
+gradient = ["#7aa2f7", "#ad8ee6"]
+
+[sidebar]
+fg = "#a9b1d6"
+bg = "#13141c"
+border = "#53576c"
+border_active = "#7aa2f7"
+title = "#7aa2f7"
+divider = "#414868"
+item_selected_fg = "#a9b1d6"
+item_selected_bg = "#292e42"
+
+[workspace]
+fg = "#a9b1d6"
+bg = "#1a1b26"
+border = "#53576c"
+border_active = "#7aa2f7"
+title = "#7aa2f7"
+item_selected_fg = "#a9b1d6"
+item_selected_bg = "#292e42"
+
+[footer]
+fg = "#565f89"
+bg = "#13141c"
+border = "#53576c"
+border_active = "#7aa2f7"
+
+[modal]
+fg = "#a9b1d6"
+bg = "#24283b"
+border_active = "#7aa2f7"
+cancel_fg = "#1a1b26"
+cancel_bg = "#f7768e"
+confirm_fg = "#1a1b26"
+confirm_bg = "#9ece6a"
+
+[status]
+cursor = "#7aa2f7"
+correct = "#9ece6a"
+error = "#f7768e"
+hint = "#449dab"
+cancel = "#eb927b"
+hotkey = "#7aa2f7"
+
+[ansi]
+red = "#f7768e"
+orange = "#eb927b"
+yellow = "#e0af68"
+green = "#9ece6a"
+cyan = "#449dab"
+blue = "#7aa2f7"
+magenta = "#ad8ee6"

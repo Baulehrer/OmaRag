@@ -1,0 +1,64 @@
+# Everforest Dark Medium — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Everforest Dark Medium"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#2d353b"
+foreground = "#d3c6aa"
+muted = "#859289"
+accent = "#fff1c5"
+selection = "#5b5e59"
+gradient = ["#a7c080", "#e67e80"]
+
+[sidebar]
+fg = "#d3c6aa"
+bg = "#2d353b"
+border = "#6f6f67"
+border_active = "#dbbc7f"
+title = "#d699b6"
+divider = "#859289"
+item_selected_fg = "#e69875"
+item_selected_bg = "#5b5e59"
+
+[workspace]
+fg = "#d3c6aa"
+bg = "#2d353b"
+border = "#859289"
+border_active = "#fff1c5"
+title = "#7fbbb3"
+item_selected_fg = "#d699b6"
+item_selected_bg = "#232a2e"
+
+[footer]
+fg = "#d3c6aa"
+bg = "#2d353b"
+border = "#859289"
+border_active = "#dbbc7f"
+
+[modal]
+fg = "#d3c6aa"
+bg = "#2d353b"
+border_active = "#859289"
+cancel_fg = "#d3c6aa"
+cancel_bg = "#232a2e"
+confirm_fg = "#d3c6aa"
+confirm_bg = "#e69875"
+
+[status]
+cursor = "#a7c080"
+correct = "#a7c080"
+error = "#e67e80"
+hint = "#7fbbb3"
+cancel = "#859289"
+hotkey = "#a7c080"
+
+[ansi]
+red = "#e67e80"
+orange = "#859289"
+yellow = "#859289"
+green = "#a7c080"
+cyan = "#7fbbb3"
+blue = "#fff1c5"
+magenta = "#e69875"

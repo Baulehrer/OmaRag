@@ -27,6 +27,27 @@ async def test_meta_health_and_openapi(client: httpx2.AsyncClient) -> None:
     assert "/v1/workspaces/{workspace_id}/documents/ingest" in schema["paths"]
 
 
+async def test_preset_cross_encoder_install_is_catalog_pinned_and_streams_progress(
+    client: httpx2.AsyncClient, app: FastAPI
+) -> None:
+    model = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    installed = await client.post(
+        "/v1/models/install-hugging-face", json={"model": model}
+    )
+    assert installed.status_code == 200
+    lines = [line for line in installed.text.splitlines() if line]
+    assert "downloading pinned cross-encoder" in lines[0]
+    assert '"status": "verified"' in lines[-1]
+    assignments = app.state.services.models.installed_assignments
+    assert assignments[-1].model == model
+    assert assignments[-1].revision != "main"
+
+    rejected = await client.post(
+        "/v1/models/install-hugging-face", json={"model": "example/unpinned"}
+    )
+    assert rejected.status_code == 409
+
+
 async def test_search_and_ingest_policies_reject_unknown_values(
     client: httpx2.AsyncClient, workspace: dict[str, object]
 ) -> None:

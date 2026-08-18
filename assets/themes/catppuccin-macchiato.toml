@@ -1,0 +1,64 @@
+# Catppuccin Macchiato — imported from superfile. Do not edit by hand;
+# regenerate with scripts/import_themes.py. See ATTRIBUTION.md.
+name = "Catppuccin Macchiato"
+source = "superfile"
+mode = "dark"
+
+[base]
+background = "#24273a"
+foreground = "#a5adcb"
+muted = "#939ab7"
+accent = "#b7bdf8"
+selection = "#444864"
+gradient = ["#8aadf4", "#c6a0f6"]
+
+[sidebar]
+fg = "#a5adcb"
+bg = "#24273a"
+border = "#585d74"
+border_active = "#ed8796"
+title = "#7dc4e4"
+divider = "#939ab7"
+item_selected_fg = "#91d7e3"
+item_selected_bg = "#444864"
+
+[workspace]
+fg = "#a5adcb"
+bg = "#24273a"
+border = "#6e738d"
+border_active = "#b7bdf8"
+title = "#8aadf4"
+item_selected_fg = "#91d7e3"
+item_selected_bg = "#444864"
+
+[footer]
+fg = "#a5adcb"
+bg = "#24273a"
+border = "#6e738d"
+border_active = "#a6da95"
+
+[modal]
+fg = "#a5adcb"
+bg = "#24273a"
+border_active = "#939ab7"
+cancel_fg = "#363a4f"
+cancel_bg = "#ee99a0"
+confirm_fg = "#363a4f"
+confirm_bg = "#91d7e3"
+
+[status]
+cursor = "#f4dbd6"
+correct = "#a6da95"
+error = "#ed8796"
+hint = "#7dc4e4"
+cancel = "#ee99a0"
+hotkey = "#91d7e3"
+
+[ansi]
+red = "#ed8796"
+orange = "#ee99a0"
+yellow = "#ee99a0"
+green = "#a6da95"
+cyan = "#7dc4e4"
+blue = "#b7bdf8"
+magenta = "#ee99a0"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from omarag_bridge.models.book import (
 from omarag_bridge.models.domain import JobStatus
 from omarag_bridge.services.book_snapshot_service import build_book_knowledge_snapshot
 from omarag_bridge.services.workspace_service import WorkspaceService
+from omarag_bridge.models.errors import NotFoundError
 from omarag_bridge.store import StateStore
 
 
@@ -348,6 +350,70 @@ def test_book_v2_store_round_trip_and_generation_gate(tmp_path: Path) -> None:
     assert store.book_records(workspace.id)
     assert store.chunk_manifest(workspace.id) == []
     assert store.book_structure(workspace.id, "book-v2") is None
+    store.close()
+
+
+def test_book_record_returns_the_same_row_as_scanning_every_book(tmp_path: Path) -> None:
+    """`book_record` is a direct lookup; it must still answer like the full scan.
+
+    It is called per document while building visual evidence and per citation
+    preview, so it used to load and JSON-parse the whole library for one row.
+    """
+    database = tmp_path / "records.sqlite3"
+    store = StateStore(database)
+    workspace = WorkspaceService(tmp_path / "workspaces", store).create(
+        CreateWorkspaceRequest(name="Records")
+    )
+    now = "2026-01-01T00:00:00Z"
+    with store._lock:
+        for index in range(5):
+            logical_id = f"book-{index}"
+            store._db.execute(
+                """INSERT INTO book_records(
+                       workspace_id, logical_document_id, original_source, managed_source,
+                       fingerprint, generation_id, metadata_json, quality_json,
+                       pipeline_version, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    workspace.id,
+                    logical_id,
+                    f"/books/{logical_id}.pdf",
+                    None,
+                    f"fingerprint-{index}",
+                    f"gen-{index}",
+                    json.dumps({"title": f"Book {index}"}),
+                    json.dumps({"score": index}),
+                    "textbook-v1",
+                    now,
+                ),
+            )
+            for segment in range(3):
+                store._db.execute(
+                    """INSERT INTO document_segments(
+                           workspace_id, logical_document_id, generation_id,
+                           segment_document_id, page_start, page_end
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        workspace.id,
+                        logical_id,
+                        f"gen-{index}",
+                        f"{logical_id}-s{segment}",
+                        segment * 10 + 1,
+                        segment * 10 + 10,
+                    ),
+                )
+
+    for index in range(5):
+        logical_id = f"book-{index}"
+        scanned = next(
+            record
+            for record in store.book_records(workspace.id)
+            if record["logical_document_id"] == logical_id
+        )
+        assert store.book_record(workspace.id, logical_id) == scanned
+
+    with pytest.raises(NotFoundError):
+        store.book_record(workspace.id, "book-missing")
     store.close()
 
 
