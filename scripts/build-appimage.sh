@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BINARY=${1:-"$ROOT_DIR/target/release/omarag"}
 OUTPUT_DIR=${2:-"$ROOT_DIR/dist"}
-VERSION=${VERSION:-1.5.0}
+VERSION=${VERSION:-1.5.1}
 ARCH=${ARCH:-x86_64}
 APPIMAGETOOL=${APPIMAGETOOL:-"$ROOT_DIR/dist/appimagetool-$ARCH.AppImage"}
 APPDIR="$OUTPUT_DIR/OmaRag.AppDir"

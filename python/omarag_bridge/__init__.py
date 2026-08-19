@@ -7,4 +7,4 @@ from .runtime import configure_process_environment
 # Python-controlled boundary (launchers also export them before exec).
 configure_process_environment()
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
