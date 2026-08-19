@@ -1260,3 +1260,50 @@ async def test_isolated_adapter_forwards_candidate_and_chunk_lookup(monkeypatch)
 
 async def _async_none() -> None:
     return None
+
+
+def test_heading_detection_does_not_fall_back_on_font_style() -> None:
+    """Style-based heading detection shreds textbook prose into fragments.
+
+    Docling's HierarchicalChunker emits one chunk per document item and merges
+    neighbours only while their heading path is identical, so every heading it
+    invents ends a merge run.  In a two-column textbook, where bold and larger
+    type mark emphasis rather than structure, style detection invents a great
+    many of them.
+
+    Measured over pages 1-8 of a construction textbook, chunked with the
+    workspace configuration:
+
+        use_style=True    118 chunks, median  11 words, 76 % under 20 words
+        use_style=False    41 chunks, median  78 words,  7 % under 20 words
+
+    Bookmarks and numbering stay on: both are explicit signals an author put
+    there on purpose, and neither produced this failure.
+    """
+
+    from omarag_bridge.adapters.book_v2 import _conversion_signature
+
+    class _Options:
+        do_ocr = True
+        force_ocr = False
+        ocr_engine = "auto"
+        ocr_lang = ["de"]
+        do_table_structure = True
+        table_mode = "accurate"
+        table_cell_matching = True
+        images_scale = 1.0
+        generate_page_images = False
+
+    class _Processing:
+        conversion_options = _Options()
+        pictures = "none"
+
+    class _Config:
+        processing = _Processing()
+
+    heading = _conversion_signature(_Config(), "default")["heading_hierarchy"]
+
+    assert heading["use_style"] is False
+    assert heading["use_bookmarks"] is True
+    assert heading["use_numbering"] is True
+    assert heading["enabled"] is True

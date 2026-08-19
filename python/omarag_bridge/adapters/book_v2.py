@@ -332,7 +332,14 @@ def _conversion_signature(config: Any, processing_profile: str) -> dict[str, Any
             "enabled": True,
             "use_bookmarks": True,
             "use_numbering": True,
-            "use_style": True,
+            # Style detection treats emphasis as structure.  In a two-column
+            # textbook that invents headings between paragraphs, and because
+            # Docling only merges neighbouring chunks whose heading path is
+            # identical, every invented heading ends a merge run: measured over
+            # eight pages, prose fell from 41 chunks (median 78 words) to 118
+            # chunks (median 11 words, 76 % of them under 20).  Bookmarks and
+            # numbering are explicit author signals and stay on.
+            "use_style": False,
             "max_level": 6,
         },
     }
@@ -384,13 +391,9 @@ def build_docling_converter(config: Any, processing_profile: str) -> Any:
             ),
         ),
         ocr_options=ocr_options,
-        heading_hierarchy_options=HeadingHierarchyOptions(
-            enabled=True,
-            use_bookmarks=True,
-            use_numbering=True,
-            use_style=True,
-            max_level=6,
-        ),
+        # Read from the signature so the cache key can never describe a
+        # conversion different from the one that runs.
+        heading_hierarchy_options=HeadingHierarchyOptions(**signature["heading_hierarchy"]),
     )
     # Picture descriptions require a provider-specific remote-service policy.
     # Book-v2 deliberately keeps conversion local and retains pictures without
@@ -979,18 +982,78 @@ def _docling_bbox(provenance: Any) -> tuple[float, float, float, float] | None:
     )
 
 
+# Docling labels a printed subject index and hands it over as a table.  It knows
+# what the page is; TableFormer then imposes a grid on a multi-column index and
+# scrambles reading order, so the text never reaches the structure signals.
+_NAVIGATION_TABLE_LABELS = frozenset({"document_index"})
+
+
+def _navigation_table_pages(document: Any) -> set[int]:
+    """Pages Docling itself identified as a printed index."""
+
+    found: set[int] = set()
+    iterate = getattr(document, "iterate_items", None)
+    if not callable(iterate):
+        return found
+    for item, _tree_level in iterate():
+        label = _enum(_value(item, "label")).casefold().replace("-", "_")
+        if label not in _NAVIGATION_TABLE_LABELS:
+            continue
+        for provenance in _value(item, "prov", default=[]) or []:
+            page_no = int(_value(provenance, "page_no", default=0) or 0)
+            if page_no:
+                found.add(page_no)
+    return found
+
+
+def _pdf_text_lines(source: Path, page_numbers: set[int]) -> dict[int, list[str]]:
+    """Reading-order text lines straight from the PDF, bypassing table layout.
+
+    Used only for pages Docling flagged as a navigation table, where its own
+    text items are missing.  Positions are not recovered, so the indentation
+    that marks index sub-entries is unavailable on this path; a sub-entry keeps
+    its leading dash in the term instead.
+    """
+
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:  # pragma: no cover - ships with the document extra
+        return {}
+    lines: dict[int, list[str]] = {}
+    try:
+        pdf = pdfium.PdfDocument(str(source))
+    except Exception:  # noqa: BLE001 - a damaged source must not fail the import
+        return {}
+    try:
+        for page_no in sorted(page_numbers):
+            if page_no < 1 or page_no > len(pdf):
+                continue
+            text = pdf[page_no - 1].get_textpage().get_text_bounded()
+            lines[page_no] = [line.strip() for line in text.splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001 - same
+        return lines
+    finally:
+        with suppress(Exception):
+            pdf.close()
+    return lines
+
+
 def collect_docling_book_signals(
     document: Any,
     page_range: PageRange,
     *,
     page_labels: dict[str, int],
     scanned_pages: list[bool],
+    source: Path | None = None,
 ) -> tuple[list[BookPage], list[HeadingCandidate]]:
     """Reduce a converted range to lightweight full-book reconciliation input."""
     pages: dict[int, list[BookLine]] = {
         page_no: [] for page_no in range(page_range[0], page_range[1] + 1)
     }
     headings: list[HeadingCandidate] = []
+    # Running headers and footers are furniture, not content: a table-of-contents
+    # page carries them and nothing else, which would make it look supplied.
+    substantive: dict[int, int] = dict.fromkeys(pages, 0)
     iterate = getattr(document, "iterate_items", None)
     if callable(iterate):
         for item, _tree_level in iterate():
@@ -1026,6 +1089,8 @@ def collect_docling_book_signals(
                             source_ref=line_ref,
                         )
                     )
+                    if label not in {"page_header", "page_footer"}:
+                        substantive[page_no] += 1
                 if is_heading and provenance_index == 0:
                     local_level = _value(item, "level", default=None)
                     headings.append(
@@ -1042,6 +1107,29 @@ def collect_docling_book_signals(
                             confidence=0.65 if local_level is not None else 0.6,
                         )
                     )
+    # Refill pages whose text Docling put inside a navigation table.  Only pages
+    # it flagged itself are touched, and only when its own text items are
+    # missing, so a single-column index that arrived as text is left alone.
+    starved = {
+        page_no
+        for page_no in _navigation_table_pages(document) & pages.keys()
+        if substantive.get(page_no, 0) <= 1
+    }
+    if source is not None and starved:
+        for page_no, lines in _pdf_text_lines(source, starved).items():
+            seen = {line.text for line in pages[page_no]}
+            for line_index, text in enumerate(lines):
+                if text in seen:
+                    continue
+                seen.add(text)
+                pages[page_no].append(
+                    BookLine(
+                        page_no=page_no,
+                        text=text,
+                        source_ref=f"#/pages/{page_no}/lines/{line_index}",
+                    )
+                )
+
     label_by_page = {page_no: label for label, page_no in page_labels.items()}
     book_pages = [
         BookPage(
@@ -1491,6 +1579,10 @@ def build_evidence_record(
         headings=_strings(chunk_metadata.get("headings")),
         labels=_strings(chunk_metadata.get("labels")),
         aliases=_strings(chunk_metadata.get("aliases")),
+        # A regex word/punctuation count, NOT the chunker's tokenizer.  It runs
+        # roughly 20 % above the Qwen token count that `chunk_size` budgets, so
+        # comparing this number against `chunk_size` directly reads as an
+        # overshoot that is not there.
         raw_tokens=len(re.findall(r"\w+|[^\w\s]", raw_content, re.UNICODE)),
         context_hash=context_hash,
         previous_evidence_id=previous_evidence_id,
@@ -1719,6 +1811,7 @@ async def ingest_pdf_book_v2(
                     conversion_range,
                     page_labels=preflight.page_labels,
                     scanned_pages=scanned_pages,
+                    source=source,
                 )
                 # Halo pages are conversion context, never global-signal owners.
                 pages = [page for page in pages if start_page <= page.page_no <= end_page]

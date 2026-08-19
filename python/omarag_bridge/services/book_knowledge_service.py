@@ -362,7 +362,12 @@ def build_bookrag_lite(
                 )
             )
 
-    explicit_count = sum(term.kind != "keyphrase" for term in terms.values())
+    # Headings are not a term index: every book has them, and counting them
+    # here meant the safety net never deployed for a book whose printed index
+    # could not be read.  Only curated terms -- index, glossary, captions --
+    # make extracted keyphrases unnecessary.
+    curated_kinds = {"index", "glossary", "caption"}
+    explicit_count = sum(term.kind in curated_kinds for term in terms.values())
     keyphrase_cap = max(0, min(2000, 2 * structure.total_pages) - len(terms))
     if explicit_count < 8 and keyphrase_cap:
         for canonical, confidence, evidence_ids in _fallback_keyphrases(
