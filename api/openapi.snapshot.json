@@ -225,7 +225,7 @@
             "type": "string"
           },
           "omarag_version": {
-            "default": "1.5.0",
+            "default": "1.5.1",
             "title": "Omarag Version",
             "type": "string"
           }
@@ -6925,7 +6925,7 @@
   "info": {
     "description": "Stable operations and quality layer for vanilla Haiku RAG",
     "title": "OmaRag API",
-    "version": "1.5.0"
+    "version": "1.5.1"
   },
   "openapi": "3.1.0",
   "paths": {

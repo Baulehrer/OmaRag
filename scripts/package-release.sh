@@ -2,7 +2,7 @@
 set -eu
 
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${VERSION:-1.5.0}
+VERSION=${VERSION:-1.5.1}
 ARCH=${ARCH:-x86_64}
 OUTPUT_DIR=${OUTPUT_DIR:-"$ROOT_DIR/dist"}
 STAGING="$OUTPUT_DIR/omarag-$VERSION-linux-$ARCH"
