@@ -45,8 +45,11 @@ _ROLE_HEADINGS: dict[str, tuple[str, ...]] = {
 _NAVIGATION_HEADINGS = frozenset(item for values in _ROLE_HEADINGS.values() for item in values)
 _ROMAN_RE = r"[ivxlcdm]+"
 _LABEL_RE = rf"(?:[a-z]{{1,4}}[-–]?\d+|\d+[a-z]?|{_ROMAN_RE})"
+# Typeset leaders are dot-space pairs ("Kapitel. . . . . 93"), not runs of dots,
+# so requiring consecutive dots recognised no contents line at all in books set
+# this way.  Both forms are accepted, alongside tabs and column gaps.
 _TOC_LINE_RE = re.compile(
-    rf"^(?P<title>.+?)(?:\s*\.{{2,}}\s*|\t+|\s{{2,}})(?P<label>{_LABEL_RE})\s*$",
+    rf"^(?P<title>.+?)(?:\s*(?:\.\s*){{2,}}|\t+|\s{{2,}})(?P<label>{_LABEL_RE})\s*$",
     re.IGNORECASE,
 )
 _LOCATOR_AT_END_RE = re.compile(
@@ -104,17 +107,71 @@ def _is_index_entry(text: str) -> bool:
     return _split_index_locators(stripped) is not None
 
 
-def _split_index_locators(text: str) -> tuple[str, str] | None:
-    # Index terms often end in a digit themselves ("Beton C30, 42"). Search
-    # comma boundaries from left to right and only accept a complete locator suffix.
-    for match in re.finditer(r",", text):
-        term = text[: match.start()].strip(" ,.;")
-        locators = text[match.end() :].strip()
-        if term and _LOCATOR_LIST_RE.fullmatch(locators):
+_PLAIN_LABEL_RE = r"\d+[a-z]?"
+_PLAIN_LOCATOR_LIST_RE = re.compile(
+    rf"^{_PLAIN_LABEL_RE}(?:\s*[-–—]\s*{_PLAIN_LABEL_RE})?(?:\s*f{{1,2}}\.?)?"
+    rf"(?:\s*,\s*{_PLAIN_LABEL_RE}(?:\s*[-–—]\s*{_PLAIN_LABEL_RE})?(?:\s*f{{1,2}}\.?)?)*$",
+    re.IGNORECASE,
+)
+# An index term is a noun phrase, not a sentence.  The cap keeps a body-page
+# line that happens to end in a number from looking like an index entry, which
+# matters because region growth is driven by the share of matching lines.
+_MAX_INDEX_TERM_WORDS = 12
+
+
+def _plausible_locators(locators: str) -> bool:
+    """Reject splits that would put a page zero in the locator list.
+
+    Books are numbered from one, so a leading zero means the boundary was drawn
+    inside the term: "Begriff 0, 20" is entry "Begriff 0" on page 20, not entry
+    "Begriff" on pages 0 and 20.
+    """
+
+    return all(int(number) > 0 for number in re.findall(r"\d+", locators))
+
+
+def _split_on_locator_boundary(text: str, locators_re: re.Pattern[str]) -> tuple[str, str] | None:
+    """Left-most split whose tail is a complete locator list.
+
+    Left-most means the *longest* locator suffix wins, so "Reduktion 262, 271"
+    yields the term "Reduktion" and both pages rather than folding 262 into the
+    term.
+    """
+
+    for boundary in re.finditer(r"[,\s]\s*", text):
+        term = text[: boundary.start()].strip(" ,.;")
+        locators = text[boundary.end() :].strip()
+        if not term or not locators:
+            continue
+        if not any(char.isalpha() for char in term):
+            continue
+        if len(term.split()) > _MAX_INDEX_TERM_WORDS:
+            continue
+        if locators_re.fullmatch(locators) and _plausible_locators(locators):
             return term, locators
-    columns = re.split(r"\s{2,}", text, maxsplit=1)
-    if len(columns) == 2 and columns[0].strip() and _LOCATOR_LIST_RE.fullmatch(columns[1].strip()):
-        return columns[0].strip(" ,.;"), columns[1].strip()
+    return None
+
+
+def _split_index_locators(text: str) -> tuple[str, str] | None:
+    """Separate an index term from its page locators.
+
+    German textbook indexes overwhelmingly write "Redoxvorgang 262" -- one
+    space, one page number.  Requiring a comma or a double space, as this used
+    to, recognised 7 % of the real index pages of two construction textbooks.
+
+    Plain numeric locators are tried first so that a term which ends in an
+    alphanumeric code keeps it: in "Beton C30, 42" the suffix "C30, 42" parses
+    as a locator list under the permissive grammar, but "C30" is not a page, so
+    only the strict pass gets the split right.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+    for locators_re in (_PLAIN_LOCATOR_LIST_RE, _LOCATOR_LIST_RE):
+        split = _split_on_locator_boundary(stripped, locators_re)
+        if split is not None:
+            return split
     return None
 
 
@@ -417,6 +474,43 @@ def parse_reference_list(
     )
 
 
+def _index_lines_with_wraps(lines: Sequence[BookLine]) -> list[tuple[str, BookLine]]:
+    """Index lines with wrapped entries joined onto the line they started on.
+
+    Two-column indexes wrap long entries, and the tail carries the locator while
+    the head carries the term.  Parsed apart, "-, Klassifizierung building
+    material," / "classification 127" indexes the word "classification" for
+    page 127 and loses the real term.
+
+    A continuation is recognised by orthography: German index entries begin with
+    a capital or the sub-entry dash, so a line starting lowercase continues the
+    line above.  This misses a continuation that begins with a capitalised
+    German noun -- those stay one entry too many rather than one wrong one.
+    """
+
+    joined: list[tuple[str, BookLine]] = []
+    pending: BookLine | None = None
+    for line in lines:
+        stripped = line.text.strip()
+        if not stripped or _heading_role(stripped) is not None:
+            pending = None
+            continue
+        starts_lower = stripped[0].islower()
+        if pending is not None and starts_lower:
+            candidate = f"{pending.text.strip()} {stripped}"
+            if _split_index_locators(candidate) is not None or _SEE_RE.match(candidate):
+                # Anchor the entry where it started, not where it ended.
+                joined.append((candidate, pending))
+                pending = None
+                continue
+        pending = None
+        if _split_index_locators(stripped) is not None or _SEE_RE.match(stripped):
+            joined.append((stripped, line))
+        else:
+            pending = line
+    return joined
+
+
 def parse_subject_index(
     pages: Sequence[BookPage],
     region: NavigationRegion,
@@ -427,10 +521,7 @@ def parse_subject_index(
     entries: list[IndexEntry] = []
     parent_term: str | None = None
     parent_indent: float | None = None
-    for line in _region_lines(pages, region):
-        stripped = line.text.strip()
-        if not stripped or _heading_role(stripped) is not None:
-            continue
+    for stripped, line in _index_lines_with_wraps(_region_lines(pages, region)):
         see = _SEE_RE.match(stripped)
         if see is not None:
             relation_text = normalize_book_text(see.group("relation"))

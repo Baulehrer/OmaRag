@@ -159,6 +159,8 @@ class EvidenceRecord(StrictModel):
     headings: list[str] = Field(default_factory=list)
     labels: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
+    # Regex word/punctuation count, not the chunker's tokenizer: it runs about
+    # 20 % above the Qwen count that `processing.chunk_size` budgets.
     raw_tokens: int | None = Field(default=None, ge=0)
     context_hash: str | None = None
     previous_evidence_id: str | None = None
