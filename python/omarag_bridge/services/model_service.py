@@ -28,6 +28,8 @@ from ..models.domain import (
     CatalogArtifactStatus,
     CatalogProvider,
     CatalogRole,
+    ConversionArtifact,
+    ConversionArtifactsReport,
     HardwareBenchmark,
     HardwareClassification,
     HardwareInfo,
@@ -58,6 +60,7 @@ from ..models.domain import (
     SimpleModelRecommendation,
 )
 from ..models.errors import ConflictError, UpstreamUnavailableError
+from ..runtime import release_native_memory
 
 GIB = 1024**3
 MIB = 1024**2
@@ -913,6 +916,226 @@ class ModelService:
         )
 
     @staticmethod
+    def _reranker_name(config: Any) -> str | None:
+        """The cross-encoder repository this configuration reranks with."""
+
+        model = getattr(getattr(config, "reranking", None), "model", None)
+        if model is None or str(getattr(model, "provider", "")) != "cross-encoder":
+            return None
+        return str(getattr(model, "name", "")) or None
+
+    @staticmethod
+    def required_conversion_artifacts(
+        tokenizer: str, reranker: str | None = None
+    ) -> list[tuple[str, str, str]]:
+        """Model repositories the ingest pipeline resolves while converting.
+
+        Kept as data so readiness stays a filesystem check instead of importing
+        docling and building a converter.  ``test_model_service`` pins the list
+        against docling's own option objects, so an upstream change that starts
+        resolving a different repository fails there rather than in production.
+
+        Only the layout engine this configuration actually runs is listed.  The
+        spec also carries per-engine overrides -- the ONNX build lives in its
+        own repository -- but requiring those would report a correctly admitted
+        installation as incomplete forever.
+        """
+
+        required = [
+            ("docling-project/docling-layout-heron", "main", "Seitenlayout"),
+            ("docling-project/docling-models", "v2.3.0", "Tabellenerkennung"),
+            (tokenizer, "main", "Chunking-Tokenizer"),
+        ]
+        if reranker and "/" in reranker:
+            # The query worker is offline too, and loads the reranker by name.
+            required.append((reranker, "main", "Reranker"))
+        return required
+
+    @classmethod
+    def _hugging_face_snapshot_present(cls, model: str, revision: str) -> bool:
+        """Whether ``revision`` resolves to a populated snapshot in the hub cache.
+
+        Unlike :meth:`_hugging_face_revision_present` this accepts a branch or
+        tag name and does not expect Transformers weight file names: docling
+        repositories ship their own layout.
+        """
+
+        repo = cls.hugging_face_cache_root() / ("models--" + model.replace("/", "--"))
+        ref = repo / "refs" / revision
+        commit = revision
+        if ref.is_file():
+            with suppress(OSError):
+                commit = ref.read_text().strip() or revision
+        snapshot = repo / "snapshots" / commit
+        if not snapshot.is_dir():
+            return False
+        return any(
+            candidate.is_file() and candidate.stat().st_size > 0
+            for candidate in snapshot.rglob("*")
+        )
+
+    @classmethod
+    def conversion_artifacts_report(
+        cls, tokenizer: str, reranker: str | None = None
+    ) -> ConversionArtifactsReport:
+        artifacts = [
+            ConversionArtifact(
+                repo=repo,
+                revision=revision,
+                purpose=purpose,
+                present=cls._hugging_face_snapshot_present(repo, revision),
+            )
+            for repo, revision, purpose in cls.required_conversion_artifacts(tokenizer, reranker)
+        ]
+        missing = [item.repo for item in artifacts if not item.present]
+        return ConversionArtifactsReport(
+            ready=not missing,
+            artifacts=artifacts,
+            missing=missing,
+            cache_root=str(cls.hugging_face_cache_root()),
+        )
+
+    @staticmethod
+    def _probe_pdf() -> bytes:
+        """A valid one-page PDF with a line of text and a ruled box.
+
+        Built rather than stored so the cross-reference offsets are correct:
+        docling rejects a malformed file before it ever loads a model, which
+        would turn the admission run into a false negative.
+        """
+
+        content = (
+            b"BT /F1 12 Tf 20 160 Td (OmaRag Konversionspruefung) Tj ET\n"
+            b"20 40 m 280 40 l S 20 100 m 280 100 l S\n"
+            b"20 40 m 20 100 l S 280 40 m 280 100 l S\n"
+        )
+        objects = [
+            b"<</Type/Catalog/Pages 2 0 R>>",
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]"
+            b"/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+            b"<</Length %d>>stream\n" % len(content) + content + b"endstream",
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+        xref = len(out)
+        out += b"xref\n0 %d\n" % (len(objects) + 1)
+        out += b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += b"%010d 00000 n \n" % offset
+        out += b"trailer<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (
+            len(objects) + 1,
+            xref,
+        )
+        return bytes(out)
+
+    async def admit_conversion_artifacts(self, config: Any) -> AsyncIterator[dict[str, Any]]:
+        """Download every model the configured ingest pipeline needs.
+
+        Runs in the parent process, which deliberately stays online, and admits
+        artifacts by *using* the pipeline rather than by downloading a guessed
+        list of repositories: one real conversion of a tiny PDF resolves exactly
+        the layout, table and OCR models this configuration wires up, and the
+        chunker resolves its tokenizer.  A guessed list drifts the moment an
+        upstream release changes a default; a conversion cannot.
+
+        Succeeding here is therefore also the proof that an import worker will
+        get through, because it exercises the same code path with the same
+        configuration.
+        """
+
+        import tempfile
+
+        repaired = await asyncio.to_thread(self.repair_pinned_catalog_revisions)
+        if repaired:
+            yield {"step": "repair", "status": "done", "detail": ", ".join(repaired)}
+
+        yield {"step": "conversion", "status": "running", "detail": "Layout- und Tabellenmodelle"}
+        try:
+            from haiku.rag.converters.docling_local import DoclingLocalConverter
+        except ImportError as exc:  # pragma: no cover - docling ships with the extra
+            raise ConflictError(
+                "Document conversion requires the installed Haiku document extra"
+            ) from exc
+        with tempfile.TemporaryDirectory(prefix="omarag-admit-") as scratch:
+            probe = Path(scratch) / "probe.pdf"
+            probe.write_bytes(self._probe_pdf())
+            converter = DoclingLocalConverter(config)
+            await converter.convert_file(probe)
+        yield {"step": "conversion", "status": "done", "detail": "Layout- und Tabellenmodelle"}
+
+        tokenizer = str(getattr(config.processing, "chunking_tokenizer", "") or "")
+        if tokenizer:
+            yield {"step": "tokenizer", "status": "running", "detail": tokenizer}
+            from transformers import AutoTokenizer
+
+            await asyncio.to_thread(AutoTokenizer.from_pretrained, tokenizer)
+            yield {"step": "tokenizer", "status": "done", "detail": tokenizer}
+
+        release_native_memory()
+        report = self.conversion_artifacts_report(tokenizer, self._reranker_name(config))
+        yield {
+            "step": "verify",
+            "status": "done" if report.ready else "incomplete",
+            "report": report.model_dump(mode="json"),
+        }
+
+    @classmethod
+    def repair_pinned_catalog_revisions(cls) -> list[str]:
+        """Give already-downloaded pinned artifacts their default revision back.
+
+        :meth:`_link_pinned_revision_to_default` runs after a download, so a
+        cache filled by an earlier release keeps a snapshot that only its commit
+        hash can address.  Offline workers load these models by name, which
+        makes reranking fail on precisely the machines that already paid for the
+        download.  Returns the models that were repaired.
+        """
+
+        repaired: list[str] = []
+        for artifact in cls.curated_catalog().artifacts:
+            if artifact.provider != CatalogProvider.HUGGING_FACE:
+                continue
+            repo = cls.hugging_face_cache_root() / ("models--" + artifact.model.replace("/", "--"))
+            if (repo / "refs" / "main").exists():
+                continue
+            cls._link_pinned_revision_to_default(artifact.model, artifact.revision)
+            if (repo / "refs" / "main").exists():
+                repaired.append(artifact.model)
+        return repaired
+
+    @classmethod
+    def _link_pinned_revision_to_default(cls, model: str, revision: str) -> None:
+        """Make a sha-pinned snapshot resolvable under the default revision.
+
+        huggingface_hub writes ``refs/<name>`` only when the requested revision
+        is a branch or tag.  Pinning a commit therefore leaves the repository
+        reachable exclusively by that commit, while every consumer -- docling,
+        transformers, sentence-transformers -- loads the model by name and thus
+        asks for "main".  Inside the import and query workers, which run with
+        ``HF_HUB_OFFLINE=1``, that lookup cannot fall back to the network and
+        the pipeline fails even though the weights are on disk.
+
+        Writing the ref keeps the pin (the snapshot directory is still the
+        pinned commit) and only records which commit "main" resolves to.  An
+        existing ref is never touched: it may point at a revision this
+        installation deliberately admitted earlier.
+        """
+
+        if not cls._hugging_face_revision_present(model, revision):
+            return
+        repo = cls.hugging_face_cache_root() / ("models--" + model.replace("/", "--"))
+        ref = repo / "refs" / "main"
+        if ref.exists():
+            return
+        with suppress(OSError):
+            ref.parent.mkdir(parents=True, exist_ok=True)
+            ref.write_text(revision)
+
+    @staticmethod
     def _normalized_model_name(model: str) -> str:
         normalized = model.strip().casefold()
         return normalized.removesuffix(":latest")
@@ -1228,6 +1451,7 @@ class ModelService:
                         f"Pinned Hugging Face revision was not cached: {assignment.model}",
                         details={"revision": assignment.revision},
                     )
+                self._link_pinned_revision_to_default(assignment.model, assignment.revision)
             installed.append(assignment.model)
         return installed
 

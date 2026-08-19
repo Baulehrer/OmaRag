@@ -663,3 +663,230 @@ async def test_benchmark_uses_installed_models_and_never_pulls(
     assert result.output_tokens == 128
     assert result.not_measured == ["rerank", "visual-embedding"]
     assert all(path != "/api/pull" for _method, path in calls)
+
+
+def test_pinned_hugging_face_install_stays_loadable_under_its_default_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sha-pinned download must still resolve for consumers asking for "main".
+
+    huggingface_hub only writes ``refs/<name>`` when the requested revision is a
+    branch or tag.  Downloading a pinned commit therefore leaves the repository
+    reachable exclusively by that commit, and every library that loads the model
+    by name -- sentence-transformers, transformers, docling -- fails inside the
+    offline worker with "cannot find an appropriate cached snapshot folder".
+    """
+
+    model = "cross-encoder/example"
+    revision = "1427fd652930e4ba29e8149678df786c240d8825"
+    snapshot = tmp_path / "models--cross-encoder--example" / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+
+    ModelService._link_pinned_revision_to_default(model, revision)
+
+    ref = tmp_path / "models--cross-encoder--example" / "refs" / "main"
+    assert ref.read_text() == revision
+
+
+def test_default_revision_link_never_overwrites_an_existing_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = "cross-encoder/example"
+    repo = tmp_path / "models--cross-encoder--example"
+    snapshot = repo / "snapshots" / "aaa"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("bbb")
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+
+    ModelService._link_pinned_revision_to_default(model, "aaa")
+
+    assert (repo / "refs" / "main").read_text() == "bbb"
+
+
+def test_default_revision_link_is_skipped_for_an_incomplete_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interrupted download must not be advertised as the default revision."""
+
+    model = "cross-encoder/example"
+    repo = tmp_path / "models--cross-encoder--example"
+    snapshot = repo / "snapshots" / "aaa"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+
+    ModelService._link_pinned_revision_to_default(model, "aaa")
+
+    assert not (repo / "refs").exists()
+
+
+def _cache_repo(root: Path, model: str, revision: str, *, complete: bool = True) -> Path:
+    """Lay out a hub cache entry the way huggingface_hub does."""
+
+    repo = root / ("models--" + model.replace("/", "--"))
+    sha = "0" * 40
+    snapshot = repo / "snapshots" / sha
+    snapshot.mkdir(parents=True)
+    if complete:
+        (snapshot / "config.json").write_text("{}")
+    (repo / "refs").mkdir(parents=True, exist_ok=True)
+    (repo / "refs" / revision).write_text(sha)
+    return repo
+
+
+def test_conversion_artifacts_report_names_what_an_import_worker_would_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty cache must be reported as not ready, listing every repository.
+
+    The import worker runs with ``HF_HUB_OFFLINE=1``, so anything absent here is
+    a hard ingest failure rather than a slow first run.
+    """
+
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+    report = ModelService.conversion_artifacts_report("Qwen/Qwen3-Embedding-0.6B")
+
+    assert not report.ready
+    assert report.missing
+    assert "Qwen/Qwen3-Embedding-0.6B" in report.missing
+    assert all(not artifact.present for artifact in report.artifacts)
+    assert {artifact.repo for artifact in report.artifacts} == set(report.missing)
+
+
+def test_conversion_artifacts_report_is_ready_once_every_repository_is_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+    for repo, revision, _purpose in ModelService.required_conversion_artifacts(
+        "Qwen/Qwen3-Embedding-0.6B"
+    ):
+        _cache_repo(tmp_path, repo, revision)
+
+    report = ModelService.conversion_artifacts_report("Qwen/Qwen3-Embedding-0.6B")
+
+    assert report.ready
+    assert report.missing == []
+
+
+def test_conversion_artifacts_report_rejects_an_interrupted_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+    required = ModelService.required_conversion_artifacts("Qwen/Qwen3-Embedding-0.6B")
+    for repo, revision, _purpose in required:
+        _cache_repo(tmp_path, repo, revision, complete=repo != required[0][0])
+
+    report = ModelService.conversion_artifacts_report("Qwen/Qwen3-Embedding-0.6B")
+
+    assert not report.ready
+    assert report.missing == [required[0][0]]
+
+
+def test_required_conversion_artifacts_still_match_what_docling_resolves() -> None:
+    """Drift guard against the pinned docling repositories.
+
+    The list is data so readiness stays cheap, which means an upstream docling
+    release could silently start resolving a different repository.  This test
+    asks docling itself and fails when the two disagree.
+    """
+
+    pytest.importorskip("docling")
+    import inspect
+
+    from docling.datamodel.pipeline_options import LayoutObjectDetectionOptions
+    from docling.models.stages.table_structure.table_structure_model import (
+        TableStructureModel,
+    )
+
+    # Only the default engine's repository is required: the per-engine
+    # overrides (ONNX) are never fetched by the configured pipeline.
+    spec = LayoutObjectDetectionOptions().model_spec
+    expected = {(spec.repo_id, spec.revision)}
+
+    pinned = {
+        repo: revision
+        for repo, revision, _purpose in ModelService.required_conversion_artifacts(
+            "tokenizer/example"
+        )
+    }
+    for repo, revision in expected:
+        assert pinned.get(repo) == revision, f"docling now resolves {repo}@{revision}"
+
+    # The table model hardcodes its repository inside a staticmethod body, so
+    # the source is the only place to read it from.
+    table_source = inspect.getsource(TableStructureModel.download_models)
+    for repo, revision in pinned.items():
+        if repo in table_source:
+            assert revision in table_source
+            break
+    else:
+        raise AssertionError("no pinned repository matches the docling table model")
+
+
+def test_admission_probe_pdf_has_correct_cross_reference_offsets() -> None:
+    """A malformed probe would fail before a single model is resolved.
+
+    docling rejects the file during parsing, so the admission run would report
+    failure while the cache is actually fine -- or worse, look like a missing
+    model.  The offsets are the part that silently rots when the objects change.
+    """
+
+    data = ModelService._probe_pdf()
+    assert data.startswith(b"%PDF-")
+    assert data.rstrip().endswith(b"%%EOF")
+
+    startxref = int(data.rsplit(b"startxref", 1)[1].split(b"%%EOF")[0].strip())
+    assert data[startxref : startxref + 4] == b"xref"
+
+    entries = data[startxref:].split(b"\n")[2:]
+    offsets = [
+        int(line.split()[0]) for line in entries if line.endswith(b"n ") or line.endswith(b"n")
+    ]
+    assert len(offsets) == 5
+    for number, offset in enumerate(offsets, start=1):
+        assert data[offset:].startswith(b"%d 0 obj" % number), f"object {number}"
+
+
+def test_an_already_downloaded_pinned_artifact_gets_its_default_ref_repaired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Installations that predate the ref fix must not stay broken.
+
+    The link is written after a download, so a cache filled by an earlier
+    release still holds a snapshot reachable only by its commit.  Every offline
+    worker -- import and query alike -- loads those models by name, so without
+    a repair pass reranking keeps failing on exactly the machines that already
+    paid for the download.
+    """
+
+    artifact = next(
+        item
+        for item in ModelService.curated_catalog().artifacts
+        if item.provider.value == "hugging-face"
+    )
+    repo = tmp_path / ("models--" + artifact.model.replace("/", "--"))
+    snapshot = repo / "snapshots" / artifact.revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+    assert not (repo / "refs").exists()
+
+    repaired = ModelService.repair_pinned_catalog_revisions()
+
+    assert artifact.model in repaired
+    assert (repo / "refs" / "main").read_text() == artifact.revision
+
+
+def test_repair_skips_artifacts_that_were_never_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ModelService, "hugging_face_cache_root", lambda: tmp_path)
+
+    assert ModelService.repair_pinned_catalog_revisions() == []

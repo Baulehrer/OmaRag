@@ -1025,6 +1025,70 @@
         "title": "ConfigUpdateRequest",
         "type": "object"
       },
+      "ConversionArtifact": {
+        "additionalProperties": false,
+        "description": "One model repository the ingest pipeline resolves while converting.",
+        "properties": {
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "repo": {
+            "title": "Repo",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "revision",
+          "purpose",
+          "present"
+        ],
+        "title": "ConversionArtifact",
+        "type": "object"
+      },
+      "ConversionArtifactsReport": {
+        "additionalProperties": false,
+        "description": "Whether an import worker could convert a document without the network.\n\nThe worker runs with ``HF_HUB_OFFLINE=1``, so a repository missing here is a\nhard ingest failure, not a slow first run.",
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ConversionArtifact"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "cache_root": {
+            "default": "",
+            "title": "Cache Root",
+            "type": "string"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready"
+        ],
+        "title": "ConversionArtifactsReport",
+        "type": "object"
+      },
       "CreateSourceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -8979,6 +9043,92 @@
           }
         ],
         "summary": "Update Config"
+      }
+    },
+    "/v1/workspaces/{workspace_id}/conversion-artifacts": {
+      "get": {
+        "description": "What an import worker would find in the offline model cache.",
+        "operationId": "conversion_artifacts_v1_workspaces__workspace_id__conversion_artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversionArtifactsReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Conversion Artifacts"
+      },
+      "post": {
+        "description": "Admit the models the ingest pipeline needs, by running it once.\n\nImport workers are deliberately offline, so the artifacts have to be\nadmitted here, in the parent, before the first import.  This converts a\ntiny probe document with the workspace's own configuration, which pulls\nexactly the models that configuration resolves.",
+        "operationId": "admit_conversion_artifacts_v1_workspaces__workspace_id__conversion_artifacts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Admit Conversion Artifacts"
       }
     },
     "/v1/workspaces/{workspace_id}/documents": {

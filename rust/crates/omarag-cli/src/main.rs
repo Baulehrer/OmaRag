@@ -401,12 +401,34 @@ async fn doctor(client: &HttpOmaRagClient) -> DoctorReport {
         });
     }
     match client.health().await {
-        Ok(health) => checks.push(DoctorCheck {
-            name: "Readiness",
-            status: if health.ready { "PASS" } else { "FAIL" },
-            detail: health.status,
-            action: (!health.ready).then_some("Inspect the failed readiness checks above."),
-        }),
+        Ok(health) => {
+            let missing = missing_conversion_artifacts(&health);
+            checks.push(DoctorCheck {
+                name: "Readiness",
+                status: if health.ready { "PASS" } else { "FAIL" },
+                detail: health.status,
+                action: (!health.ready).then_some("Inspect the failed readiness checks above."),
+            });
+            // Answering and indexing fail independently: import workers run
+            // offline and resolve their own conversion models, so the service
+            // can serve while no book can be added.
+            checks.push(DoctorCheck {
+                name: "Indexing",
+                status: if missing.is_empty() { "PASS" } else { "FAIL" },
+                detail: if missing.is_empty() {
+                    "conversion models are cached".into()
+                } else {
+                    format!(
+                        "{} conversion model(s) missing: {}",
+                        missing.len(),
+                        missing.join(", ")
+                    )
+                },
+                action: (!missing.is_empty()).then_some(
+                    "Open Models and admit the conversion models, then run doctor again.",
+                ),
+            });
+        }
         Err(_) => checks.push(DoctorCheck {
             name: "Readiness",
             status: "FAIL",
@@ -522,5 +544,65 @@ fn output<T: Serialize>(value: &T, json: bool, human: impl FnOnce() -> String) -
     } else {
         println!("{}", human());
         Ok(())
+    }
+}
+
+/// Conversion models the daemon reported as absent from its offline cache.
+///
+/// Older daemons do not send the field at all; an absent key means "not
+/// reported", which must read as nothing missing rather than as a failure.
+fn missing_conversion_artifacts(health: &omarag_domain::HealthReport) -> Vec<String> {
+    health
+        .checks
+        .get("missing_conversion_artifacts")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+    use omarag_domain::HealthReport;
+    use serde_json::json;
+
+    fn report(checks: serde_json::Value) -> HealthReport {
+        serde_json::from_value(json!({
+            "status": "ready",
+            "ready": true,
+            "checks": checks,
+        }))
+        .expect("health report")
+    }
+
+    #[test]
+    fn missing_conversion_models_are_listed() {
+        let health = report(json!({
+            "missing_conversion_artifacts": ["docling-project/docling-models", "Qwen/x"],
+        }));
+        assert_eq!(
+            missing_conversion_artifacts(&health),
+            vec![
+                "docling-project/docling-models".to_owned(),
+                "Qwen/x".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_does_not_report_the_field_is_not_treated_as_broken() {
+        let health = report(json!({ "sqlite": true }));
+        assert!(missing_conversion_artifacts(&health).is_empty());
+    }
+
+    #[test]
+    fn an_empty_list_means_every_conversion_model_is_cached() {
+        let health = report(json!({ "missing_conversion_artifacts": [] }));
+        assert!(missing_conversion_artifacts(&health).is_empty());
     }
 }
