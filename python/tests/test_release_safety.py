@@ -289,3 +289,36 @@ async def test_pause_checkpoint_does_not_wait_while_holding_writer_lock() -> Non
     async with asyncio.timeout(0.1):
         assert await service._continue("job-1") is False
     assert service.store.job.status.value == "paused"
+
+
+def test_a_failing_torch_compile_cannot_abort_a_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inductor must degrade to eager instead of failing the whole import.
+
+    torch builds its compiler command line without quoting paths, so an
+    installation under a directory containing a space fails to link:
+
+        -L/home/user/My Projects/.../torch/lib
+        /usr/bin/ld: cannot find -ltorch
+
+    A machine with no C++ toolchain fails the same way.  Either turns every
+    document conversion into a hard error, which is not a trade a local-first
+    product can make for a CPU-side speedup.
+    """
+
+    monkeypatch.delenv("TORCHDYNAMO_SUPPRESS_ERRORS", raising=False)
+
+    configure_process_environment()
+
+    assert os.environ["TORCHDYNAMO_SUPPRESS_ERRORS"] == "1"
+
+
+def test_an_explicit_torch_compile_choice_is_respected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TORCHDYNAMO_SUPPRESS_ERRORS", "0")
+
+    configure_process_environment()
+
+    assert os.environ["TORCHDYNAMO_SUPPRESS_ERRORS"] == "0"

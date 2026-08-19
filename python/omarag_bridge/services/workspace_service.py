@@ -6,6 +6,7 @@ import shutil
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import tomli_w
@@ -358,3 +359,20 @@ prompts:
     def database_path(self, workspace_id: str) -> Path:
         manifest = self.get(workspace_id)
         return Path(manifest.path) / "database" / "knowledge.lancedb"
+
+    def app_config(self, workspace_id: str) -> Any:
+        """The Haiku configuration this workspace converts and chunks with.
+
+        Callers that need to resolve the same models as an import worker must
+        read the workspace file rather than Haiku's defaults: the processing
+        block here decides the tokenizer, the OCR engine and the table mode.
+        """
+
+        import yaml
+        from haiku.rag.config import AppConfig
+
+        config_path = Path(self.get(workspace_id).path) / "haiku.rag.yaml"
+        if not config_path.is_file():
+            return AppConfig()
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        return AppConfig.model_validate(raw)

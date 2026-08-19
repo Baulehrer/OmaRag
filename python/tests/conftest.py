@@ -140,6 +140,12 @@ class FakeModelService:
     def curated_catalog(self) -> ModelCatalogManifest:
         return ModelService.curated_catalog()
 
+    def conversion_artifacts_report(self, tokenizer: str, reranker: str | None = None):
+        return ModelService.conversion_artifacts_report(tokenizer, reranker)
+
+    def _reranker_name(self, config):
+        return ModelService._reranker_name(config)
+
     def hardware(self, _: Path) -> HardwareInfo:
         memory = 16 * 1024**3
         return HardwareInfo(

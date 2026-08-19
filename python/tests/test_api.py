@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
@@ -691,3 +692,25 @@ async def test_duplicate_replace_rebuilds_the_existing_document(
     assert (await ingest("initial-table-import", "review"))["status"] == "completed"
     assert (await ingest("replacement-table-import", "replace"))["status"] == "completed"
     assert app.state.services.adapter.ingest_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_indexing_separately_from_serving(
+    client: httpx2.AsyncClient, workspace: dict[str, Any]
+) -> None:
+    """Readiness must answer, and must answer about indexing too.
+
+    A regression here is invisible without a request: the route decorator can
+    end up attached to the wrong function and the endpoint then returns a shape
+    nothing validates against.
+    """
+
+    response = await client.get("/v1/readiness")
+
+    assert response.status_code in {200, 503}
+    body = response.json()
+    assert set(body) >= {"status", "ready", "checks"}
+    checks = body["checks"]
+    assert "indexing_ready" in checks
+    assert isinstance(checks["missing_conversion_artifacts"], list)
+    assert checks["indexing_ready"] == (not checks["missing_conversion_artifacts"])

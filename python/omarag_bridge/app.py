@@ -81,6 +81,7 @@ from .models.domain import (
     CatalogProvider,
     Citation,
     ConfigDocument,
+    ConversionArtifactsReport,
     DocumentPurgePlan,
     DocumentPurgeResult,
     DocumentSummary,
@@ -684,6 +685,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> HealthReport:
         return HealthReport(status="ok", ready=True, checks={"sqlite": True})
 
+    def _missing_conversion_artifacts() -> list[str]:
+        """Model repositories no registered workspace could convert without.
+
+        Serving and indexing fail independently: the API can answer while an
+        import worker cannot start, because workers run offline and resolve
+        their own models.  Reporting them apart keeps a service that only
+        *looks* ready from being called ready.
+        """
+
+        missing: list[str] = []
+        for workspace in services.workspaces.list():
+            try:
+                config = services.workspaces.app_config(workspace.id)
+            except Exception:  # noqa: BLE001 - a broken workspace must not fail health
+                continue
+            tokenizer = str(getattr(config.processing, "chunking_tokenizer", "") or "")
+            report = services.models.conversion_artifacts_report(
+                tokenizer, services.models._reranker_name(config)
+            )
+            missing.extend(repo for repo in report.missing if repo not in missing)
+        return missing
+
     @app.get(
         "/v1/readiness",
         response_model=HealthReport,
@@ -694,6 +717,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ready = services.adapter.available
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        missing = await asyncio.to_thread(_missing_conversion_artifacts)
         return HealthReport(
             status="ready" if ready else "degraded",
             ready=ready,
@@ -701,6 +725,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "sqlite": True,
                 "haiku": services.adapter.version,
                 "haiku_available": ready,
+                "indexing_ready": not missing,
+                "missing_conversion_artifacts": missing,
             },
         )
 
@@ -1530,6 +1556,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await mutation_lease.aclose()
 
         return StreamingResponse(stream_pull(), media_type="application/x-ndjson")
+
+    @app.get(
+        "/v1/workspaces/{workspace_id}/conversion-artifacts",
+        response_model=ConversionArtifactsReport,
+        dependencies=protected,
+    )
+    async def conversion_artifacts(workspace_id: str) -> ConversionArtifactsReport:
+        """What an import worker would find in the offline model cache."""
+
+        config = await asyncio.to_thread(services.workspaces.app_config, workspace_id)
+        tokenizer = str(getattr(config.processing, "chunking_tokenizer", "") or "")
+        return services.models.conversion_artifacts_report(
+            tokenizer, services.models._reranker_name(config)
+        )
+
+    @app.post(
+        "/v1/workspaces/{workspace_id}/conversion-artifacts",
+        dependencies=protected,
+    )
+    async def admit_conversion_artifacts(workspace_id: str) -> StreamingResponse:
+        """Admit the models the ingest pipeline needs, by running it once.
+
+        Import workers are deliberately offline, so the artifacts have to be
+        admitted here, in the parent, before the first import.  This converts a
+        tiny probe document with the workspace's own configuration, which pulls
+        exactly the models that configuration resolves.
+        """
+
+        config = await asyncio.to_thread(services.workspaces.app_config, workspace_id)
+        mutation_lease = await acquire_model_mutation_lease()
+
+        async def stream_admission():
+            try:
+                async with services.resources.indexing():
+                    async for event in services.models.admit_conversion_artifacts(config):
+                        yield (json.dumps(event) + "\n").encode()
+            except Exception as exc:
+                yield (json.dumps({"error": str(exc)}) + "\n").encode()
+            finally:
+                await mutation_lease.aclose()
+
+        return StreamingResponse(stream_admission(), media_type="application/x-ndjson")
 
     @app.post("/v1/models/install-hugging-face", dependencies=protected)
     async def install_hugging_face_model(request: PullModelRequest) -> StreamingResponse:

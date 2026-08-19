@@ -17,6 +17,13 @@ _LEAN_ENVIRONMENT = {
     # Disable library telemetry at the earliest import boundary. These flags
     # carry no user content and do not interfere with explicitly consented
     # artifact downloads.
+    # torch builds its inductor compiler command line without quoting paths, so
+    # an installation under a directory containing a space fails to link
+    # ("ld: cannot find -ltorch"), and a machine without a C++ toolchain fails
+    # the same way.  Both turn every document conversion into a hard error.
+    # Falling back to eager execution costs a little CPU speed and keeps
+    # indexing working everywhere.
+    "TORCHDYNAMO_SUPPRESS_ERRORS": "1",
     "HF_HUB_DISABLE_TELEMETRY": "1",
     "DO_NOT_TRACK": "1",
     "OLLAMA_NO_CLOUD": "1",

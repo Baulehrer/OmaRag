@@ -1142,6 +1142,28 @@ class WarmupResponse(StrictModel):
     detail: str = ""
 
 
+class ConversionArtifact(StrictModel):
+    """One model repository the ingest pipeline resolves while converting."""
+
+    repo: str
+    revision: str
+    purpose: str
+    present: bool
+
+
+class ConversionArtifactsReport(StrictModel):
+    """Whether an import worker could convert a document without the network.
+
+    The worker runs with ``HF_HUB_OFFLINE=1``, so a repository missing here is a
+    hard ingest failure, not a slow first run.
+    """
+
+    ready: bool
+    artifacts: list[ConversionArtifact] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    cache_root: str = ""
+
+
 class ModelResidency(StrEnum):
     UNCONFIGURED = "unconfigured"
     IDLE = "idle"
