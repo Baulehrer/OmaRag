@@ -59,12 +59,17 @@ class _QueryDeadline:
 
     #: Total slack a request may be granted, however many reasons apply. Past
     #: this it fails, so no combination of excuses can leave a caller hanging.
-    MAX_EXTENSION_MS: ClassVar[float] = 45_000.0
+    MAX_EXTENSION_MS: ClassVar[float] = 60_000.0
     #: What an Ollama model that is not resident costs to load. Measured at
     #: ~14s for the pinned generator on an 8 GB machine; the allowance is
     #: deliberately generous because being wrong here means a failed question,
     #: and it is only ever granted when readiness reports the model missing.
     COLD_START_ALLOWANCE_MS: ClassVar[float] = 30_000.0
+    #: What a query worker costs to rebuild before it can rank anything:
+    #: importing sentence_transformers and reading the reranker's weights,
+    #: measured at 5.6s and 3.1s against 0.65s of actual scoring. Same
+    #: category as the cold model above — loading is not the question's work.
+    RERANKER_LOAD_ALLOWANCE_MS: ClassVar[float] = 12_000.0
 
     def grant(self, milliseconds: float, reason: str) -> None:
         """Push the deadline back for work the question did not ask for."""
@@ -85,6 +90,11 @@ class _QueryDeadline:
         if waited_ms >= 250.0:
             self.grant(waited_ms, "waiting for a free model slot")
 
+    def allow_reranker_load(self) -> None:
+        """The query worker has to be rebuilt, so its models load from scratch."""
+
+        self.grant(self.RERANKER_LOAD_ALLOWANCE_MS, "rebuilding the query worker")
+
     def allow_cold_start(self, models: list[str]) -> None:
         """Loading a model that is not resident is not the question's fault.
 
@@ -104,6 +114,17 @@ class _QueryDeadline:
             message += f" (already extended for {', '.join(dict.fromkeys(self.reasons))})"
         return message
 
+
+# Fallbacks that describe the conditions a request ran under, not the answer it
+# produced. Everything else still bars the answer from the cache.
+#
+# `latency_degraded` only says the models were not resident — it is on almost
+# every request on a machine that unloads them, and treating it as a quality
+# signal meant the answer cache was never written at all: the same question
+# asked three times in a row missed three times and paid for three full runs.
+# `retrieval_escalated` says the second retrieval stage ran, which produces a
+# better answer, not a worse one.
+_CACHEABLE_FALLBACKS = frozenset({"latency_degraded", "retrieval_escalated"})
 
 STRICT_REFUSAL = "In den bereitgestellten Quellen nicht ausreichend belegt."
 _TECHNICAL_TOKEN = re.compile(
@@ -384,11 +405,13 @@ class RunService:
                 deadline.allow_cold_start(
                     [str(name) for name in runtime_metadata.get("missing_resident_models") or []]
                 )
+                if getattr(self.adapter, "query_worker_state", "ready") != "ready":
+                    deadline.allow_reranker_load()
 
             cache_request = {key: value for key, value in request.items() if key != "session_id"}
             if adaptive:
                 memory_enabled = request.get("options", {}).get("memory", "auto") != "off"
-                standalone, _ = self.query.standalone_question(
+                standalone, history_used = self.query.standalone_question(
                     run.workspace_id,
                     run.session_id,
                     run_id,
@@ -396,7 +419,12 @@ class RunService:
                     memory_enabled=memory_enabled,
                 )
                 cache_request["question"] = _normalized_question(standalone)
-                cache_request["memory_context"] = run.session_id if memory_enabled else "off"
+                # Not the session id. Keying on it gave every conversation its
+                # own cache, so the same question missed every time it was asked
+                # afresh — which is the case the cache exists for. What actually
+                # varies the answer is whether history shaped the question, and
+                # when it did, the rewritten question above already carries it.
+                cache_request["memory_context"] = "history" if history_used else "off"
             else:
                 cache_request["question"] = _normalized_question(request["question"])
             cache_key = request_hash(
@@ -697,7 +725,7 @@ class RunService:
                 citation_data = [item.model_dump(mode="json") for item in citations]
                 claim_data = [item.model_dump(mode="json") for item in claims]
                 degraded = (
-                    bool(query_metadata.get("fallbacks"))
+                    bool(set(query_metadata.get("fallbacks") or ()) - _CACHEABLE_FALLBACKS)
                     or str(query_metadata.get("abstention", "none")) != "none"
                 )
                 if cache_status is AnswerCacheStatus.MISS and not degraded:

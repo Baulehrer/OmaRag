@@ -21,6 +21,7 @@ from ..models.domain import (
     SearchHit,
 )
 from ..store import StateStore
+from .claim_verifier_service import LocalClaimVerifier
 from .ollama_stream import (
     OllamaGenerationOptions,
     OllamaModelIdentity,
@@ -73,6 +74,10 @@ _FOLLOWUP = re.compile(
     r"it|that|this|previous|former|latter)\b"
 )
 
+
+# Above this many sources the ranking is considered to have found what it
+# needed, and nothing is added to it.
+_THIN_SELECTION = 1
 
 _UNFINISHED_CLAIM_REMINDER = (
     "Dein letzter <claim>-Block wurde nicht abgeschlossen und konnte deshalb keiner Quelle "
@@ -438,7 +443,11 @@ class QueryOrchestrator:
             except Exception:
                 fallbacks.append("progressive_reranker_failed")
 
-        selected = [item.candidate for item in selection.selected]
+        selected = self._with_page_siblings(
+            [item.candidate for item in selection.selected],
+            fused,
+            limit=min(budget["final_max"], _THIN_SELECTION + 1),
+        )
         if not selected:
             if selection.cutoff_reason == "calibration_mismatch":
                 fallbacks.append("calibration_mismatch")
@@ -481,10 +490,25 @@ class QueryOrchestrator:
             evidence_mode,
             images,
         )
+        # The workspace's own generator does the checking, under the digest the
+        # answer itself is written with. An injected verifier still wins, which
+        # is what the tests use.
+        verifier: ClaimVerifier | None = self.claim_verifier or LocalClaimVerifier(
+            ollama_url=self.ollama_url,
+            model=model,
+            expected_digest=expected_model_digest,
+            resolved_identity=resolved_model_identity,
+            keep_alive=keep_alive,
+            context_tokens=min(budget["context_tokens"], 8192),
+        )
         temperature = {"strict": 0.0, "normal": 0.1, "explore": 0.2}[evidence_mode.value]
         generation_options = OllamaGenerationOptions(
             num_ctx=budget["context_tokens"],
-            num_predict=budget["answer_tokens"],
+            # The budget is set per complexity, but the claim protocol costs
+            # tokens per source: an id, the evidence ids, the facet and the
+            # sentence itself for each one. At the flat figure an answer citing
+            # several sources ran out mid-claim and was discarded whole.
+            num_predict=min(1024, budget["answer_tokens"] + 96 * max(0, len(windows) - 1)),
             temperature=temperature,
         )
         claims: list[AnswerClaim] = []
@@ -536,8 +560,9 @@ class QueryOrchestrator:
                                 block,
                                 claim_evidence,
                                 calls=verifier_calls,
+                                verifier=verifier,
                             )
-                            if verification_needed and self.claim_verifier is None:
+                            if verification_needed and verifier is None:
                                 fallbacks.append("claim_verifier_unavailable")
                         unverified_reason: str | None = None
                         if verification is not None:
@@ -586,7 +611,10 @@ class QueryOrchestrator:
                             if block.status == "insufficient"
                             else "verifier-off"
                             if str(options.get("verifier") or "auto") == "off"
-                            else "verifier-unavailable"
+                            # The reason is already a usable status:
+                            # verifier-unavailable, -error, -inconclusive,
+                            # -unreadable, -no-evidence.
+                            else unverified_reason
                             if unverified_reason is not None
                             else "protocol-literal-checked"
                             if validation.technical_literals
@@ -714,7 +742,7 @@ class QueryOrchestrator:
         tps = None
         if final_event and final_event.eval_count and final_event.eval_duration_ns:
             tps = final_event.eval_count / (final_event.eval_duration_ns / 1_000_000_000)
-        verifier_digest = getattr(self.claim_verifier, "digest", None)
+        verifier_digest = getattr(verifier, "digest", None)
         return OrchestratedAnswer(
             answer=answer,
             claims=tuple(claims),
@@ -759,7 +787,7 @@ class QueryOrchestrator:
                 # cannot tell "a verifier ran" from "one was asked for and was
                 # missing".
                 else "unavailable"
-                if self.claim_verifier is None and verifier_calls
+                if verifier is None and verifier_calls
                 else "applied"
                 if verifier_calls
                 else "not-triggered"
@@ -775,28 +803,81 @@ class QueryOrchestrator:
             ),
         )
 
+    @staticmethod
+    def _with_page_siblings(
+        selected: list[RetrievalCandidate],
+        fused: list[FusedCandidate],
+        *,
+        limit: int,
+    ) -> list[RetrievalCandidate]:
+        """Bring the rest of the page along.
+
+        A cross-encoder prefers prose to a table, structurally and by a wide
+        margin: on one page of the Tabellenbuch the worked example scored 1.48
+        against -0.63 for the table that defines the classes, and rewriting the
+        table into sentences did not move it (-0.51 to -0.87). So a question
+        about a term lands on the example and never on the definition, and the
+        answer quotes an arithmetic result instead of saying what the term is.
+
+        The definition is not missing. It is one chunk away, on the same page
+        under the same heading, and the search already returned it. Nothing new
+        is fetched here: candidates that share a page and a heading path with
+        something already selected are admitted beside it, in the order the
+        fusion put them.
+        """
+        # Only a thin selection is topped up. When the ranking already found
+        # several good sources, page-mates add tokens and nothing else: tried
+        # unbounded, "Welche Mauerverbände gibt es?" went from two sources to
+        # four, the answer outgrew its token budget, was cut off mid-claim and
+        # came back as a refusal — a question that had answered correctly
+        # before.
+        if len(selected) > _THIN_SELECTION or not selected or len(selected) >= limit:
+            return selected
+        chosen = {item.chunk_id for item in selected}
+        wanted = {
+            (item.logical_document_id, page, item.headings)
+            for item in selected
+            for page in item.pages
+        }
+        for item in fused:
+            if len(selected) >= limit:
+                break
+            candidate = item.candidate
+            if candidate.chunk_id in chosen:
+                continue
+            if any(
+                (candidate.logical_document_id, page, candidate.headings) in wanted
+                for page in candidate.pages
+            ):
+                selected.append(candidate)
+                chosen.add(candidate.chunk_id)
+        return selected
+
     async def _verify_claim(
         self,
         claim: Any,
         evidence: tuple[EvidenceWindow, ...],
         *,
         calls: int,
+        verifier: Any | None = None,
     ) -> Any | None:
+        if verifier is None:
+            verifier = self.claim_verifier
         if not self.claim_verifier_policy.should_verify(claim, evidence):
             return None
         if calls >= self.claim_verifier_policy.max_claims:
-            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
-        if self.claim_verifier is None:
+            return self.claim_verifier_policy.fail_closed(verifier)
+        if verifier is None:
             # V1.2 never upgrades a high-risk numeric/negative/comparative,
             # table, formula or multi-evidence claim from lexical alignment to
             # factual support when the pinned verifier is unavailable.
             return self.claim_verifier_policy.fail_closed(None)
         try:
-            result = await self.claim_verifier.verify(claim, evidence)
+            result = await verifier.verify(claim, evidence)
         except Exception:
-            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
+            return self.claim_verifier_policy.fail_closed(verifier)
         if getattr(result, "verdict", None) not in {"entailed", "contradicted", "unknown"}:
-            return self.claim_verifier_policy.fail_closed(self.claim_verifier)
+            return self.claim_verifier_policy.fail_closed(verifier)
         return result
 
     async def _search_facets(

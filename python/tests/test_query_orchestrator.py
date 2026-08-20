@@ -220,14 +220,15 @@ async def test_a_stuck_model_slot_still_fails_the_request() -> None:
         deadline = service._deadline_registry()[run_id]
         deadline.credit_admission_wait(600_000.0)
         deadline.allow_cold_start(["qwen3:8b"])
+        deadline.allow_reranker_load()
         seen["when"] = deadline.handle.when()
 
     service._execute_inner = execute_inner
     started = run_module.asyncio.get_running_loop().time()
     await service._execute("run-capped")
 
-    # Ten minutes of waiting plus a cold model buys 45s of slack and no more.
-    assert 69.5 <= seen["when"] - started <= 70.5
+    # However many reasons apply, the slack stops at a minute.
+    assert 84.5 <= seen["when"] - started <= 85.5
 
 
 @pytest.mark.asyncio
@@ -469,15 +470,16 @@ async def test_orchestrator_fails_closed_for_unbound_custom_reranker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_claim_nobody_could_check_is_kept_and_labelled_unverified(
+async def test_a_claim_the_verifier_could_not_check_is_kept_and_labelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unknown verdict is not a refutation.
 
-    No `ClaimVerifier` implementation is wired in, and a table or formula
-    always asks to be verified — so treating "unknown" like "contradicted"
-    discarded every claim drawn from a table and answered "not sufficiently
-    supported" to questions the sources answered perfectly well.
+    A table or a formula always asks to be verified, so treating "unknown"
+    like "contradicted" discarded every claim drawn from a table and answered
+    "not sufficiently supported" to questions the sources answered perfectly
+    well. Here the verifier exists but cannot be reached; the claim survives,
+    carrying the reason it could not be checked.
     """
     FakeOllama.blocks = (
         '<claim>{"id":"C1","text":"Der Grenzwert beträgt 42 mm.",'
@@ -500,12 +502,10 @@ async def test_a_claim_nobody_could_check_is_kept_and_labelled_unverified(
 
     assert answer.abstention == "none"
     assert [claim.text for claim in answer.claims] == ["Der Grenzwert beträgt 42 mm."]
-    assert answer.claims[0].verification_status == "verifier-unavailable"
+    assert answer.claims[0].verification_status == "verifier-error"
     assert answer.rejected_claims == 0
-    # Nothing is hidden: the receipt still says a verifier was wanted and missing.
-    assert "claim_verifier_unavailable" in answer.fallbacks
-    assert "claim_verifier_verifier-unavailable" in answer.fallbacks
-    assert answer.verifier_status == "unavailable"
+    # Nothing is hidden: the receipt names why the check did not happen.
+    assert "claim_verifier_verifier-error" in answer.fallbacks
 
 
 @pytest.mark.asyncio
@@ -807,3 +807,113 @@ async def test_prompt_contract_includes_two_facets_navigation_and_raw_excerpt(
     raw_start = system.index(marker) + len(marker)
     assert system[raw_start : raw_start + len(raw)] == raw
     assert system[raw_start + len(raw) :].startswith("</raw_excerpt>")
+
+
+@pytest.mark.asyncio
+async def test_the_local_verifier_reads_a_verdict_and_never_invents_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an explicit BELEGT is support. Anything unreadable stays unknown."""
+
+    from omarag_bridge.services import claim_verifier_service
+    from omarag_bridge.services.query_v2 import ClaimBlock, EvidenceWindow
+
+    state = {"reply": ""}
+
+    class Stub:
+        async def __aenter__(self) -> Any:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def stream_chat(self, **_kwargs: Any) -> Any:
+            yield SimpleNamespace(content=state["reply"], done=True)
+
+    monkeypatch.setattr(claim_verifier_service, "OllamaStreamClient", lambda _url: Stub())
+    verifier = claim_verifier_service.LocalClaimVerifier(
+        ollama_url="http://ollama.invalid", model="qwen3.5:4b", expected_digest="d"
+    )
+    claim = ClaimBlock(
+        id="C1",
+        text="Der Grenzwert beträgt 42 mm.",
+        evidence_ids=("E1",),
+        facet_id="F1",
+        status="supported",
+    )
+    window = EvidenceWindow(
+        evidence_id="E1",
+        chunk_id="c1",
+        text="Der Grenzwert beträgt 42 mm.",
+        char_start=0,
+        char_end=28,
+        content_hash="h",
+        pages=(7,),
+        headings=("Kapitel",),
+        facet_ids=("F1",),
+    )
+
+    for spoken, expected in (
+        ("BELEGT", "entailed"),
+        ("WIDERLEGT", "contradicted"),
+        ("UNKLAR", "unknown"),
+        ("Das kommt darauf an.", "unknown"),
+        ("", "unknown"),
+    ):
+        state["reply"] = spoken
+        assert (await verifier.verify(claim, (window,))).verdict == expected
+
+    state["reply"] = "BELEGT"
+    assert (await verifier.verify(claim, ())).reason == "verifier-no-evidence"
+    assert verifier.digest == "d"
+
+
+def test_the_rest_of_the_page_comes_along_with_a_selected_chunk() -> None:
+    """A cross-encoder prefers prose to a table, so the definition is missed.
+
+    Measured on one page of the Tabellenbuch: the worked example scored 1.48
+    against -0.63 for the table defining the classes, and rewriting the table
+    into sentences did not help (-0.51 to -0.87). The answer then quoted the
+    arithmetic instead of saying what the term means, from the right page.
+    """
+    from omarag_bridge.services.query_v2 import FusedCandidate, RetrievalCandidate
+
+    def candidate(chunk_id: str, pages: tuple[int, ...], headings: tuple[str, ...], doc="d"):
+        return RetrievalCandidate(
+            chunk_id=chunk_id,
+            content=chunk_id,
+            document_id=doc,
+            logical_document_id=doc,
+            section_id=None,
+            pages=pages,
+            headings=headings,
+            content_hash=None,
+        )
+
+    heads = ("Beton", "Ausbreitmaßklassen")
+    example = candidate("example", (51,), heads)
+    table = candidate("table", (51,), heads)
+    other_page = candidate("other-page", (52,), heads)
+    other_section = candidate("other-section", (51,), ("Beton", "Zemente"))
+    other_book = candidate("other-book", (51,), heads, doc="e")
+
+    fused = [
+        FusedCandidate(
+            candidate=item, fused_score=1.0, ranks=(("fts", 1),), retrieval_paths=("fts",)
+        )
+        for item in (example, table, other_page, other_section, other_book)
+    ]
+
+    kept = QueryOrchestrator._with_page_siblings([example], fused, limit=5)
+    assert [item.chunk_id for item in kept] == ["example", "table"]
+
+    # A selection that already found several sources is left alone: page-mates
+    # would only cost tokens, and an answer that outgrows its budget is cut off
+    # mid-claim and discarded whole.
+    rich = [example, other_section]
+    assert QueryOrchestrator._with_page_siblings(rich, fused, limit=5) == rich
+
+    # The budget still binds, and the selection stays first in line.
+    assert [
+        item.chunk_id for item in QueryOrchestrator._with_page_siblings([example], fused, limit=1)
+    ] == ["example"]
