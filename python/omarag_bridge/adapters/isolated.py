@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import signal
+import sys
 import threading
 import time
 import urllib.error
@@ -118,7 +119,19 @@ def _memory_usage() -> int:
 
 def _memory_watchdog(limit: int, stop: threading.Event) -> None:
     while not stop.wait(0.25):
-        if limit > 0 and _memory_usage() > limit:
+        usage = _memory_usage()
+        if limit > 0 and usage > limit:
+            # os._exit skips buffers, handlers and atexit, so the reason has to
+            # be written before it.  Without this the worker vanishes in the
+            # middle of a request and the parent sees only a broken pipe, which
+            # surfaces as "reranker=degraded" with no way to tell a memory kill
+            # from a timeout or a crash.
+            print(
+                f"omarag query worker exceeded its memory budget: "
+                f"{usage // 1024**2} MB in use, limit {limit // 1024**2} MB",
+                file=sys.stderr,
+                flush=True,
+            )
             os._exit(137)
 
 
