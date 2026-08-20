@@ -53,32 +53,54 @@ class _QueryDeadline:
     timeout_ms: int
     handle: Any = None
     admission_wait_ms: float = 0.0
-    credited_ms: float = 0.0
+    granted_ms: float = 0.0
+    reasons: list[str] = field(default_factory=list)
     phase_label: str = field(default="Starting")
 
-    MAX_ADMISSION_CREDIT_MS: ClassVar[float] = 30_000.0
+    #: Total slack a request may be granted, however many reasons apply. Past
+    #: this it fails, so no combination of excuses can leave a caller hanging.
+    MAX_EXTENSION_MS: ClassVar[float] = 45_000.0
+    #: What an Ollama model that is not resident costs to load. Measured at
+    #: ~14s for the pinned generator on an 8 GB machine; the allowance is
+    #: deliberately generous because being wrong here means a failed question,
+    #: and it is only ever granted when readiness reports the model missing.
+    COLD_START_ALLOWANCE_MS: ClassVar[float] = 30_000.0
 
-    def credit_admission_wait(self, waited_ms: float) -> None:
-        self.admission_wait_ms = waited_ms
-        credit = min(max(waited_ms, 0.0), self.MAX_ADMISSION_CREDIT_MS)
-        if credit <= 0.0 or self.handle is None:
+    def _grant(self, milliseconds: float, reason: str) -> None:
+        room = self.MAX_EXTENSION_MS - self.granted_ms
+        granted = min(max(milliseconds, 0.0), room)
+        if granted <= 0.0 or self.handle is None:
             return
-        self.credited_ms = credit
+        self.granted_ms += granted
+        self.reasons.append(reason)
         with suppress(RuntimeError, AttributeError):
             # RuntimeError: the budget already expired and the reschedule is
             # moot — the cancellation is on its way to us either way.
-            self.handle.reschedule(self.started_at + (self.timeout_ms + credit) / 1000)
+            self.handle.reschedule(self.started_at + (self.timeout_ms + self.granted_ms) / 1000)
+
+    def credit_admission_wait(self, waited_ms: float) -> None:
+        self.admission_wait_ms = waited_ms
+        if waited_ms >= 250.0:
+            self._grant(waited_ms, "waiting for a free model slot")
+
+    def allow_cold_start(self, models: list[str]) -> None:
+        """Loading a model that is not resident is not the question's fault.
+
+        A cold generator costs more than the whole budget of a simple question,
+        so without this the first question after a pause could not succeed no
+        matter how fast retrieval was.
+        """
+        if models:
+            self._grant(self.COLD_START_ALLOWANCE_MS, "loading a model that was not resident")
 
     def expiry_message(self, elapsed_seconds: float) -> str:
-        parts = [
-            f"Query deadline exceeded after {elapsed_seconds:.1f}s",
-            f"while {self.phase_label.casefold()}",
-        ]
-        if self.admission_wait_ms >= 500.0:
-            parts.append(
-                f"({self.admission_wait_ms / 1000:.1f}s of it waiting for a free model slot)"
-            )
-        return " ".join(parts)
+        message = (
+            f"Query deadline exceeded after {elapsed_seconds:.1f}s "
+            f"while {self.phase_label.casefold()}"
+        )
+        if self.reasons:
+            message += f" (already extended for {', '.join(dict.fromkeys(self.reasons))})"
+        return message
 
 
 STRICT_REFUSAL = "In den bereitgestellten Quellen nicht ausreichend belegt."
@@ -356,6 +378,10 @@ class RunService:
                 require_vl=uses_images,
                 allow_uncalibrated_reranker=adaptive,
             )
+            if deadline is not None:
+                deadline.allow_cold_start(
+                    [str(name) for name in runtime_metadata.get("missing_resident_models") or []]
+                )
 
             cache_request = {key: value for key, value in request.items() if key != "session_id"}
             if adaptive:

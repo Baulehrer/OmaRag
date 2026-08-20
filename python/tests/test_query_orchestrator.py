@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -218,14 +219,15 @@ async def test_a_stuck_model_slot_still_fails_the_request() -> None:
     async def execute_inner(run_id: str) -> None:
         deadline = service._deadline_registry()[run_id]
         deadline.credit_admission_wait(600_000.0)
+        deadline.allow_cold_start(["qwen3:8b"])
         seen["when"] = deadline.handle.when()
 
     service._execute_inner = execute_inner
     started = run_module.asyncio.get_running_loop().time()
     await service._execute("run-capped")
 
-    # Ten minutes of waiting buys 30s and no more.
-    assert 54.5 <= seen["when"] - started <= 55.5
+    # Ten minutes of waiting plus a cold model buys 45s of slack and no more.
+    assert 69.5 <= seen["when"] - started <= 70.5
 
 
 @pytest.mark.asyncio
@@ -239,8 +241,8 @@ async def test_an_expired_request_says_what_it_was_doing() -> None:
 
     async def execute_inner(run_id: str) -> None:
         deadline = service._deadline_registry()[run_id]
-        deadline.phase_label = "Waiting for a free model slot"
-        deadline.admission_wait_ms = 14_200.0
+        deadline.credit_admission_wait(4_000.0)
+        deadline.phase_label = "Retrieving evidence"
         raise TimeoutError
 
     service._execute_inner = execute_inner
@@ -250,8 +252,11 @@ async def test_an_expired_request_says_what_it_was_doing() -> None:
     assert len(failures) == 1
     code, message = failures[0]
     assert code == "QUERY_DEADLINE_EXCEEDED"
+    # It names what the request was doing and what it had already been
+    # forgiven, so the log explains itself without a source dive.
+    assert "retrieving evidence" in message
     assert "waiting for a free model slot" in message
-    assert "14.2s" in message
+    assert re.search(r"after \d+\.\d+s", message), message
 
 
 @pytest.mark.asyncio
