@@ -41,6 +41,10 @@ def _memory_snapshot() -> MemorySnapshot:
 # budget in `segment_pages` at the largest unit it will hand out.
 _CONVERSION_PEAK_BYTES = 2 * 1024**3
 
+# Roughly what a query worker holds: the process, the store and the loaded
+# cross-encoder. Used only to decide whether keeping one around is affordable.
+_QUERY_WORKER_BYTES = 1536 * 1024**2
+
 
 class ResourceCoordinator:
     """Serialize memory-heavy work and prioritize interactive questions."""
@@ -105,21 +109,28 @@ class ResourceCoordinator:
         return self._waiting_chats
 
     def residency_seconds(self) -> float:
-        """Grow hot-query residency from 30s to 5m, but yield on pressure."""
+        """How long a warm query runtime may be kept, given the memory at hand."""
 
         # Keeping a cross-encoder or Ollama model resident is only an
         # optimization.  As soon as the reserve is guarded it must not compete
         # with the active request/indexer for memory.
-        if self.memory().state != "ready":
+        snapshot = self.memory()
+        if snapshot.state != "ready":
             return 0.0
         now = time.monotonic()
         if self._last_query_completed_at and now - self._last_query_completed_at > 300.0:
             self._recent_query_uses = 0
-        return min(
-            self._max_residency_seconds,
-            300.0,
-            30.0 * (2 ** min(self._recent_query_uses, 4)),
-        )
+        ramp = 30.0 * (2 ** min(self._recent_query_uses, 4))
+        # The ramp starts low in case a question was a one-off. That trade is
+        # badly priced: rebuilding a reaped query worker reloads the reranker's
+        # 201 weight tensors, measured at 7.2s against 0.65s of actual scoring,
+        # so a single question asked a minute later pays ten times over for the
+        # memory a short residency saved. Where there is plainly room for the
+        # worker several times over, start from a floor that outlives one
+        # question and one pause for thought instead.
+        headroom = snapshot.available - snapshot.reserve
+        floor = 180.0 if headroom >= _QUERY_WORKER_BYTES * 3 else 30.0
+        return min(self._max_residency_seconds, 300.0, max(floor, ramp))
 
     def _record_query_use(self) -> None:
         now = time.monotonic()

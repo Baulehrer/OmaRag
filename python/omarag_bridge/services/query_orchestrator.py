@@ -49,6 +49,7 @@ from .query_v2 import (
     pack_evidence_windows,
     performance_budget,
     performance_context_tokens,
+    retrieval_query,
     validate_claim,
     weighted_rrf,
 )
@@ -70,6 +71,15 @@ class _FacetSearchBatch:
 _FOLLOWUP = re.compile(
     r"(?i)\b(?:dazu|davon|dies(?:e[rmns]?)?|diese frage|vorher|oben|erstere|letztere|"
     r"it|that|this|previous|former|latter)\b"
+)
+
+
+_UNFINISHED_CLAIM_REMINDER = (
+    "Dein letzter <claim>-Block wurde nicht abgeschlossen und konnte deshalb keiner Quelle "
+    "zugeordnet werden. Schreibe die Antwort jetzt erneut, kurz und vollständig, "
+    'ausschließlich als abgeschlossene Blöcke der Form <claim>{"id":"C1","text":"...",'
+    '"evidence_ids":["E1"],"facet_id":"F1","status":"supported"}</claim>. '
+    "Fasse dich so knapp, dass jeder Block sicher endet. Kein Text außerhalb der Blöcke."
 )
 
 
@@ -137,6 +147,7 @@ class QueryOrchestrator:
         images: list[str] | None = None,
         emit_claim: EmitClaim | None = None,
         emit_draft: EmitDraft | None = None,
+        extend_deadline: Callable[[float, str], None] | None = None,
         memory_enabled: bool = True,
         allowed_document_ids: set[str] | None = None,
         keep_alive: str | int = "120s",
@@ -168,6 +179,7 @@ class QueryOrchestrator:
             routes = []
             fallbacks.append("book_router_failed")
         register_entities = len({str(item.get("term_id")) for item in routes})
+        rerank_query = retrieval_query(standalone)
         plan = classify_query(
             standalone,
             has_session_reference=session_reference,
@@ -278,7 +290,9 @@ class QueryOrchestrator:
                 )
                 for item in fused
             ]
-            scores = await self.adapter.rerank(database, standalone, rerank_hits)
+            # The cross-encoder is scored against the subject of the question,
+            # not its interrogative frame — see `retrieval_query`.
+            scores = await self.adapter.rerank(database, rerank_query, rerank_hits)
             if len(scores) != len(fused):
                 raise RuntimeError("reranker returned a mismatched score count")
             raw_scores = [
@@ -388,7 +402,7 @@ class QueryOrchestrator:
                     for item in new_items
                 ]
                 scores = (
-                    await self.adapter.rerank(database, standalone, rerank_hits)
+                    await self.adapter.rerank(database, rerank_query, rerank_hits)
                     if rerank_hits
                     else []
                 )
@@ -467,143 +481,181 @@ class QueryOrchestrator:
             evidence_mode,
             images,
         )
+        temperature = {"strict": 0.0, "normal": 0.1, "explore": 0.2}[evidence_mode.value]
         generation_options = OllamaGenerationOptions(
             num_ctx=budget["context_tokens"],
             num_predict=budget["answer_tokens"],
-            temperature={"strict": 0.0, "normal": 0.1, "explore": 0.2}[evidence_mode.value],
+            temperature=temperature,
         )
-        parser = ClaimBlockParser()
         claims: list[AnswerClaim] = []
         rejected = 0
         verifier_calls = 0
         first_claim_ms: float | None = None
         final_event: OllamaStreamEvent | None = None
         phase = time.perf_counter()
-        async with self._generation_lock, OllamaStreamClient(self.ollama_url) as ollama:
-            async for event in ollama.stream_chat(
-                model=model,
-                messages=messages,
-                options=generation_options,
-                expected_digest=expected_model_digest,
-                resolved_identity=resolved_model_identity,
-                think=False,
-                keep_alive=keep_alive,
-            ):
-                final_event = event
-                if not event.content:
-                    continue
-                blocks = parser.feed(event.content)
-                if emit_draft is not None:
-                    # Publish the prose so far. When a block completes the draft
-                    # is empty again and the committed claim replaces it.
-                    await emit_draft(parser.draft_text())
-                for block in blocks:
-                    validation = validate_claim(
-                        block,
-                        evidence,
-                        allowed_facets=(facet.id for facet in plan.facets),
-                        seen_claim_ids=(claim.id for claim in claims),
-                    )
-                    if not validation.valid:
-                        rejected += 1
+        attempt_messages = messages
+        for attempt in range(2):
+            parser = ClaimBlockParser()
+            async with self._generation_lock, OllamaStreamClient(self.ollama_url) as ollama:
+                async for event in ollama.stream_chat(
+                    model=model,
+                    messages=attempt_messages,
+                    options=generation_options,
+                    expected_digest=expected_model_digest,
+                    resolved_identity=resolved_model_identity,
+                    think=False,
+                    keep_alive=keep_alive,
+                ):
+                    final_event = event
+                    if not event.content:
                         continue
-                    claim_evidence = tuple(
-                        evidence[item] for item in block.evidence_ids if item in evidence
-                    )
-                    verification_needed = self.claim_verifier_policy.should_verify(
-                        block, claim_evidence
-                    )
-                    verification = None
-                    if str(options.get("verifier") or "auto") != "off":
-                        verification = await self._verify_claim(
+                    blocks = parser.feed(event.content)
+                    if emit_draft is not None:
+                        # Publish the prose so far. When a block completes the draft
+                        # is empty again and the committed claim replaces it.
+                        await emit_draft(parser.draft_text())
+                    for block in blocks:
+                        validation = validate_claim(
                             block,
-                            claim_evidence,
-                            calls=verifier_calls,
+                            evidence,
+                            allowed_facets=(facet.id for facet in plan.facets),
+                            seen_claim_ids=(claim.id for claim in claims),
                         )
-                        if verification_needed and self.claim_verifier is None:
-                            fallbacks.append("claim_verifier_unavailable")
-                    unverified_reason: str | None = None
-                    if verification is not None:
-                        verifier_calls += 1
-                        if verification.verdict == "contradicted":
+                        if not validation.valid:
                             rejected += 1
-                            fallbacks.append(f"claim_verifier_{verification.reason or 'rejected'}")
                             continue
-                        if verification.verdict != "entailed":
-                            # "unknown" means nobody was able to check, not that
-                            # the claim is false. Treating the two alike threw
-                            # away every claim drawn from a table: a table always
-                            # asks to be verified, and no verifier is wired in,
-                            # so the answer was discarded and the question came
-                            # back as unsupported. Keep the claim and say plainly
-                            # that it is unverified; only a refutation drops it.
-                            unverified_reason = verification.reason or "unknown"
-                            fallbacks.append(f"claim_verifier_{unverified_reason}")
-                            verification = None
-                    stable_evidence_ids = [
-                        citation_by_evidence[evidence_id].evidence_id or evidence_id
-                        for evidence_id in block.evidence_ids
-                        if evidence_id in citation_by_evidence
-                    ]
-                    support_spans = []
-                    for support in validation.support_spans:
-                        window = evidence.get(support.evidence_id)
-                        citation = citation_by_evidence.get(support.evidence_id)
-                        if window is None or citation is None:
-                            continue
-                        support_spans.append(
-                            ClaimSupportSpan(
-                                evidence_id=citation.evidence_id or support.evidence_id,
-                                char_start=window.char_start + support.start,
-                                char_end=window.char_start + support.end,
-                                content_hash=window.content_hash,
-                                kind=support.kind,
+                        claim_evidence = tuple(
+                            evidence[item] for item in block.evidence_ids if item in evidence
+                        )
+                        verification_needed = self.claim_verifier_policy.should_verify(
+                            block, claim_evidence
+                        )
+                        verification = None
+                        if str(options.get("verifier") or "auto") != "off":
+                            verification = await self._verify_claim(
+                                block,
+                                claim_evidence,
+                                calls=verifier_calls,
                             )
-                        )
-                    verification_status = (
-                        "verifier-entailed"
-                        if verification is not None
-                        else "insufficient"
-                        if block.status == "insufficient"
-                        else "verifier-off"
-                        if str(options.get("verifier") or "auto") == "off"
-                        else "verifier-unavailable"
-                        if unverified_reason is not None
-                        else "protocol-literal-checked"
-                        if validation.technical_literals
-                        else "protocol-lexical-aligned"
-                    )
-                    claim = AnswerClaim(
-                        id=block.id,
-                        text=block.text,
-                        evidence_ids=stable_evidence_ids,
-                        facet_id=block.facet_id,
-                        status=ClaimStatus(block.status),
-                        verification_status=verification_status,
-                        verification_score=(
-                            getattr(verification, "score", None)
+                            if verification_needed and self.claim_verifier is None:
+                                fallbacks.append("claim_verifier_unavailable")
+                        unverified_reason: str | None = None
+                        if verification is not None:
+                            verifier_calls += 1
+                            if verification.verdict == "contradicted":
+                                rejected += 1
+                                fallbacks.append(
+                                    f"claim_verifier_{verification.reason or 'rejected'}"
+                                )
+                                continue
+                            if verification.verdict != "entailed":
+                                # "unknown" means nobody was able to check, not that
+                                # the claim is false. Treating the two alike threw
+                                # away every claim drawn from a table: a table always
+                                # asks to be verified, and no verifier is wired in,
+                                # so the answer was discarded and the question came
+                                # back as unsupported. Keep the claim and say plainly
+                                # that it is unverified; only a refutation drops it.
+                                unverified_reason = verification.reason or "unknown"
+                                fallbacks.append(f"claim_verifier_{unverified_reason}")
+                                verification = None
+                        stable_evidence_ids = [
+                            citation_by_evidence[evidence_id].evidence_id or evidence_id
+                            for evidence_id in block.evidence_ids
+                            if evidence_id in citation_by_evidence
+                        ]
+                        support_spans = []
+                        for support in validation.support_spans:
+                            window = evidence.get(support.evidence_id)
+                            citation = citation_by_evidence.get(support.evidence_id)
+                            if window is None or citation is None:
+                                continue
+                            support_spans.append(
+                                ClaimSupportSpan(
+                                    evidence_id=citation.evidence_id or support.evidence_id,
+                                    char_start=window.char_start + support.start,
+                                    char_end=window.char_start + support.end,
+                                    content_hash=window.content_hash,
+                                    kind=support.kind,
+                                )
+                            )
+                        verification_status = (
+                            "verifier-entailed"
                             if verification is not None
-                            else None
-                        ),
-                        support_spans=support_spans,
-                    )
-                    claims.append(claim)
-                    claim_citations = [
-                        citation_by_evidence[evidence_id].model_copy(
-                            update={"claim_ids": [claim.id]}
+                            else "insufficient"
+                            if block.status == "insufficient"
+                            else "verifier-off"
+                            if str(options.get("verifier") or "auto") == "off"
+                            else "verifier-unavailable"
+                            if unverified_reason is not None
+                            else "protocol-literal-checked"
+                            if validation.technical_literals
+                            else "protocol-lexical-aligned"
                         )
-                        for evidence_id in block.evidence_ids
-                        if evidence_id in citation_by_evidence
-                    ]
-                    if first_claim_ms is None:
-                        first_claim_ms = (time.perf_counter() - started) * 1000
-                    if emit_claim is not None:
-                        await emit_claim(claim, claim_citations)
-            try:
-                parser.finish()
-            except ClaimParseError:
-                rejected += 1
-                fallbacks.append("trailing_claim_rejected")
+                        claim = AnswerClaim(
+                            id=block.id,
+                            text=block.text,
+                            evidence_ids=stable_evidence_ids,
+                            facet_id=block.facet_id,
+                            status=ClaimStatus(block.status),
+                            verification_status=verification_status,
+                            verification_score=(
+                                getattr(verification, "score", None)
+                                if verification is not None
+                                else None
+                            ),
+                            support_spans=support_spans,
+                        )
+                        claims.append(claim)
+                        claim_citations = [
+                            citation_by_evidence[evidence_id].model_copy(
+                                update={"claim_ids": [claim.id]}
+                            )
+                            for evidence_id in block.evidence_ids
+                            if evidence_id in citation_by_evidence
+                        ]
+                        if first_claim_ms is None:
+                            first_claim_ms = (time.perf_counter() - started) * 1000
+                        if emit_claim is not None:
+                            await emit_claim(claim, claim_citations)
+                try:
+                    parser.finish()
+                except ClaimParseError:
+                    rejected += 1
+                    fallbacks.append("trailing_claim_rejected")
+            unfinished = parser.draft_text().strip()
+            if claims or attempt or not unfinished:
+                break
+            # The model opened a claim block and never closed it, so nothing
+            # could be bound to a source and the question came back unanswered
+            # while the evidence sat right there. Try once more: with room to
+            # finish if it simply ran out of tokens, and with its own unfinished
+            # sentence quoted back at it either way. Once only, and only when
+            # the alternative is a refusal.
+            fallbacks.append(
+                "answer_truncated"
+                if final_event is not None and final_event.done_reason == "length"
+                else "answer_unfinished"
+            )
+            generation_options = OllamaGenerationOptions(
+                num_ctx=budget["context_tokens"],
+                num_predict=min(budget["answer_tokens"] * 2, 1024),
+                temperature=temperature,
+            )
+            if extend_deadline is not None:
+                # A second attempt needs roughly what the first one took. Without
+                # the room it finishes a good answer and has it thrown away by
+                # the clock, which is worse than not retrying at all.
+                extend_deadline(
+                    (time.perf_counter() - phase) * 1000, "a second attempt at a cut-off answer"
+                )
+            attempt_messages = [
+                *messages,
+                {"role": "assistant", "content": unfinished},
+                {"role": "user", "content": _UNFINISHED_CLAIM_REMINDER},
+            ]
+            rejected = 0
+            final_event = None
         timings["generate"] = (time.perf_counter() - phase) * 1000
 
         if not claims:

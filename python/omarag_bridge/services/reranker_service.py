@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,11 @@ class PersistentCrossEncoder:
     batch_size: int = 16
     threads: int = 0
     _model: Any = field(default=None, init=False, repr=False)
-    _load_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
-    _predict_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Plain threading locks, not asyncio ones: the query worker runs each
+    # request on its own event loop, and loading may be started from a
+    # background thread that outlives any of them.
+    _load_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _predict_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def digest(self) -> str:
@@ -45,13 +49,20 @@ class PersistentCrossEncoder:
     def loaded(self) -> bool:
         return self._model is not None
 
+    def load(self) -> Any:
+        """Build the model if it is not built yet. Safe to call from any thread."""
+
+        if self._model is not None:
+            return self._model
+        with self._load_lock:
+            if self._model is None:
+                self._model = self._load()
+        return self._model
+
     async def _ensure_loaded(self) -> Any:
         if self._model is not None:
             return self._model
-        async with self._load_lock:
-            if self._model is None:
-                self._model = await asyncio.to_thread(self._load)
-        return self._model
+        return await asyncio.to_thread(self.load)
 
     def _load(self) -> Any:
         if self.threads > 0:
@@ -76,15 +87,18 @@ class PersistentCrossEncoder:
             return []
         model = await self._ensure_loaded()
         pairs = [[question, self._contextual_text(item.candidate)] for item in candidates]
-        async with self._predict_lock:
-            scores = await asyncio.to_thread(
-                model.predict,
-                pairs,
-                batch_size=self.batch_size,
-                show_progress_bar=False,
-                activation_fn=lambda value: value,
-                convert_to_numpy=True,
-            )
+
+        def predict() -> Any:
+            with self._predict_lock:
+                return model.predict(
+                    pairs,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    activation_fn=lambda value: value,
+                    convert_to_numpy=True,
+                )
+
+        scores = await asyncio.to_thread(predict)
         return [
             (item.candidate, float(score)) for item, score in zip(candidates, scores, strict=True)
         ]

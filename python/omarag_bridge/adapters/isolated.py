@@ -45,6 +45,8 @@ _QUERY_OPERATIONS = {
     "citation_details",
 }
 _CALLBACK_NAMES = {"segment_guard", "before_segment", "on_segment", "on_phase", "segment_sizer"}
+# Operations whose result is handed straight to the cross-encoder afterwards.
+_RERANKED_OPERATIONS = {"search", "search_many"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +335,7 @@ def _worker_main(
         from .haiku_v070 import VanillaHaikuAdapter
 
         adapter = VanillaHaikuAdapter()
+        preloading: threading.Thread | None = None
         while True:
             if idle_seconds > 0 and not connection.poll(idle_seconds):
                 return
@@ -342,6 +345,24 @@ def _worker_main(
                 return
             if request.get("type") == "shutdown":
                 return
+            if request.get("operation") in _RERANKED_OPERATIONS and (
+                preloading is None or not preloading.is_alive()
+            ):
+                # Retrieval takes about six seconds and the cross-encoder that
+                # ranks its result takes nearly nine to load, almost all of it
+                # import and weight reading. Start that now, beside the search,
+                # instead of after it. The thread outlives the per-request event
+                # loop on purpose, so a search that ends early still leaves the
+                # model warm for the rerank that follows.
+                database = next(iter(request.get("args") or []), None)
+                if database is not None:
+                    preloading = threading.Thread(
+                        target=adapter.prepare_reranker,
+                        args=(database,),
+                        name="oracle-reranker-preload",
+                        daemon=True,
+                    )
+                    preloading.start()
             try:
                 result = asyncio.run(_execute_request(adapter, connection, request))
                 connection.send({"type": "result", "result": result})

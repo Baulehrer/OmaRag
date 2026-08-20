@@ -138,7 +138,14 @@ def test_physical_delete_restores_directory_when_store_fails(
 
 
 async def test_chat_gets_next_heavy_resource_slot() -> None:
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
     resources = ResourceCoordinator()
+    # `indexing()` waits for memory before it queues, so a loaded test machine
+    # would otherwise decide the outcome instead of the priority rule.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=32 * 1024**3, available=24 * 1024**3, reserve=2 * 1024**3
+    )
     order: list[str] = []
     release = asyncio.Event()
 
@@ -395,3 +402,32 @@ async def test_indexing_still_yields_to_a_warmup() -> None:
     let_warm_finish.set()
     await asyncio.gather(warming, converting)
     assert converted
+
+
+def test_a_warm_query_runtime_outlives_one_question_when_there_is_room() -> None:
+    """Reaping the query worker after 30s is a badly priced trade.
+
+    Rebuilding it reloads the reranker's 201 weight tensors: measured at 7.2s
+    against 0.65s of actual scoring. A question asked a minute after the last
+    one therefore paid ten times over for the memory the short residency saved.
+    """
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
+    resources = ResourceCoordinator()
+
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=32 * 1024**3, available=16 * 1024**3, reserve=2 * 1024**3
+    )
+    assert resources.residency_seconds() >= 180.0
+
+    # A machine that is "ready" only by a hair keeps the cautious ramp.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=2560 * 1024**2, reserve=1200 * 1024**2
+    )
+    assert resources.residency_seconds() == 30.0
+
+    # Under pressure nothing stays resident at all.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=1024**3, reserve=1200 * 1024**2
+    )
+    assert resources.residency_seconds() == 0.0

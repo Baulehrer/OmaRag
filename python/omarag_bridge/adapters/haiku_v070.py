@@ -1043,12 +1043,9 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 )
         return resolved
 
-    async def rerank(
-        self, database: Path, question: str, candidates: list[SearchHit]
-    ) -> list[float]:
-        """Run one persistent CPU cross-encoder inside the query worker."""
-        if not candidates:
-            return []
+    def _reranker(self, database: Path) -> Any:
+        """The cross-encoder this workspace pins, built once per worker."""
+
         from ..services.reranker_service import (
             DEFAULT_RERANKER,
             DEFAULT_RERANKER_REVISION,
@@ -1077,6 +1074,29 @@ class VanillaHaikuAdapter(HaikuAdapter):
                 revision=revision,
             )
             self._persistent_reranker_key = reranker_key
+        return self._persistent_reranker
+
+    def prepare_reranker(self, database: Path) -> None:
+        """Load the cross-encoder while the search it will rank is still running.
+
+        Measured on the pinned model: importing sentence_transformers costs
+        5.6s and building the model another 3.1s, against 0.65s of actual
+        scoring for a full candidate set. Retrieval itself takes about six
+        seconds, so nearly all of that loading fits inside it, and it costs no
+        memory beyond what the rerank was going to take anyway. Failures are
+        swallowed on purpose: `rerank` will surface them, and a speculative
+        load must never break a search.
+        """
+        with suppress(Exception):
+            self._reranker(database).load()
+
+    async def rerank(
+        self, database: Path, question: str, candidates: list[SearchHit]
+    ) -> list[float]:
+        """Run one persistent CPU cross-encoder inside the query worker."""
+        if not candidates:
+            return []
+        self._reranker(database)
         from ..services.query_v2 import FusedCandidate, RetrievalCandidate
 
         fused = []

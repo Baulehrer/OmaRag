@@ -66,7 +66,9 @@ class _QueryDeadline:
     #: and it is only ever granted when readiness reports the model missing.
     COLD_START_ALLOWANCE_MS: ClassVar[float] = 30_000.0
 
-    def _grant(self, milliseconds: float, reason: str) -> None:
+    def grant(self, milliseconds: float, reason: str) -> None:
+        """Push the deadline back for work the question did not ask for."""
+
         room = self.MAX_EXTENSION_MS - self.granted_ms
         granted = min(max(milliseconds, 0.0), room)
         if granted <= 0.0 or self.handle is None:
@@ -81,7 +83,7 @@ class _QueryDeadline:
     def credit_admission_wait(self, waited_ms: float) -> None:
         self.admission_wait_ms = waited_ms
         if waited_ms >= 250.0:
-            self._grant(waited_ms, "waiting for a free model slot")
+            self.grant(waited_ms, "waiting for a free model slot")
 
     def allow_cold_start(self, models: list[str]) -> None:
         """Loading a model that is not resident is not the question's fault.
@@ -91,7 +93,7 @@ class _QueryDeadline:
         matter how fast retrieval was.
         """
         if models:
-            self._grant(self.COLD_START_ALLOWANCE_MS, "loading a model that was not resident")
+            self.grant(self.COLD_START_ALLOWANCE_MS, "loading a model that was not resident")
 
     def expiry_message(self, elapsed_seconds: float) -> str:
         message = (
@@ -577,6 +579,7 @@ class RunService:
                             images=request.get("images"),
                             emit_claim=emit_committed_claim,
                             emit_draft=emit_draft,
+                            extend_deadline=deadline.grant if deadline is not None else None,
                             memory_enabled=options.get("memory", "auto") != "off",
                             allowed_document_ids=(
                                 set(segment_ids) if segment_ids is not None else None
