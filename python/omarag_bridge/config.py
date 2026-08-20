@@ -5,6 +5,34 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_BASELINE_QUERY_MEMORY_MAX_MB = 3584
+
+
+def _total_memory_mb() -> int:
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            key, _, raw = line.partition(":")
+            if key == "MemTotal":
+                return int(raw.strip().split()[0]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 8 * 1024
+
+
+def default_query_memory_max_mb() -> int:
+    """Resident budget for the query worker, scaled to the machine.
+
+    3584 MB was picked for an 8 GB baseline and then applied everywhere.  The
+    watchdog enforces it with ``os._exit``, so on a larger machine the fixed
+    figure manufactures a failure mode out of memory that is sitting unused.
+
+    A third of RAM leaves room for the answer model, which Ollama keeps
+    resident beside the worker, and for the desktop.  The baseline is a floor:
+    a small machine keeps exactly what it had.
+    """
+
+    return max(_BASELINE_QUERY_MEMORY_MAX_MB, _total_memory_mb() // 3)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OMARAG_", extra="ignore")
@@ -33,8 +61,10 @@ class Settings(BaseSettings):
     worker_import_memory_high_mb: int = Field(default=7168, ge=512)
     worker_import_memory_max_mb: int = Field(default=9216, ge=768)
     worker_import_swap_max_mb: int = Field(default=1024, ge=0)
-    worker_query_memory_high_mb: int = Field(default=2048, ge=256)
-    worker_query_memory_max_mb: int = Field(default=3584, ge=512)
+    worker_query_memory_high_mb: int = Field(
+        default_factory=lambda: max(2048, default_query_memory_max_mb() * 4 // 7), ge=256
+    )
+    worker_query_memory_max_mb: int = Field(default_factory=default_query_memory_max_mb, ge=512)
     worker_query_swap_max_mb: int = Field(default=512, ge=0)
     worker_utility_memory_high_mb: int = Field(default=1024, ge=128)
     worker_utility_memory_max_mb: int = Field(default=2048, ge=256)

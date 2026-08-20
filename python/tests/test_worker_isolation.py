@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -248,3 +249,64 @@ async def test_search_many_contains_worker_failure_per_facet(
     assert result.hydration_failure is not None
     assert result.stats.ipc_round_trips == 1
     assert result.stats.fallback_reason == "worker_batch_failed"
+
+
+def test_the_memory_watchdog_says_why_before_it_kills_the_worker(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """``os._exit`` skips buffers and handlers, so the reason has to be written
+    first.  Without it the worker vanishes mid-request and the parent sees only
+    a broken pipe -- which is how an intermittent retrieval failure stayed
+    undiagnosed through an entire investigation."""
+
+    from omarag_bridge.adapters import isolated
+
+    monkeypatch.setattr(isolated, "_memory_usage", lambda: 4_000 * 1024**2)
+    exits: list[int] = []
+    monkeypatch.setattr(isolated.os, "_exit", lambda code: exits.append(code))
+
+    stop = threading.Event()
+
+    def release() -> None:
+        # One pass is enough; the fake _exit does not stop the loop.
+        stop.set()
+
+    threading.Timer(0.6, release).start()
+    isolated._memory_watchdog(3_584 * 1024**2, stop)
+
+    assert exits and exits[0] == 137
+    message = capfd.readouterr().err
+    assert "memory" in message.casefold()
+    assert "3584" in message and "4000" in message
+
+
+def test_the_query_budget_grows_with_the_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """3584 MB was chosen for an 8 GB baseline and then applied everywhere.
+
+    Exceeding it kills the worker outright, so on a larger machine the cap
+    creates a failure mode out of memory that is sitting there unused.  The
+    figure stays put on small machines: it is a floor, never a reduction.
+    """
+
+    from omarag_bridge import config
+
+    monkeypatch.setattr(config, "_total_memory_mb", lambda: 8 * 1024)
+    assert config.default_query_memory_max_mb() == 3584
+
+    monkeypatch.setattr(config, "_total_memory_mb", lambda: 16 * 1024)
+    assert config.default_query_memory_max_mb() > 3584
+
+    monkeypatch.setattr(config, "_total_memory_mb", lambda: 4 * 1024)
+    assert config.default_query_memory_max_mb() == 3584
+
+
+def test_the_query_budget_never_crowds_out_the_answer_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama holds the chat model resident beside the worker; a budget that
+    ignores it would trade a silent kill for a swapping machine."""
+
+    from omarag_bridge import config
+
+    monkeypatch.setattr(config, "_total_memory_mb", lambda: 64 * 1024)
+    assert config.default_query_memory_max_mb() <= 64 * 1024 // 2
