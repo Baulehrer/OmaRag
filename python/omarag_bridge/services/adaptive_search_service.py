@@ -34,6 +34,10 @@ class _FacetSearchBatch:
     rows: dict[str, Any]
     hydrated_chunks: list[SearchHit]
     hydration_failed: bool = False
+    # Why hydration failed.  Without it, "book_router_hydration=degraded" says
+    # the register contributed nothing but not whether the worker died, the
+    # deadline expired, or the chunk ids were stale.
+    hydration_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -133,10 +137,14 @@ class AdaptiveSearchService:
         absorb_searches(search_batch, required_facets)
         absorb_routes(routes, search_batch.hydrated_chunks)
         if search_batch.hydration_failed:
-            route_notes.append("book_router_hydration=degraded")
+            route_notes.append(
+                "book_router_hydration=degraded"
+                + (f"; {search_batch.hydration_reason}" if search_batch.hydration_reason else "")
+            )
         fused = weighted_rrf(rankings, weights, limit=stage_a_cap)
 
         rerank_started = time.perf_counter()
+        rerank_failure: str | None = None
         try:
             scores = await self.adapter.rerank(
                 database,
@@ -145,7 +153,11 @@ class AdaptiveSearchService:
             )
             if len(scores) != len(fused):
                 raise RuntimeError("reranker score count mismatch")
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - degrade safely, but say why
+            # A worker that died, a deadline that expired and a score-count
+            # mismatch all end here and all need different fixes.  Discarding
+            # the cause made an intermittent failure impossible to diagnose.
+            rerank_failure = f"{type(exc).__name__}: {exc}"[:160]
             scores = []
         search_ms = (time.perf_counter() - search_started) * 1000
         if not scores:
@@ -162,7 +174,8 @@ class AdaptiveSearchService:
             )
             notes.insert(
                 1,
-                "reranker=degraded; scores are uncalibrated and no relevance is claimed",
+                "reranker=degraded; scores are uncalibrated and no relevance is claimed"
+                + (f"; {rerank_failure}" if rerank_failure else ""),
             )
             notes.extend(route_notes)
             return ranked, RetrievalExplanation(
@@ -253,7 +266,14 @@ class AdaptiveSearchService:
                 weights.pop(path, None)
             absorb_routes(stage_b_routes, stage_b_batch.hydrated_chunks)
             if stage_b_batch.hydration_failed:
-                route_notes.append("book_router_hydration_stage_b=degraded")
+                route_notes.append(
+                    "book_router_hydration_stage_b=degraded"
+                    + (
+                        f"; {stage_b_batch.hydration_reason}"
+                        if stage_b_batch.hydration_reason
+                        else ""
+                    )
+                )
             fused = weighted_rrf(rankings, weights, limit=cap)
             new_items = [
                 item for item in fused if item.candidate.chunk_id not in raw_score_by_chunk
@@ -284,8 +304,10 @@ class AdaptiveSearchService:
                     budget=profile_budget,
                     reranker_digest=effective_reranker_digest,
                 )
-            except Exception:
-                route_notes.append("progressive_reranker=degraded")
+            except Exception as exc:  # noqa: BLE001 - degrade safely, but say why
+                route_notes.append(
+                    f"progressive_reranker=degraded; {type(exc).__name__}: {exc}"[:180]
+                )
 
         search_ms = (time.perf_counter() - search_started) * 1000
         rerank_ms = (time.perf_counter() - rerank_started) * 1000
@@ -454,10 +476,14 @@ class AdaptiveSearchService:
                         rows[request.key] = RuntimeError(item.failure.message)
                     else:
                         rows[request.key] = item.hits
+                failure = result.hydration_failure
                 return _FacetSearchBatch(
                     rows=rows,
                     hydrated_chunks=result.hydrated_chunks,
-                    hydration_failed=result.hydration_failure is not None,
+                    hydration_failed=failure is not None,
+                    hydration_reason=(
+                        f"{failure.code}: {failure.message}"[:160] if failure else None
+                    ),
                 )
             except (AttributeError, NotImplementedError):
                 pass

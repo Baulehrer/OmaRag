@@ -194,3 +194,25 @@ async def test_custom_reranker_never_receives_default_calibrated_scores() -> Non
 
     assert ranked == []
     assert "cut=calibration_mismatch" in explanation.provider_notes
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_reranker_reports_why_it_failed() -> None:
+    """Swallowing the reason makes an intermittent fault undiagnosable.
+
+    Retrieval degrades safely -- no relevance is claimed -- but a bare
+    ``except Exception`` discarded the cause, so a search that silently
+    returned nothing on one call and twelve candidates on the next left
+    nothing to investigate.  The exception type is the diagnostic value:
+    a broken pipe means the query worker died, a timeout means it was too
+    slow, and the two need opposite fixes.
+    """
+
+    _ranked, explanation = await AdaptiveSearchService(DegradedRerankerAdapter()).search(
+        Path("/tmp/db"),
+        "Vergleiche Beton und Stahl.",
+        requested_limit=8,
+    )
+
+    note = next(note for note in explanation.provider_notes if note.startswith("reranker=degraded"))
+    assert "RuntimeError" in note, note
