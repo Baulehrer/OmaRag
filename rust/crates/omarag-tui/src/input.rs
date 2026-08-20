@@ -1,12 +1,11 @@
 use crate::{
     FoundryControl, VisualInspectorState, VisualInspectorTab, app_areas, catalog_filter_areas,
     centered, chat_answer_offset, chat_answer_offset_clamped, chat_areas, chat_bold_term_at,
-    chat_selection_text,
-    confirm_import_area, confirm_quit_area, delete_model_confirm_area, evidence_tiles,
-    file_browser_areas, foundry_catalog_areas, foundry_controls, foundry_setup_areas,
-    model_center_areas, pane_inner, performance_profile, related_image_refs, related_page_refs,
-    screen_areas, section_inner, sidebar_navigation_rows, source_citation_row_offset,
-    source_inspector_areas, visual_inspector_areas,
+    chat_selection_text, confirm_import_area, confirm_quit_area, delete_model_confirm_area,
+    evidence_tiles, file_browser_areas, foundry_catalog_areas, foundry_controls,
+    foundry_setup_areas, model_center_areas, pane_inner, performance_profile, related_image_refs,
+    related_page_refs, screen_areas, section_inner, sidebar_navigation_rows,
+    source_citation_row_offset, source_inspector_areas, visual_inspector_areas,
 };
 use crossterm::{
     event::{

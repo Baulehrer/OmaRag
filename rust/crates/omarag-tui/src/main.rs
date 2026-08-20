@@ -2327,8 +2327,7 @@ fn pdf_info(path: &str) -> Option<(bool, u32)> {
 /// Base64 for OSC 52. Hand-rolled to keep a fallback path from pulling in a
 /// dependency; the input is a clipboard selection, so it is never large.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for group in bytes.chunks(3) {
         let b = [
