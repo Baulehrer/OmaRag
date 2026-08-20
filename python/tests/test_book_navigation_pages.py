@@ -148,3 +148,97 @@ def test_running_headers_do_not_count_as_page_content(monkeypatch) -> None:
 
     texts = [line.text for page in pages for line in page.lines]
     assert "1 Grundlagen 12" in texts
+
+
+class _Bbox:
+    def __init__(self, left: float, top: float) -> None:
+        self.l = left  # noqa: E741 - docling's field name
+        self.t = top
+        self.r = left + 10
+        self.b = top - 10
+
+
+class _PicProv:
+    def __init__(self, page_no: int, left: float = 0.0, top: float = 0.0) -> None:
+        self.page_no = page_no
+        self.bbox = _Bbox(left, top)
+
+
+class _Child:
+    def __init__(self, ref: str, text: str, page: int, left: float, top: float) -> None:
+        self.self_ref = ref
+        self.text = text
+        self.label = "text"
+        self.prov = [_PicProv(page, left, top)]
+        self.parent = type("Ref", (), {"cref": "#/pictures/0"})()
+
+
+class _Picture:
+    def __init__(self, page: int) -> None:
+        self.self_ref = "#/pictures/0"
+        self.label = "picture"
+        self.prov = [_PicProv(page)]
+
+
+class _FigureDocument:
+    def __init__(self, children: list[_Child], picture: _Picture) -> None:
+        self.texts = children
+        self.pictures = [picture]
+        self.tables = []
+
+
+def test_text_drawn_inside_a_figure_is_recovered() -> None:
+    """Docling parents text that sits inside a drawing to the picture item, and
+    ``iterate_items`` does not descend there -- so the chunker never sees it.
+
+    Measured on "Tabellenbuch Bau": page 104 carries 140 text items, 138 of
+    them under ``#/pictures/5``, and the chunker produced zero chunks for the
+    page.  The words are already extracted and perfectly readable
+    ("Ermittlung des Abminderungsfaktors"); no vision model is needed to get
+    them back, only a decision to stop discarding them.
+    """
+
+    picture = _Picture(104)
+    document = _FigureDocument(
+        [
+            _Child("#/texts/1", "Ermittlung des", 104, left=10, top=200),
+            _Child("#/texts/2", "Abminderungsfaktors", 104, left=60, top=200),
+            _Child("#/texts/3", "Nur oben und unten gehalten", 104, left=10, top=150),
+        ],
+        picture,
+    )
+
+    recovered = book_v2._picture_text_chunks(document, uncovered_pages={104})
+
+    assert len(recovered) == 1
+    chunk = recovered[0]
+    assert "Ermittlung des Abminderungsfaktors" in chunk.content
+    assert "Nur oben und unten gehalten" in chunk.content
+    assert chunk.metadata["page_numbers"] == [104]
+    assert "#/pictures/0" in chunk.metadata["doc_item_refs"]
+
+
+def test_figure_text_on_a_page_that_already_has_chunks_is_left_alone() -> None:
+    """Only pages the chunker dropped entirely are recovered, so ordinary
+    figure captions are not indexed twice."""
+
+    document = _FigureDocument(
+        [_Child("#/texts/1", "Bild 3: Läuferverband", 105, left=10, top=200)],
+        _Picture(105),
+    )
+
+    assert book_v2._picture_text_chunks(document, uncovered_pages=set()) == []
+
+
+def test_a_figure_holding_only_stray_glyphs_is_not_indexed() -> None:
+    """Axis labels like "ρ" and "n" carry no retrievable meaning on their own."""
+
+    document = _FigureDocument(
+        [
+            _Child("#/texts/1", "ρ", 104, left=10, top=200),
+            _Child("#/texts/2", "n", 104, left=20, top=200),
+        ],
+        _Picture(104),
+    )
+
+    assert book_v2._picture_text_chunks(document, uncovered_pages={104}) == []
