@@ -1038,6 +1038,87 @@ def _pdf_text_lines(source: Path, page_numbers: set[int]) -> dict[int, list[str]
     return lines
 
 
+# A figure whose labels amount to two stray glyphs carries nothing anyone can
+# search for; a flowchart with sentences in it does.
+_MIN_FIGURE_TEXT_WORDS = 4
+
+
+def _picture_text_chunks(document: Any, uncovered_pages: set[int]) -> list[Any]:
+    """Chunks for text that Docling parented to a picture.
+
+    Text drawn inside a figure becomes a child of the picture item, and
+    ``iterate_items`` -- what the chunker walks -- does not descend there.  On a
+    drawing-heavy page that silently loses everything: measured on a
+    construction textbook, page 104 held 140 text items, 138 of them under one
+    picture, and the chunker produced no chunk at all.  The words are already
+    extracted and readable, so recovering them needs no vision model.
+
+    Only pages that came out of chunking empty are recovered, so an ordinary
+    figure caption beside body text is not indexed a second time.
+    """
+
+    if not uncovered_pages:
+        return []
+    try:
+        from haiku.rag.store.models.chunk import Chunk
+    except ImportError:  # pragma: no cover - ships with the document extra
+        return []
+
+    children: dict[str, list[Any]] = {}
+    for item in _value(document, "texts", default=[]) or []:
+        parent = _value(_value(item, "parent", default=None), "cref", default="") or ""
+        if str(parent).startswith("#/pictures/"):
+            children.setdefault(str(parent), []).append(item)
+
+    recovered: list[Any] = []
+    for picture in _value(document, "pictures", default=[]) or []:
+        reference = str(_value(picture, "self_ref", default="") or "")
+        items = children.get(reference) or []
+        if not items:
+            continue
+        pages = sorted(
+            {
+                page
+                for item in items
+                for provenance in (_value(item, "prov", default=[]) or [])
+                if (page := int(_value(provenance, "page_no", default=0) or 0))
+            }
+        )
+        if not pages or not set(pages) & uncovered_pages:
+            continue
+
+        def _position(item: Any) -> tuple[float, float]:
+            provenance = next(iter(_value(item, "prov", default=[]) or []), None)
+            bbox = _docling_bbox(provenance) if provenance is not None else None
+            left, _bottom, _right, top = bbox or (0.0, 0.0, 0.0, 0.0)
+            # Reading order: down the page, then left to right.
+            return (-top, left)
+
+        ordered = sorted(items, key=_position)
+        text = " ".join(
+            stripped
+            for item in ordered
+            if (stripped := str(_value(item, "text", default="") or "").strip())
+        )
+        if len(text.split()) < _MIN_FIGURE_TEXT_WORDS:
+            continue
+        recovered.append(
+            Chunk(
+                content=text,
+                metadata={
+                    "doc_item_refs": [
+                        reference,
+                        *[str(_value(item, "self_ref", default="") or "") for item in ordered],
+                    ],
+                    "labels": ["text", "picture"],
+                    "page_numbers": pages,
+                    "headings": [],
+                },
+            )
+        )
+    return recovered
+
+
 def collect_docling_book_signals(
     document: Any,
     page_range: PageRange,
@@ -2155,6 +2236,23 @@ async def ingest_pdf_book_v2(
                     # pass 1 reached N/N; phase names still expose pass-2 work.
                     await on_phase("chunking", total_pages, total_pages, total_pages)
                 chunks = _content_chunks(await rag.chunk(docling_document))
+                # Pages the chunker dropped whole: on a drawing-heavy page all
+                # the text hangs under the picture item, where `iterate_items`
+                # never goes.  Recover it before provenance is attached so it
+                # travels the ordinary evidence path.
+                covered = {
+                    page
+                    for chunk in chunks
+                    for page in _integers(
+                        (_value(chunk, "metadata", default={}) or {}).get("page_numbers")
+                    )
+                }
+                chunks.extend(
+                    _picture_text_chunks(
+                        docling_document,
+                        {page for page in range(start_page, end_page + 1) if page not in covered},
+                    )
+                )
                 chunks = patch_chunks_from_structure(
                     logical_document_id=logical_id,
                     document=docling_document,
