@@ -8,8 +8,9 @@ import time
 import unicodedata
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from .. import __version__
@@ -35,6 +36,50 @@ from .query_v2 import classify_query, performance_budget
 from .reranker_service import DEFAULT_RERANKER, DEFAULT_RERANKER_REVISION, _model_digest
 from .resource_coordinator import ResourceCoordinator
 from .workspace_service import WorkspaceService
+
+
+@dataclass
+class _QueryDeadline:
+    """The absolute request budget, plus what the request actually spent it on.
+
+    The budget is meant to bound the *work* a question causes. Time spent
+    queueing for a free model slot is not work — charging it to the answer is
+    how a cold model load turned a 15s budget into QUERY_DEADLINE_EXCEEDED
+    before the search had even started. Waiting is therefore credited back,
+    but only up to a ceiling, so a stuck lease still fails instead of hanging.
+    """
+
+    started_at: float
+    timeout_ms: int
+    handle: Any = None
+    admission_wait_ms: float = 0.0
+    credited_ms: float = 0.0
+    phase_label: str = field(default="Starting")
+
+    MAX_ADMISSION_CREDIT_MS: ClassVar[float] = 30_000.0
+
+    def credit_admission_wait(self, waited_ms: float) -> None:
+        self.admission_wait_ms = waited_ms
+        credit = min(max(waited_ms, 0.0), self.MAX_ADMISSION_CREDIT_MS)
+        if credit <= 0.0 or self.handle is None:
+            return
+        self.credited_ms = credit
+        with suppress(RuntimeError, AttributeError):
+            # RuntimeError: the budget already expired and the reschedule is
+            # moot — the cancellation is on its way to us either way.
+            self.handle.reschedule(self.started_at + (self.timeout_ms + credit) / 1000)
+
+    def expiry_message(self, elapsed_seconds: float) -> str:
+        parts = [
+            f"Query deadline exceeded after {elapsed_seconds:.1f}s",
+            f"while {self.phase_label.casefold()}",
+        ]
+        if self.admission_wait_ms >= 500.0:
+            parts.append(
+                f"({self.admission_wait_ms / 1000:.1f}s of it waiting for a free model slot)"
+            )
+        return " ".join(parts)
+
 
 STRICT_REFUSAL = "In den bereitgestellten Quellen nicht ausreichend belegt."
 _TECHNICAL_TOKEN = re.compile(
@@ -98,6 +143,7 @@ class RunService:
         self.workspace_context_tokens = workspace_context_tokens
         self.query = QueryOrchestrator(store, adapter, ollama_url)
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._deadlines: dict[str, _QueryDeadline] = {}
         self.index_gate: Callable[[str], None] | None = None
         self.visual_evidence_builder: Callable[[str], object] | None = None
         self.content_egress_guard: Callable[[str, str], None] | None = None
@@ -215,11 +261,15 @@ class RunService:
             or (15_000 if options.get("profile") == "fast" else 0)
             or (60_000 if request.get("mode") == "analysis" else plan_deadline_ms)
         )
+        deadline = _QueryDeadline(started_at=deadline_started_at, timeout_ms=timeout_ms)
+        self._deadline_registry()[run_id] = deadline
         try:
             # This is the absolute request budget: readiness, cache validation,
-            # resource admission, retrieval, generation and persistence all fit
-            # inside the same clock.
-            async with asyncio.timeout_at(deadline_started_at + timeout_ms / 1000):
+            # retrieval, generation and persistence all fit inside the same
+            # clock. Queueing for a free model slot does not — see
+            # `_QueryDeadline.credit_admission_wait`.
+            async with asyncio.timeout_at(deadline_started_at + timeout_ms / 1000) as budget:
+                deadline.handle = budget
                 await self._execute_inner(run_id)
         except TimeoutError:
             run = self.store.get_run(run_id)
@@ -228,12 +278,22 @@ class RunService:
                 JobStatus.CANCELLED,
                 JobStatus.FAILED,
             }:
+                elapsed = asyncio.get_running_loop().time() - deadline_started_at
                 await self._fail(
                     run,
                     "QUERY_DEADLINE_EXCEEDED",
-                    "Query deadline exceeded",
+                    deadline.expiry_message(elapsed),
                     True,
                 )
+        finally:
+            self._deadline_registry().pop(run_id, None)
+
+    def _deadline_registry(self) -> dict[str, _QueryDeadline]:
+        registry = getattr(self, "_deadlines", None)
+        if registry is None:
+            registry = {}
+            self._deadlines = registry
+        return registry
 
     async def _execute_inner(self, run_id: str) -> None:
         run = self.store.get_run(run_id)
@@ -245,9 +305,14 @@ class RunService:
         phase_started = started
         current_phase: str | None = None
         phase_timings: dict[str, float] = {}
+        deadline = self._deadline_registry().get(run_id)
 
         async def phase(name: str, label: str) -> None:
             nonlocal current_phase, phase_started
+            if deadline is not None:
+                # So an expiry can name what the request was doing instead of
+                # only that it ran out of time.
+                deadline.phase_label = label
             now = time.perf_counter()
             if current_phase is not None:
                 phase_timings[current_phase] = (now - phase_started) * 1000
@@ -421,7 +486,13 @@ class RunService:
                 if self.content_egress_guard is not None:
                     self.content_egress_guard(run.workspace_id, self.ollama_url)
                 database = self.workspaces.database_path(run.workspace_id)
+                await phase("admission", "Waiting for a free model slot")
+                admission_started = asyncio.get_running_loop().time()
                 async with self.resources.chat():
+                    if deadline is not None:
+                        deadline.credit_admission_wait(
+                            (asyncio.get_running_loop().time() - admission_started) * 1000
+                        )
                     if self.index_gate is not None:
                         self.index_gate(run.workspace_id)
                     # The inventory used for the cache key was read before

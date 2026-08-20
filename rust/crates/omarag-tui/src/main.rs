@@ -73,6 +73,7 @@ enum BackendMessage {
     ExternalOpened(Result<(), String>),
     ClipboardCopied {
         selection: bool,
+        characters: usize,
         result: Result<(), String>,
     },
     ImportAnalyzed(ImportPreflight),
@@ -1753,10 +1754,12 @@ fn spawn_command(
             }
             UiCommand::CopyText(value) => BackendMessage::ClipboardCopied {
                 selection: false,
+                characters: value.chars().count(),
                 result: copy_text(&value),
             },
             UiCommand::CopySelection(value) => BackendMessage::ClipboardCopied {
                 selection: true,
+                characters: value.chars().count(),
                 result: copy_text(&value),
             },
         };
@@ -2321,8 +2324,44 @@ fn pdf_info(path: &str) -> Option<(bool, u32)> {
     Some((encrypted, pages))
 }
 
+/// Base64 for OSC 52. Hand-rolled to keep a fallback path from pulling in a
+/// dependency; the input is a clipboard selection, so it is never large.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let b = [
+            group[0],
+            group.get(1).copied().unwrap_or(0),
+            group.get(2).copied().unwrap_or(0),
+        ];
+        let packed = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for index in 0..4 {
+            if index <= group.len() {
+                let shift = 18 - index * 6;
+                out.push(char::from(ALPHABET[((packed >> shift) & 0x3F) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Ask the terminal itself to hold the text. This is the only route that works
+/// over SSH, and the only one left when neither helper is installed. Terminals
+/// may refuse it, which we cannot detect — hence last, never first.
+fn copy_via_terminal(value: &str) -> Result<(), String> {
+    let mut out = std::io::stdout();
+    write!(out, "\x1b]52;c;{}\x07", base64_encode(value.as_bytes()))
+        .map_err(|error| format!("No clipboard helper available: {error}"))?;
+    out.flush()
+        .map_err(|error| format!("No clipboard helper available: {error}"))
+}
+
 fn copy_text(value: &str) -> Result<(), String> {
-    let mut child = Command::new("wl-copy")
+    let spawned = Command::new("wl-copy")
         .stdin(Stdio::piped())
         .spawn()
         .or_else(|_| {
@@ -2330,8 +2369,11 @@ fn copy_text(value: &str) -> Result<(), String> {
                 .args(["-selection", "clipboard"])
                 .stdin(Stdio::piped())
                 .spawn()
-        })
-        .map_err(|error| format!("No clipboard helper available: {error}"))?;
+        });
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(_) => return copy_via_terminal(value),
+    };
     let mut stdin = child
         .stdin
         .take()
@@ -2561,17 +2603,26 @@ fn apply_backend_message(state: &mut AppState, message: BackendMessage) -> bool 
                 notify_error(state, error);
             }
         }
-        BackendMessage::ClipboardCopied { selection, result } => match result {
+        BackendMessage::ClipboardCopied {
+            selection,
+            characters,
+            result,
+        } => match result {
             Ok(()) => {
+                // Say how much landed in the clipboard. A selection made by
+                // dragging has no other confirmation that it caught what the
+                // eye thought it caught.
+                let what = if selection { "Selection" } else { "Text" };
+                let unit = if characters == 1 {
+                    "character"
+                } else {
+                    "characters"
+                };
                 update(
                     state,
                     Action::Notify(Notification {
                         level: NotificationLevel::Info,
-                        message: if selection {
-                            "Selection copied.".into()
-                        } else {
-                            "Copied to clipboard.".into()
-                        },
+                        message: format!("{what} copied — {characters} {unit}."),
                     }),
                 );
             }
@@ -3083,13 +3134,14 @@ mod tests {
             &mut state,
             BackendMessage::ClipboardCopied {
                 selection: true,
+                characters: 12,
                 result: Ok(()),
             },
         );
 
         assert_eq!(
             state.notifications.last().map(|item| item.message.as_str()),
-            Some("Selection copied.")
+            Some("Selection copied — 12 characters.")
         );
     }
 

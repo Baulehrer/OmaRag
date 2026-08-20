@@ -54,6 +54,11 @@ class ResourceCoordinator:
         self._chat_active = False
         self._active_indexers = 0
         self._waiting_chats = 0
+        # Warming up is preparation *for* a question, so it deliberately does
+        # not occupy the chat slot. It is tracked separately: indexing still
+        # yields to it, and it aborts as soon as a question actually arrives.
+        self._warming = False
+        self._warm_preempt = asyncio.Event()
         self._max_residency_seconds = max_residency_seconds
         self._recent_query_uses = 0
         self._last_query_completed_at = 0.0
@@ -63,7 +68,16 @@ class ResourceCoordinator:
 
     @property
     def busy(self) -> bool:
-        return self._chat_active or self._active_indexers > 0
+        return self._chat_active or self._warming or self._active_indexers > 0
+
+    @property
+    def warming(self) -> bool:
+        return self._warming
+
+    def warm_preempted(self) -> bool:
+        """True once a question is waiting; a warm-up must stop at this point."""
+
+        return self._warm_preempt.is_set()
 
     @property
     def active_indexers(self) -> int:
@@ -139,6 +153,11 @@ class ResourceCoordinator:
     async def chat(self) -> AsyncIterator[None]:
         async with self._condition:
             self._waiting_chats += 1
+            # A warm-up exists to make this very question faster. Letting it
+            # finish first would charge its model load to the question's own
+            # deadline, which is how a cold model turned a 15s budget into a
+            # QUERY_DEADLINE_EXCEEDED. Tell it to stop and do not wait for it.
+            self._warm_preempt.set()
             try:
                 await self._condition.wait_for(
                     lambda: not self._chat_active and self._active_indexers == 0
@@ -167,7 +186,8 @@ class ResourceCoordinator:
             if self.busy or self._waiting_chats:
                 admission = "skipped_busy"
             else:
-                self._chat_active = True
+                self._warm_preempt.clear()
+                self._warming = True
                 admission = "ready"
         if admission != "ready":
             yield admission
@@ -176,7 +196,7 @@ class ResourceCoordinator:
             yield "ready"
         finally:
             async with self._condition:
-                self._chat_active = False
+                self._warming = False
                 self._condition.notify_all()
 
     @asynccontextmanager
@@ -184,14 +204,16 @@ class ResourceCoordinator:
         """Admit one conversion unit.
 
         Questions keep absolute priority: a waiting chat blocks new admissions,
-        and an active chat excludes indexing entirely. Beyond that, `slots`
-        conversions may overlap — 1 unless memory is plainly abundant.
+        and an active chat excludes indexing entirely. A warm-up counts the same
+        way, because it is a question that has not been sent yet. Beyond that,
+        `slots` conversions may overlap — 1 unless memory is plainly abundant.
         """
         await self._wait_for_memory()
         async with self._condition:
             await self._condition.wait_for(
                 lambda: (
                     not self._chat_active
+                    and not self._warming
                     and self._waiting_chats == 0
                     and self._active_indexers < self.conversion_slots()
                 )

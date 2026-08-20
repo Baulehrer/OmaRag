@@ -1,6 +1,7 @@
 use crate::{
     FoundryControl, VisualInspectorState, VisualInspectorTab, app_areas, catalog_filter_areas,
-    centered, chat_answer_offset, chat_areas, chat_bold_term_at, chat_selection_text,
+    centered, chat_answer_offset, chat_answer_offset_clamped, chat_areas, chat_bold_term_at,
+    chat_selection_text,
     confirm_import_area, confirm_quit_area, delete_model_confirm_area, evidence_tiles,
     file_browser_areas, foundry_catalog_areas, foundry_controls, foundry_setup_areas,
     model_center_areas, pane_inner, performance_profile, related_image_refs, related_page_refs,
@@ -586,6 +587,23 @@ fn handle_mouse_primary(
                         selection.focus = offset;
                         selection.moved |= selection.anchor != offset;
                     }
+                } else if !activate
+                    && !state.chat.answer.is_empty()
+                    && mouse.row >= chat.answer.y
+                    && let Some(selection) = state.chat.selection.as_mut()
+                    && let Some(offset) = chat_answer_offset_clamped(
+                        &state.chat.answer,
+                        state.citation_cursor,
+                        chat.answer.width,
+                        state.chat_scroll,
+                        mouse.column.saturating_sub(chat.answer.x),
+                        mouse.row.saturating_sub(chat.answer.y),
+                    )
+                {
+                    // Dragging past the end of a line still extends the
+                    // selection; that is where a hand naturally stops.
+                    selection.focus = offset;
+                    selection.moved |= selection.anchor != offset;
                 }
             }
             View::Books => {
@@ -756,7 +774,7 @@ fn finish_chat_selection(
         && mouse.row >= chat.answer.y
         && mouse.row < chat.answer.bottom();
     if released_on_answer
-        && let Some(offset) = chat_answer_offset(
+        && let Some(offset) = chat_answer_offset_clamped(
             &state.chat.answer,
             state.citation_cursor,
             chat.answer.width,

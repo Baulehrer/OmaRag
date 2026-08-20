@@ -162,6 +162,98 @@ async def test_outer_deadline_includes_register_complexity(
     assert deadlines[0] - started >= 24.9
 
 
+def _deadline_service() -> Any:
+    class DeadlineStore:
+        @staticmethod
+        def get_run_request(_run_id: str) -> dict[str, Any]:
+            return {"question": "Erläutere Kriechen.", "mode": "rag", "options": {}}
+
+        @staticmethod
+        def get_run(_run_id: str) -> Any:
+            return SimpleNamespace(workspace_id="ws-1", session_id="session-1", status="running")
+
+        @staticmethod
+        def route_book_knowledge(*_args: Any, **_kwargs: Any) -> list[dict[str, str]]:
+            return [{"term_id": "term-1"}, {"term_id": "term-2"}]
+
+    service = RunService.__new__(RunService)
+    service.store = DeadlineStore()
+    service.adapter = SimpleNamespace(capabilities=SimpleNamespace(adaptive_retrieval=True))
+    service.query = SimpleNamespace(
+        standalone_question=lambda *_args, **_kwargs: ("Erläutere Kriechen.", False)
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_a_model_slot_does_not_shorten_the_answer_budget() -> None:
+    """Queueing is not work, so it must not be charged to the answer.
+
+    A warm-up holding the model slot used to consume a question's entire
+    budget before retrieval began; the run then failed as though the question
+    itself had been too slow.
+    """
+    service = _deadline_service()
+    seen: dict[str, float] = {}
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.credit_admission_wait(12_000.0)
+        seen["when"] = deadline.handle.when()
+
+    service._execute_inner = execute_inner
+    started = run_module.asyncio.get_running_loop().time()
+    await service._execute("run-credit")
+
+    # 25s of register-complexity budget, plus the 12s spent queueing.
+    assert seen["when"] - started >= 36.5
+    assert not service._deadline_registry()
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_model_slot_still_fails_the_request() -> None:
+    service = _deadline_service()
+    seen: dict[str, float] = {}
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.credit_admission_wait(600_000.0)
+        seen["when"] = deadline.handle.when()
+
+    service._execute_inner = execute_inner
+    started = run_module.asyncio.get_running_loop().time()
+    await service._execute("run-capped")
+
+    # Ten minutes of waiting buys 30s and no more.
+    assert 54.5 <= seen["when"] - started <= 55.5
+
+
+@pytest.mark.asyncio
+async def test_an_expired_request_says_what_it_was_doing() -> None:
+    service = _deadline_service()
+    failures: list[tuple[str, str]] = []
+
+    async def fail(_run: Any, code: str, message: str, retryable: bool) -> None:
+        assert retryable
+        failures.append((code, message))
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.phase_label = "Waiting for a free model slot"
+        deadline.admission_wait_ms = 14_200.0
+        raise TimeoutError
+
+    service._execute_inner = execute_inner
+    service._fail = fail
+    await service._execute("run-expired")
+
+    assert len(failures) == 1
+    code, message = failures[0]
+    assert code == "QUERY_DEADLINE_EXCEEDED"
+    assert "waiting for a free model slot" in message
+    assert "14.2s" in message
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_prefers_batched_search_many_when_adapter_exposes_it(
     monkeypatch: pytest.MonkeyPatch,
