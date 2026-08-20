@@ -429,7 +429,12 @@ class QueryOrchestrator:
             if selection.cutoff_reason == "calibration_mismatch":
                 fallbacks.append("calibration_mismatch")
             return self._insufficient(
-                plan, budget, timings, fallbacks + ["relevance_threshold"], fused=len(fused)
+                plan,
+                budget,
+                timings,
+                fallbacks + ["relevance_threshold"],
+                fused=len(fused),
+                rerank_status=rerank_status,
             )
         phase = time.perf_counter()
         windows = pack_evidence_windows(
@@ -441,7 +446,12 @@ class QueryOrchestrator:
         timings["pack"] = (time.perf_counter() - phase) * 1000
         if not windows:
             return self._insufficient(
-                plan, budget, timings, fallbacks + ["evidence_pack_empty"], fused=len(fused)
+                plan,
+                budget,
+                timings,
+                fallbacks + ["evidence_pack_empty"],
+                fused=len(fused),
+                rerank_status=rerank_status,
             )
 
         citations = self._citations(windows, selected, fused, selection.selected)
@@ -512,12 +522,24 @@ class QueryOrchestrator:
                         )
                         if verification_needed and self.claim_verifier is None:
                             fallbacks.append("claim_verifier_unavailable")
+                    unverified_reason: str | None = None
                     if verification is not None:
                         verifier_calls += 1
-                        if verification.verdict != "entailed":
+                        if verification.verdict == "contradicted":
                             rejected += 1
                             fallbacks.append(f"claim_verifier_{verification.reason or 'rejected'}")
                             continue
+                        if verification.verdict != "entailed":
+                            # "unknown" means nobody was able to check, not that
+                            # the claim is false. Treating the two alike threw
+                            # away every claim drawn from a table: a table always
+                            # asks to be verified, and no verifier is wired in,
+                            # so the answer was discarded and the question came
+                            # back as unsupported. Keep the claim and say plainly
+                            # that it is unverified; only a refutation drops it.
+                            unverified_reason = verification.reason or "unknown"
+                            fallbacks.append(f"claim_verifier_{unverified_reason}")
+                            verification = None
                     stable_evidence_ids = [
                         citation_by_evidence[evidence_id].evidence_id or evidence_id
                         for evidence_id in block.evidence_ids
@@ -546,7 +568,7 @@ class QueryOrchestrator:
                         else "verifier-off"
                         if str(options.get("verifier") or "auto") == "off"
                         else "verifier-unavailable"
-                        if verification_needed and self.claim_verifier is None
+                        if unverified_reason is not None
                         else "protocol-literal-checked"
                         if validation.technical_literals
                         else "protocol-lexical-aligned"
@@ -594,6 +616,7 @@ class QueryOrchestrator:
                 selected=len(selected),
                 rejected=rejected,
                 digest=final_event.model_digest if final_event else None,
+                rerank_status=rerank_status,
             )
         supported_facets = {
             claim.facet_id
@@ -678,12 +701,15 @@ class QueryOrchestrator:
             ),
             verifier_digest=(str(verifier_digest) if verifier_digest else None),
             verifier_status=(
-                "applied"
-                if verifier_calls
-                else "disabled"
+                "disabled"
                 if str(options.get("verifier") or "auto") == "off"
+                # `verifier_calls` also counts fail-closed verdicts, so it alone
+                # cannot tell "a verifier ran" from "one was asked for and was
+                # missing".
                 else "unavailable"
-                if "claim_verifier_unavailable" in fallbacks
+                if self.claim_verifier is None and verifier_calls
+                else "applied"
+                if verifier_calls
                 else "not-triggered"
             ),
             typed_evidence_status=(
@@ -1060,6 +1086,7 @@ class QueryOrchestrator:
         selected: int = 0,
         rejected: int = 0,
         digest: str | None = None,
+        rerank_status: str = "not_run",
     ) -> OrchestratedAnswer:
         text = "In den bereitgestellten Quellen nicht ausreichend belegt."
         claim = AnswerClaim(id="C1", text=text, evidence_ids=[], status=ClaimStatus.INSUFFICIENT)
@@ -1072,7 +1099,7 @@ class QueryOrchestrator:
             budgets=budget,
             candidate_count=fused,
             selected_count=selected,
-            rerank_status="not_run",
+            rerank_status=rerank_status,
             cut_reason="insufficient",
             facet_coverage={facet.id: False for facet in plan.facets},
             fallbacks=tuple(dict.fromkeys(fallbacks)),

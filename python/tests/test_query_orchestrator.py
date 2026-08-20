@@ -469,9 +469,16 @@ async def test_orchestrator_fails_closed_for_unbound_custom_reranker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_risky_claim_fails_closed_when_verifier_is_unavailable(
+async def test_a_claim_nobody_could_check_is_kept_and_labelled_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unknown verdict is not a refutation.
+
+    No `ClaimVerifier` implementation is wired in, and a table or formula
+    always asks to be verified — so treating "unknown" like "contradicted"
+    discarded every claim drawn from a table and answered "not sufficiently
+    supported" to questions the sources answered perfectly well.
+    """
     FakeOllama.blocks = (
         '<claim>{"id":"C1","text":"Der Grenzwert beträgt 42 mm.",'
         '"evidence_ids":["E1"],"facet_id":"F1","status":"supported"}</claim>',
@@ -491,9 +498,55 @@ async def test_risky_claim_fails_closed_when_verifier_is_unavailable(
         resolved_model_identity=OllamaModelIdentity("qwen3.5:4b", "generator-digest", 1),
     )
 
-    assert answer.abstention == "full"
+    assert answer.abstention == "none"
+    assert [claim.text for claim in answer.claims] == ["Der Grenzwert beträgt 42 mm."]
+    assert answer.claims[0].verification_status == "verifier-unavailable"
+    assert answer.rejected_claims == 0
+    # Nothing is hidden: the receipt still says a verifier was wanted and missing.
     assert "claim_verifier_unavailable" in answer.fallbacks
     assert "claim_verifier_verifier-unavailable" in answer.fallbacks
+    assert answer.verifier_status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a_refuted_claim_is_still_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relaxation applies to "unknown" only. A verdict still binds."""
+
+    class RefutingVerifier:
+        digest = "verifier-digest"
+
+        async def verify(self, _claim: Any, _evidence: Any) -> Any:
+            from omarag_bridge.services.query_v2 import ClaimVerification
+
+            return ClaimVerification("contradicted", "refuted")
+
+    FakeOllama.blocks = (
+        '<claim>{"id":"C1","text":"Der Grenzwert beträgt 42 mm.",'
+        '"evidence_ids":["E1"],"facet_id":"F1","status":"supported"}</claim>',
+    )
+    monkeypatch.setattr(module, "OllamaStreamClient", FakeOllama)
+
+    answer = await QueryOrchestrator(
+        FakeStore(),
+        FakeAdapter(),
+        "http://ollama.invalid",
+        claim_verifier=RefutingVerifier(),
+    ).answer(
+        workspace_id="ws-1",
+        database=Path("/tmp/db"),
+        run_id="run-refuted",
+        session_id="session-1",
+        question="Was ist der Grenzwert?",
+        evidence_mode=EvidenceMode.STRICT,
+        document_filter=None,
+        options={},
+        model="qwen3.5:4b",
+        resolved_model_identity=OllamaModelIdentity("qwen3.5:4b", "generator-digest", 1),
+    )
+
+    assert answer.abstention == "full"
+    assert answer.rejected_claims == 1
+    assert "claim_verifier_refuted" in answer.fallbacks
 
 
 @pytest.mark.asyncio
