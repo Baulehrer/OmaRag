@@ -1297,7 +1297,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             keep_seconds = services.resources.residency_seconds()
             keep_alive = f"{max(1, round(keep_seconds))}s"
             warmed: list[str] = []
+
+            def yielded() -> WarmupResponse | None:
+                # A question that arrived mid-warmup is already counting down
+                # its own deadline. Stop here rather than make it wait for a
+                # model load it would otherwise have paid for itself.
+                if not services.resources.warm_preempted():
+                    return None
+                if warmed:
+                    return WarmupResponse(
+                        status=WarmupStatus.READY,
+                        warmed_roles=warmed,
+                        keep_alive_seconds=keep_seconds,
+                        detail="A question arrived; stopped after the roles listed.",
+                    )
+                return WarmupResponse(
+                    status=WarmupStatus.SKIPPED_BUSY,
+                    detail="A question arrived and takes priority.",
+                )
+
+            if (yielded_early := yielded()) is not None:
+                return yielded_early
             await services.adapter.warm(services.workspaces.database_path(workspace_id))
+            if (yielded_early := yielded()) is not None:
+                return yielded_early
             if chat:
                 profile = model_settings.get("profile")
                 profile_context = (
@@ -1309,6 +1332,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     keep_alive,
                 )
                 warmed.append("chat")
+            if (yielded_early := yielded()) is not None:
+                return yielded_early
             if embedding and embedding != chat:
                 await services.models.warm_embedding(embedding, keep_alive)
                 warmed.append("embedding")

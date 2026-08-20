@@ -138,7 +138,14 @@ def test_physical_delete_restores_directory_when_store_fails(
 
 
 async def test_chat_gets_next_heavy_resource_slot() -> None:
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
     resources = ResourceCoordinator()
+    # `indexing()` waits for memory before it queues, so a loaded test machine
+    # would otherwise decide the outcome instead of the priority rule.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=32 * 1024**3, available=24 * 1024**3, reserve=2 * 1024**3
+    )
     order: list[str] = []
     release = asyncio.Event()
 
@@ -322,3 +329,105 @@ def test_an_explicit_torch_compile_choice_is_respected(
     configure_process_environment()
 
     assert os.environ["TORCHDYNAMO_SUPPRESS_ERRORS"] == "0"
+
+
+async def test_a_question_never_queues_behind_a_warmup() -> None:
+    """The warm-up exists to serve the next question, not to delay it.
+
+    It used to hold the same exclusive slot as a question. A cold model load
+    takes on the order of fifteen seconds, so a question typed and sent while
+    the warm-up ran spent its entire deadline queueing and failed with
+    QUERY_DEADLINE_EXCEEDED before retrieval had started.
+    """
+    resources = ResourceCoordinator()
+    warm_running = asyncio.Event()
+    let_warm_finish = asyncio.Event()
+    answered = False
+
+    async def warm() -> None:
+        async with resources.warmup() as admission:
+            assert admission == "ready"
+            warm_running.set()
+            await let_warm_finish.wait()
+
+    async def question() -> None:
+        nonlocal answered
+        async with resources.chat():
+            answered = True
+
+    warming = asyncio.create_task(warm())
+    await warm_running.wait()
+    assert not resources.warm_preempted()
+
+    asking = asyncio.create_task(question())
+    for _ in range(4):
+        await asyncio.sleep(0)
+
+    assert answered, "the question must not wait for a warm-up to finish"
+    assert resources.warm_preempted(), "the warm-up must be told to stop"
+
+    let_warm_finish.set()
+    await asyncio.gather(warming, asking)
+
+
+async def test_indexing_still_yields_to_a_warmup() -> None:
+    """A warm-up is a question that has not been sent yet.
+
+    Letting a conversion start beside it would put the two heaviest memory
+    consumers on the machine at the same moment.
+    """
+    resources = ResourceCoordinator()
+    warm_running = asyncio.Event()
+    let_warm_finish = asyncio.Event()
+    converted = False
+
+    async def warm() -> None:
+        async with resources.warmup() as admission:
+            assert admission == "ready"
+            warm_running.set()
+            await let_warm_finish.wait()
+
+    async def convert() -> None:
+        nonlocal converted
+        async with resources.indexing():
+            converted = True
+
+    warming = asyncio.create_task(warm())
+    await warm_running.wait()
+    converting = asyncio.create_task(convert())
+    for _ in range(4):
+        await asyncio.sleep(0)
+
+    assert not converted, "indexing must not run beside a warm-up"
+    let_warm_finish.set()
+    await asyncio.gather(warming, converting)
+    assert converted
+
+
+def test_a_warm_query_runtime_outlives_one_question_when_there_is_room() -> None:
+    """Reaping the query worker after 30s is a badly priced trade.
+
+    Rebuilding it reloads the reranker's 201 weight tensors: measured at 7.2s
+    against 0.65s of actual scoring. A question asked a minute after the last
+    one therefore paid ten times over for the memory the short residency saved.
+    """
+    from omarag_bridge.services.resource_coordinator import MemorySnapshot
+
+    resources = ResourceCoordinator()
+
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=32 * 1024**3, available=16 * 1024**3, reserve=2 * 1024**3
+    )
+    assert resources.residency_seconds() >= 180.0
+
+    # A machine that is "ready" only by a hair keeps the cautious ramp.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=2560 * 1024**2, reserve=1200 * 1024**2
+    )
+    assert resources.residency_seconds() == 30.0
+
+    # Under pressure nothing stays resident at all.
+    resources.memory = lambda: MemorySnapshot(  # type: ignore[method-assign]
+        total=8 * 1024**3, available=1024**3, reserve=1200 * 1024**2
+    )
+    assert resources.residency_seconds() == 0.0

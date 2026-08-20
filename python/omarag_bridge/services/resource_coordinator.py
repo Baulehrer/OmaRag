@@ -41,6 +41,10 @@ def _memory_snapshot() -> MemorySnapshot:
 # budget in `segment_pages` at the largest unit it will hand out.
 _CONVERSION_PEAK_BYTES = 2 * 1024**3
 
+# Roughly what a query worker holds: the process, the store and the loaded
+# cross-encoder. Used only to decide whether keeping one around is affordable.
+_QUERY_WORKER_BYTES = 1536 * 1024**2
+
 
 class ResourceCoordinator:
     """Serialize memory-heavy work and prioritize interactive questions."""
@@ -54,6 +58,11 @@ class ResourceCoordinator:
         self._chat_active = False
         self._active_indexers = 0
         self._waiting_chats = 0
+        # Warming up is preparation *for* a question, so it deliberately does
+        # not occupy the chat slot. It is tracked separately: indexing still
+        # yields to it, and it aborts as soon as a question actually arrives.
+        self._warming = False
+        self._warm_preempt = asyncio.Event()
         self._max_residency_seconds = max_residency_seconds
         self._recent_query_uses = 0
         self._last_query_completed_at = 0.0
@@ -63,7 +72,16 @@ class ResourceCoordinator:
 
     @property
     def busy(self) -> bool:
-        return self._chat_active or self._active_indexers > 0
+        return self._chat_active or self._warming or self._active_indexers > 0
+
+    @property
+    def warming(self) -> bool:
+        return self._warming
+
+    def warm_preempted(self) -> bool:
+        """True once a question is waiting; a warm-up must stop at this point."""
+
+        return self._warm_preempt.is_set()
 
     @property
     def active_indexers(self) -> int:
@@ -91,21 +109,28 @@ class ResourceCoordinator:
         return self._waiting_chats
 
     def residency_seconds(self) -> float:
-        """Grow hot-query residency from 30s to 5m, but yield on pressure."""
+        """How long a warm query runtime may be kept, given the memory at hand."""
 
         # Keeping a cross-encoder or Ollama model resident is only an
         # optimization.  As soon as the reserve is guarded it must not compete
         # with the active request/indexer for memory.
-        if self.memory().state != "ready":
+        snapshot = self.memory()
+        if snapshot.state != "ready":
             return 0.0
         now = time.monotonic()
         if self._last_query_completed_at and now - self._last_query_completed_at > 300.0:
             self._recent_query_uses = 0
-        return min(
-            self._max_residency_seconds,
-            300.0,
-            30.0 * (2 ** min(self._recent_query_uses, 4)),
-        )
+        ramp = 30.0 * (2 ** min(self._recent_query_uses, 4))
+        # The ramp starts low in case a question was a one-off. That trade is
+        # badly priced: rebuilding a reaped query worker reloads the reranker's
+        # 201 weight tensors, measured at 7.2s against 0.65s of actual scoring,
+        # so a single question asked a minute later pays ten times over for the
+        # memory a short residency saved. Where there is plainly room for the
+        # worker several times over, start from a floor that outlives one
+        # question and one pause for thought instead.
+        headroom = snapshot.available - snapshot.reserve
+        floor = 180.0 if headroom >= _QUERY_WORKER_BYTES * 3 else 30.0
+        return min(self._max_residency_seconds, 300.0, max(floor, ramp))
 
     def _record_query_use(self) -> None:
         now = time.monotonic()
@@ -139,6 +164,11 @@ class ResourceCoordinator:
     async def chat(self) -> AsyncIterator[None]:
         async with self._condition:
             self._waiting_chats += 1
+            # A warm-up exists to make this very question faster. Letting it
+            # finish first would charge its model load to the question's own
+            # deadline, which is how a cold model turned a 15s budget into a
+            # QUERY_DEADLINE_EXCEEDED. Tell it to stop and do not wait for it.
+            self._warm_preempt.set()
             try:
                 await self._condition.wait_for(
                     lambda: not self._chat_active and self._active_indexers == 0
@@ -167,7 +197,8 @@ class ResourceCoordinator:
             if self.busy or self._waiting_chats:
                 admission = "skipped_busy"
             else:
-                self._chat_active = True
+                self._warm_preempt.clear()
+                self._warming = True
                 admission = "ready"
         if admission != "ready":
             yield admission
@@ -176,7 +207,7 @@ class ResourceCoordinator:
             yield "ready"
         finally:
             async with self._condition:
-                self._chat_active = False
+                self._warming = False
                 self._condition.notify_all()
 
     @asynccontextmanager
@@ -184,14 +215,16 @@ class ResourceCoordinator:
         """Admit one conversion unit.
 
         Questions keep absolute priority: a waiting chat blocks new admissions,
-        and an active chat excludes indexing entirely. Beyond that, `slots`
-        conversions may overlap — 1 unless memory is plainly abundant.
+        and an active chat excludes indexing entirely. A warm-up counts the same
+        way, because it is a question that has not been sent yet. Beyond that,
+        `slots` conversions may overlap — 1 unless memory is plainly abundant.
         """
         await self._wait_for_memory()
         async with self._condition:
             await self._condition.wait_for(
                 lambda: (
                     not self._chat_active
+                    and not self._warming
                     and self._waiting_chats == 0
                     and self._active_indexers < self.conversion_slots()
                 )

@@ -1617,14 +1617,30 @@ fn render_chat_workspace(
     }
 
     let (text, already_wrapped) = if let Some(error) = &state.chat.error {
-        (
-            Text::from(vec![
-                Line::styled("Could not answer", theme.status(StatusLevel::Error)),
-                Line::from(""),
-                Line::styled(error.clone(), theme.body()),
-            ]),
-            false,
-        )
+        // A run that ran out of time did not fail to understand the question,
+        // so saying it could not answer misdirects. Name the clock, and say
+        // that a second attempt is the cheap fix: whatever was still loading
+        // has finished loading by now.
+        let mut lines = vec![
+            Line::styled(
+                if state.chat.timed_out {
+                    "Ran out of time"
+                } else {
+                    "Could not answer"
+                },
+                theme.status(StatusLevel::Error),
+            ),
+            Line::from(""),
+            Line::styled(error.clone(), theme.body()),
+        ];
+        if state.chat.timed_out {
+            lines.push(Line::from(""));
+            lines.push(Line::styled(
+                "Send the question again — the models are warm now.",
+                theme.meta(),
+            ));
+        }
+        (Text::from(lines), false)
     } else if state.chat.answer.is_empty() {
         (
             Text::from(chat_placeholder_lines(state, theme, metrics)),
@@ -5028,6 +5044,57 @@ pub(crate) fn chat_answer_offset(
         x = x.saturating_add(glyph_width);
     }
     None
+}
+
+/// Where a drag lands, tolerating the places a hand actually stops.
+///
+/// [`chat_answer_offset`] answers only for a glyph directly under the pointer,
+/// which is right for "did they click this term" but wrong for a selection:
+/// releasing just past the end of a line is how one selects to the end of a
+/// sentence, and there is no glyph there. That returned `None`, so the last
+/// word of a selection was silently dropped — and a short drag that never
+/// crossed a glyph copied nothing at all, without saying so.
+pub(crate) fn chat_answer_offset_clamped(
+    answer: &str,
+    selected_citation: usize,
+    width: u16,
+    scroll: u16,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let layout = answer_visual_layout(answer, selected_citation, &Theme::default(), width);
+    let wanted = usize::from(scroll.saturating_add(row));
+    let last_row = layout.rows.len().checked_sub(1)?;
+    // Dragged clean off the bottom: that means the end of the answer. Where the
+    // pointer sits horizontally down there says nothing about intent.
+    let past_the_end = wanted > last_row;
+    let index = wanted.min(last_row);
+    let glyphs = layout.rows.get(index)?;
+    if past_the_end {
+        return layout.rows[..=index]
+            .iter()
+            .rev()
+            .find_map(|row| row.last().map(|glyph| glyph.offset));
+    }
+    let mut x = 0u16;
+    let mut last = None;
+    for glyph in glyphs {
+        let glyph_width = u16::try_from(glyph.character.width().unwrap_or(0).max(1)).ok()?;
+        if column >= x && column < x.saturating_add(glyph_width) {
+            return Some(glyph.offset);
+        }
+        x = x.saturating_add(glyph_width);
+        last = Some(glyph.offset);
+    }
+    // Past the end of a rendered row: the row it belongs to still has a last
+    // glyph, and that is the position the pointer means. A blank row has none,
+    // in which case the row above it is the honest answer.
+    last.or_else(|| {
+        layout.rows[..index]
+            .iter()
+            .rev()
+            .find_map(|row| row.last().map(|glyph| glyph.offset))
+    })
 }
 
 pub(crate) fn chat_selection_text(
@@ -8784,5 +8851,48 @@ mod tests {
             Some("Beton")
         );
         assert_eq!(chat_bold_term_at(answer, 0, 80, 0, 18, 0), None);
+    }
+
+    #[test]
+    fn releasing_a_drag_past_the_end_of_a_line_still_selects_the_last_word() {
+        let answer = "Mauerwerk braucht Verband.";
+        // A hand that means "to the end of the sentence" stops beyond the last
+        // glyph. The strict lookup finds nothing there.
+        assert_eq!(chat_answer_offset(answer, 0, 80, 0, 40, 0), None);
+        let offset = chat_answer_offset_clamped(answer, 0, 80, 0, 40, 0).expect("clamped offset");
+        assert_eq!(offset, answer.chars().count() - 1);
+        assert_eq!(
+            chat_selection_text(
+                answer,
+                0,
+                80,
+                ChatTextSelection {
+                    anchor: 18,
+                    focus: offset,
+                    moved: true,
+                },
+            )
+            .as_deref(),
+            Some("Verband.")
+        );
+    }
+
+    #[test]
+    fn releasing_a_drag_below_the_answer_selects_to_its_end() {
+        let answer = "Erste Zeile\n\nZweite Zeile";
+        assert_eq!(chat_answer_offset(answer, 0, 80, 0, 3, 40), None);
+        let offset = chat_answer_offset_clamped(answer, 0, 80, 0, 3, 40).expect("clamped offset");
+        let selected = chat_selection_text(
+            answer,
+            0,
+            80,
+            ChatTextSelection {
+                anchor: 0,
+                focus: offset,
+                moved: true,
+            },
+        )
+        .expect("selection");
+        assert!(selected.ends_with("Zeile"), "got {selected:?}");
     }
 }

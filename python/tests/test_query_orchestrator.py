@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -160,6 +161,102 @@ async def test_outer_deadline_includes_register_complexity(
 
     assert len(deadlines) == 1
     assert deadlines[0] - started >= 24.9
+
+
+def _deadline_service() -> Any:
+    class DeadlineStore:
+        @staticmethod
+        def get_run_request(_run_id: str) -> dict[str, Any]:
+            return {"question": "Erläutere Kriechen.", "mode": "rag", "options": {}}
+
+        @staticmethod
+        def get_run(_run_id: str) -> Any:
+            return SimpleNamespace(workspace_id="ws-1", session_id="session-1", status="running")
+
+        @staticmethod
+        def route_book_knowledge(*_args: Any, **_kwargs: Any) -> list[dict[str, str]]:
+            return [{"term_id": "term-1"}, {"term_id": "term-2"}]
+
+    service = RunService.__new__(RunService)
+    service.store = DeadlineStore()
+    service.adapter = SimpleNamespace(capabilities=SimpleNamespace(adaptive_retrieval=True))
+    service.query = SimpleNamespace(
+        standalone_question=lambda *_args, **_kwargs: ("Erläutere Kriechen.", False)
+    )
+    return service
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_a_model_slot_does_not_shorten_the_answer_budget() -> None:
+    """Queueing is not work, so it must not be charged to the answer.
+
+    A warm-up holding the model slot used to consume a question's entire
+    budget before retrieval began; the run then failed as though the question
+    itself had been too slow.
+    """
+    service = _deadline_service()
+    seen: dict[str, float] = {}
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.credit_admission_wait(12_000.0)
+        seen["when"] = deadline.handle.when()
+
+    service._execute_inner = execute_inner
+    started = run_module.asyncio.get_running_loop().time()
+    await service._execute("run-credit")
+
+    # 25s of register-complexity budget, plus the 12s spent queueing.
+    assert seen["when"] - started >= 36.5
+    assert not service._deadline_registry()
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_model_slot_still_fails_the_request() -> None:
+    service = _deadline_service()
+    seen: dict[str, float] = {}
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.credit_admission_wait(600_000.0)
+        deadline.allow_cold_start(["qwen3:8b"])
+        seen["when"] = deadline.handle.when()
+
+    service._execute_inner = execute_inner
+    started = run_module.asyncio.get_running_loop().time()
+    await service._execute("run-capped")
+
+    # Ten minutes of waiting plus a cold model buys 45s of slack and no more.
+    assert 69.5 <= seen["when"] - started <= 70.5
+
+
+@pytest.mark.asyncio
+async def test_an_expired_request_says_what_it_was_doing() -> None:
+    service = _deadline_service()
+    failures: list[tuple[str, str]] = []
+
+    async def fail(_run: Any, code: str, message: str, retryable: bool) -> None:
+        assert retryable
+        failures.append((code, message))
+
+    async def execute_inner(run_id: str) -> None:
+        deadline = service._deadline_registry()[run_id]
+        deadline.credit_admission_wait(4_000.0)
+        deadline.phase_label = "Retrieving evidence"
+        raise TimeoutError
+
+    service._execute_inner = execute_inner
+    service._fail = fail
+    await service._execute("run-expired")
+
+    assert len(failures) == 1
+    code, message = failures[0]
+    assert code == "QUERY_DEADLINE_EXCEEDED"
+    # It names what the request was doing and what it had already been
+    # forgiven, so the log explains itself without a source dive.
+    assert "retrieving evidence" in message
+    assert "waiting for a free model slot" in message
+    assert re.search(r"after \d+\.\d+s", message), message
 
 
 @pytest.mark.asyncio
@@ -372,9 +469,16 @@ async def test_orchestrator_fails_closed_for_unbound_custom_reranker() -> None:
 
 
 @pytest.mark.asyncio
-async def test_risky_claim_fails_closed_when_verifier_is_unavailable(
+async def test_a_claim_nobody_could_check_is_kept_and_labelled_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unknown verdict is not a refutation.
+
+    No `ClaimVerifier` implementation is wired in, and a table or formula
+    always asks to be verified — so treating "unknown" like "contradicted"
+    discarded every claim drawn from a table and answered "not sufficiently
+    supported" to questions the sources answered perfectly well.
+    """
     FakeOllama.blocks = (
         '<claim>{"id":"C1","text":"Der Grenzwert beträgt 42 mm.",'
         '"evidence_ids":["E1"],"facet_id":"F1","status":"supported"}</claim>',
@@ -394,9 +498,55 @@ async def test_risky_claim_fails_closed_when_verifier_is_unavailable(
         resolved_model_identity=OllamaModelIdentity("qwen3.5:4b", "generator-digest", 1),
     )
 
-    assert answer.abstention == "full"
+    assert answer.abstention == "none"
+    assert [claim.text for claim in answer.claims] == ["Der Grenzwert beträgt 42 mm."]
+    assert answer.claims[0].verification_status == "verifier-unavailable"
+    assert answer.rejected_claims == 0
+    # Nothing is hidden: the receipt still says a verifier was wanted and missing.
     assert "claim_verifier_unavailable" in answer.fallbacks
     assert "claim_verifier_verifier-unavailable" in answer.fallbacks
+    assert answer.verifier_status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_a_refuted_claim_is_still_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relaxation applies to "unknown" only. A verdict still binds."""
+
+    class RefutingVerifier:
+        digest = "verifier-digest"
+
+        async def verify(self, _claim: Any, _evidence: Any) -> Any:
+            from omarag_bridge.services.query_v2 import ClaimVerification
+
+            return ClaimVerification("contradicted", "refuted")
+
+    FakeOllama.blocks = (
+        '<claim>{"id":"C1","text":"Der Grenzwert beträgt 42 mm.",'
+        '"evidence_ids":["E1"],"facet_id":"F1","status":"supported"}</claim>',
+    )
+    monkeypatch.setattr(module, "OllamaStreamClient", FakeOllama)
+
+    answer = await QueryOrchestrator(
+        FakeStore(),
+        FakeAdapter(),
+        "http://ollama.invalid",
+        claim_verifier=RefutingVerifier(),
+    ).answer(
+        workspace_id="ws-1",
+        database=Path("/tmp/db"),
+        run_id="run-refuted",
+        session_id="session-1",
+        question="Was ist der Grenzwert?",
+        evidence_mode=EvidenceMode.STRICT,
+        document_filter=None,
+        options={},
+        model="qwen3.5:4b",
+        resolved_model_identity=OllamaModelIdentity("qwen3.5:4b", "generator-digest", 1),
+    )
+
+    assert answer.abstention == "full"
+    assert answer.rejected_claims == 1
+    assert "claim_verifier_refuted" in answer.fallbacks
 
 
 @pytest.mark.asyncio

@@ -264,10 +264,59 @@ def classify_query(
     )
 
 
+# The frame a German question is wrapped in: an interrogative, an optional
+# auxiliary, an optional article. None of it says which page holds the answer.
+_INTERROGATIVE_FRAME = re.compile(
+    r"""(?ix)^\s*
+    (?:was|wer|wen|wem|wie|wo|wohin|woher|wann|warum|weshalb|wieso|wodurch|womit|wofür
+       |welche[rsnm]?|what|which|how|where|when|why)
+    \b\s*
+    (?:ist|sind|war|waren|wird|werden|bedeutet|heißt|nennt\s+man|versteht\s+man\s+unter
+       |gibt\s+es|macht|kann|können|muss|müssen|darf|dürfen|is|are|does|do)?
+    \s*
+    (?:\b(?:der|die|das|den|dem|des|ein|eine|einen|einem|einer|eines|the|a|an)\b)?
+    \s*
+    """
+)
+# ... and the tail some of them end with, which is frame too.
+_INTERROGATIVE_TAIL = re.compile(
+    r"(?i)\s*\b(?:gibt\s+es|gibt'?s|kennt\s+man|unterscheidet\s+man|are\s+there)\s*\??\s*$"
+)
+
+
+def retrieval_query(question: str) -> str:
+    """The part of a question that names what to look for.
+
+    A cross-encoder scores the query against a passage as one string, so the
+    interrogative frame competes with the subject for the match. For "Was ist
+    das Ausbreitmaß?" a passage opening "Das erhitzte Kältemittel wird nun an
+    den Heizkreislauf ..." scored 9.91 against 9.43 for the page that defines
+    the term — the frame matched, the subject did not — and the calibrated
+    threshold then discarded the lot. Asked as "Ausbreitmaß", the same index
+    put the right page first with a wide margin.
+
+    Only a leading frame and a trailing auxiliary are removed, and only when
+    something substantive is left; otherwise the question is returned as it
+    came.
+    """
+    head, separator, tail = question.partition("\n")
+    stripped = _INTERROGATIVE_TAIL.sub("", _INTERROGATIVE_FRAME.sub("", head)).strip(" \t?!.,;:")
+    # Two characters is not a subject; better the whole question than a stub.
+    if len(stripped) < 3 or not any(character.isalnum() for character in stripped):
+        return question
+    return stripped + separator + tail
+
+
 def _deterministic_facets(
     question: str, complexity: QueryComplexity, max_facets: int
 ) -> tuple[QueryFacet, ...]:
     if complexity is QueryComplexity.SIMPLE:
+        # Deliberately the whole question. Cutting it down to the subject was
+        # measured and made retrieval worse, not better: asked for
+        # "Ausbreitmaß" alone the sparse and dense channels stopped returning
+        # the page that defines it at all, while the full question still had it
+        # among the candidates. The frame hurts the cross-encoder, not the
+        # index — see `retrieval_query` and where it is actually used.
         return (QueryFacet("F1", question),)
 
     queries: list[str] = []

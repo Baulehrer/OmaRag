@@ -54,6 +54,7 @@ def test_classifier_assigns_fixed_budgets_and_bounded_facets() -> None:
     assert direct.complexity is QueryComplexity.SIMPLE
     assert direct.score == -1
     assert direct.budget.candidate_cap == 24
+    assert direct.question == "Was ist der Elastizitätsmodul?"
     assert [facet.query for facet in direct.facets] == [direct.question]
 
     comparison = classify_query(
@@ -560,3 +561,37 @@ def test_technical_literal_validation_preserves_sign_and_scientific_notation() -
     )
     assert not result.valid
     assert "unsupported_technical_literal" in result.errors
+
+
+def test_a_question_is_reranked_by_its_subject() -> None:
+    """The interrogative frame competes with the subject and wins too often.
+
+    Measured against the indexed Tabellenbuch: asked as "Was ist das
+    Ausbreitmaß?", an unrelated passage opening "Das erhitzte Kältemittel wird
+    nun an den Heizkreislauf ..." scored 9.91 against 9.43 for the page that
+    defines the term. Scored against "Ausbreitmaß" the same candidates put the
+    right page first at 8.48 with the next at 0.52.
+
+    This is used for the cross-encoder only. Feeding the shortened form to the
+    index instead was measured too, and was worse: the sparse and dense
+    channels stopped returning the page at all.
+    """
+    from omarag_bridge.services.query_v2 import retrieval_query
+
+    assert retrieval_query("Was ist das Ausbreitmaß?") == "Ausbreitmaß"
+    assert retrieval_query("Welche Mauerverbände gibt es?") == "Mauerverbände"
+    assert retrieval_query("What is concrete?") == "concrete"
+
+    # A statement is already its own subject.
+    assert retrieval_query("Ausbreitmaß") == "Ausbreitmaß"
+    assert retrieval_query("Erkläre den Blockverband") == "Erkläre den Blockverband"
+
+    # Never strip a question down to nothing.
+    assert retrieval_query("Was?") == "Was?"
+    assert retrieval_query("Wie ist das?") == "Wie ist das?"
+
+    # Routing context from an earlier turn is not part of the frame.
+    assert (
+        retrieval_query("Was ist das Ausbreitmaß?\nKontext der vorigen Frage: Beton")
+        == "Ausbreitmaß\nKontext der vorigen Frage: Beton"
+    )

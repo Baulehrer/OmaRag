@@ -1123,6 +1123,10 @@ pub struct ChatState {
     pub receipt: Option<RunReceipt>,
     pub selection: Option<ChatTextSelection>,
     pub error: Option<String>,
+    /// The run ran out of time rather than failing on its own terms. Worth
+    /// separating: the question was fine, and asking it again usually works
+    /// because whatever was still loading is loaded by now.
+    pub timed_out: bool,
     pub phase: String,
     pub phase_label: String,
     pub phase_elapsed_ms: f64,
@@ -1146,6 +1150,7 @@ impl Default for ChatState {
             receipt: None,
             selection: None,
             error: None,
+            timed_out: false,
             phase: "idle".into(),
             phase_label: String::new(),
             phase_elapsed_ms: 0.0,
@@ -1854,6 +1859,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::RunRequestStarted => {
             state.chat.request_pending = true;
             state.chat.error = None;
+            state.chat.timed_out = false;
             state.chat.answer.clear();
             state.chat.citations.clear();
             state.chat.receipt = None;
@@ -1887,6 +1893,7 @@ pub fn update(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.chat.active_run = None;
             state.chat.request_pending = false;
             state.chat.error = Some(message);
+            state.chat.timed_out = false;
             state.operation.active = false;
         }
         Action::SearchStarted => {
@@ -2097,6 +2104,12 @@ fn apply_event(state: &mut AppState, event: DomainEvent) {
                 .and_then(|value| value.as_str())
                 .unwrap_or("The answer could not be created.");
             state.chat.error = Some(message.to_owned());
+            state.chat.timed_out = event
+                .payload
+                .get("error")
+                .and_then(|value| value.get("code"))
+                .and_then(|value| value.as_str())
+                == Some("QUERY_DEADLINE_EXCEEDED");
         }
         _ => {}
     }

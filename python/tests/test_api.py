@@ -179,8 +179,20 @@ async def test_hardware_aware_model_catalog_roles_profiles_and_runtime(
 
 
 async def test_safe_runtime_warmup_reports_what_it_prepared(
-    client: httpx2.AsyncClient, workspace: dict[str, object]
+    client: httpx2.AsyncClient, workspace: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Residency is zero whenever the machine is short of memory, so without a
+    # fixed snapshot this asserts something about the test machine rather than
+    # about the endpoint.
+    from omarag_bridge.services import resource_coordinator
+
+    monkeypatch.setattr(
+        resource_coordinator,
+        "_memory_snapshot",
+        lambda: resource_coordinator.MemorySnapshot(
+            total=32 * 1024**3, available=24 * 1024**3, reserve=2 * 1024**3
+        ),
+    )
     response = await client.post(f"/v1/workspaces/{workspace['id']}/runtime/warmup")
     assert response.status_code == 200
     payload = response.json()
