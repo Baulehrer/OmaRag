@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "kaufmann.omarag",
+  "name": "OMA",
+  "version": "0.1.0",
+  "author": "Stephan Kaufmann",
+  "license": "MIT",
+  "description": "Local knowledge. Ask your own documents and see where every answer comes from.",
+  "kinds": [
+    "overlay"
+  ],
+  "entryPoints": {
+    "overlay": "OMA.qml"
+  }
+}
