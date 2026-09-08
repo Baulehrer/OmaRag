@@ -52,12 +52,41 @@ Item {
     }
   }
 
+  // The payload may carry {"query": "..."} so a keybind — or a test — can open
+  // OMA with the question already in the box, the way the image picker takes
+  // its rows from the summon payload.
   function open(payloadJson) {
     root.opened = true
     root.hits = []
     root.query = ""
+
+    var wanted = ""
+    if (payloadJson) {
+      try {
+        var parsed = JSON.parse(String(payloadJson))
+        if (parsed && typeof parsed.query === "string") wanted = parsed.query
+      } catch (e) { /* an unreadable payload just opens OMA empty */ }
+    }
+    input.text = wanted
+
     if (backend.phase === "idle" || backend.phase === "error") backend.connect()
     Qt.callLater(function() { input.forceActiveFocus() })
+    if (wanted) pendingQuery.restart()
+  }
+
+  // Fires the payload query once the backend is up.
+  Timer {
+    id: pendingQuery
+    interval: 700
+    repeat: true
+    running: false
+    property int tries: 0
+    onTriggered: {
+      tries += 1
+      if (tries > 90) { stop(); tries = 0; return }
+      if (backend.phase === "ready") { stop(); tries = 0; root.runQuery() }
+    }
+    onRunningChanged: if (running) tries = 0
   }
 
   function close() { root.opened = false }
@@ -101,6 +130,16 @@ Item {
 
     Rectangle { anchors.fill: parent; color: Color.menu.scrim }
     MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+
+    // The [menu] section is empty in some themes, which leaves the surface
+    // token without a usable fill and lets the desktop show straight through
+    // the card. An opaque base underneath keeps the text readable whatever
+    // the theme defines, while the card itself still carries the menu colour.
+    Rectangle {
+      anchors.fill: card
+      color: Color.background
+      radius: Style.cornerRadius
+    }
 
     BorderSurface {
       id: card
@@ -186,15 +225,29 @@ Item {
             height: Math.min(contentHeight, parent.height - libraryHeading.height - Style.space(60))
             clip: true
             model: backend.documents
-            delegate: Text {
+            // list_documents names a document `filename`; search results call the
+            // same thing `source`. Cover both rather than guessing one.
+            delegate: Item {
               width: docList.width - Style.spacing.md
-              text: (modelData.source || modelData.title || "?")
-              color: root.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              elide: Text.ElideMiddle
               height: Style.spacing.popupRowHeight
-              verticalAlignment: Text.AlignVCenter
+
+              Text {
+                anchors { left: parent.left; right: count.left; verticalCenter: parent.verticalCenter }
+                anchors.rightMargin: Style.spacing.sm
+                text: modelData.filename || modelData.source || modelData.title || ""
+                color: root.foreground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideMiddle
+              }
+              Text {
+                id: count
+                anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                text: modelData.chunk_count ? modelData.chunk_count + "" : ""
+                color: root.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
             }
           }
 
@@ -279,9 +332,12 @@ Item {
               top: resultHeading.bottom; bottom: parent.bottom
               left: parent.left; right: parent.right
             }
-            anchors.topMargin: Style.spacing.md
+            anchors.topMargin: Style.spacing.panelGap
             clip: true
             spacing: Style.spacing.rowGap
+            // Without this the list can rest on an overscrolled position and
+            // clip its own first row.
+            boundsBehavior: Flickable.StopAtBounds
             model: root.hits
 
             delegate: Column {

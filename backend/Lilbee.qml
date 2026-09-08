@@ -41,15 +41,23 @@ Item {
     root.failed(msg, root.detail)
   }
 
-  // A streamable-HTTP response may arrive as a single JSON body or as one
-  // SSE frame. Both carry the same JSON-RPC envelope.
+  // Replies come back as text/event-stream — "event: message", then a
+  // "data: {...}" line carrying the JSON-RPC envelope. A stream may hold more
+  // than one frame, so take the first that actually carries a result or an
+  // error rather than blindly taking the first data line.
   function _parseBody(raw) {
     var text = String(raw || "")
     var lines = text.split("\n")
+    var fallback = null
     for (var i = 0; i < lines.length; i++) {
-      if (lines[i].indexOf("data: ") === 0) { text = lines[i].substring(6); break }
+      if (lines[i].indexOf("data: ") !== 0) continue
+      var env = null
+      try { env = JSON.parse(lines[i].substring(6)) } catch (e) { continue }
+      if (env && (env.result !== undefined || env.error !== undefined)) return env
+      if (!fallback) fallback = env
     }
-    try { return JSON.parse(text) } catch (e) { return null }
+    if (fallback) return fallback
+    try { return JSON.parse(text) } catch (e2) { return null }
   }
 
   function _post(payload, expectReply, cb) {

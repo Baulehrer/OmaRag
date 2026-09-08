@@ -14,7 +14,9 @@ dst="$HOME/.config/omarchy/plugins/kaufmann.omarag"
 # Build beside the target and move it into place in one step. Every write
 # inside the plugin directory triggers a shell rescan; staging keeps that
 # down to a single event instead of one per file.
-stage="$(mktemp -d "${dst}.stage.XXXXXX")"
+# Stage OUTSIDE the plugins directory. Staging next to the target made the
+# shell briefly discover and load a phantom plugin from the temp folder.
+stage="$(mktemp -d "${TMPDIR:-/tmp}/omarag-stage.XXXXXX")"
 mkdir -p "$stage/backend"
 cp "$src/manifest.json" "$src/OMA.qml" "$stage/"
 cp "$src/backend/"*.qml "$stage/backend/"
