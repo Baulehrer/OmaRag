@@ -322,6 +322,10 @@ Item {
         return
       }
       root.phase = "ready"
+      // The backend returns roughly twice top_k — neighbouring chunks come
+      // along as context — and not in score order (measured: 0.989, 0.944,
+      // 0.953, …). Numbered rows imply a ranking, so establish one.
+      rows.sort(function(a, b) { return (b.score || 0) - (a.score || 0) })
       root.searchFinished(rows)
     }, root.searchTimeout)
   }
