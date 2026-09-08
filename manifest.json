@@ -11,5 +11,23 @@
   ],
   "entryPoints": {
     "overlay": "OMA.qml"
+  },
+  "settings": {
+    "defaults": {
+      "backendWhenClosed": "Stop with OMA"
+    },
+    "schema": [
+      {
+        "key": "backendWhenClosed",
+        "type": "enum",
+        "label": "Backend when OMA is closed",
+        "description": "Stop with OMA frees everything the moment you close it, and the next question waits for the backend to come back. Keep running holds roughly 378 MB with no models loaded, so the next question starts straight away.",
+        "options": [
+          "Stop with OMA",
+          "Keep running"
+        ],
+        "defaultValue": "Stop with OMA"
+      }
+    ]
   }
 }

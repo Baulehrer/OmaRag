@@ -16,7 +16,37 @@ Item {
 
   property var shell: null
   property var manifest: null
+  property var settings: ({})
   property bool opened: false
+
+  // Settings live inline in the plugin's shell.json entry, the same place the
+  // other overlays keep theirs.
+  function setting(name, fallback) {
+    var value = settings ? settings[name] : undefined
+    return value === undefined || value === null ? fallback : value
+  }
+
+  function entrySettings() {
+    var id = String((manifest && manifest.id) || "kaufmann.omarag")
+    var config = shell ? shell.shellConfig : null
+    var plugins = config ? config.plugins : []
+    if (!Array.isArray(plugins)) return settings || ({})
+    for (var i = 0; i < plugins.length; i++)
+      if (String((plugins[i] && plugins[i].id) || "") === id) return plugins[i]
+    return settings || ({})
+  }
+
+  function syncSettings() { root.settings = entrySettings() || ({}) }
+
+  onManifestChanged: syncSettings()
+  onShellChanged: syncSettings()
+  Component.onCompleted: syncSettings()
+
+  Connections {
+    target: root.shell
+    ignoreUnknownSignals: true
+    function onShellConfigChanged() { root.syncSettings() }
+  }
 
   // Shares the [menu] surface tokens, like the other overlays — themes that
   // style the menu style OMA too. No colour is defined here.
@@ -32,25 +62,35 @@ Item {
 
   readonly property string phaseGlyph: {
     switch (backend.phase) {
-      case "ready": return "●"     // ●
-      case "starting": return "◐"  // ◐
+      case "ready": return "●"
+      case "starting": return "◐"
+      case "searching": return "◐"
       case "busy": return "◐"
       case "error": return "!"
-      default: return "○"          // ○
+      default: return "○"
     }
   }
   readonly property color phaseColor: backend.phase === "error" ? root.urgent
                                     : backend.phase === "ready" ? root.accent
                                     : root.muted
+  // Busy is not a failure, so it never borrows the error colour.
+  readonly property bool blocked: backend.phase === "busy"
   readonly property string phaseLabel: {
     switch (backend.phase) {
       case "ready": return "Ready"
       case "starting": return backend.message || "Starting"
-      case "busy": return backend.message || "Busy"
+      case "searching": return "Searching"
+      case "busy": return "Busy"
       case "error": return "Error"
       default: return "Sleeping"
     }
   }
+
+  // Shown briefly when an action was turned away, so a dead keypress is never
+  // silent.
+  property string notice: ""
+  Timer { id: noticeTimer; interval: 4000; onTriggered: root.notice = "" }
+  function flash(text) { root.notice = text; noticeTimer.restart() }
 
   // The payload may carry {"query": "..."} so a keybind — or a test — can open
   // OMA with the question already in the box, the way the image picker takes
@@ -102,6 +142,7 @@ Item {
   function runQuery() {
     var q = input.text.trim()
     if (!q) return
+    if (root.blocked) { root.flash(backend.message); return }
     root.query = q
     root.hits = []
     backend.search(q, 5)
@@ -115,7 +156,9 @@ Item {
 
   Lilbee {
     id: backend
+    persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
     onSearchFinished: function(rows) { root.hits = rows }
+    onRefused: function(reason) { root.flash(reason) }
   }
 
   PanelWindow {
@@ -317,7 +360,8 @@ Item {
             id: resultHeading
             anchors { top: inputBox.bottom; left: parent.left }
             anchors.topMargin: Style.spacing.panelGap
-            text: backend.phase === "busy" ? "SEARCHING…"
+            text: backend.phase === "searching" ? "SEARCHING…"
+                : root.blocked ? ""
                 : root.hits.length ? "SOURCES"
                 : root.query ? "NO MATCHES"
                 : ""
@@ -382,6 +426,45 @@ Item {
           }
 
           // ------------------------------------------------------- states
+
+          // The single-embedder constraint, said out loud. Muted, not red:
+          // nothing is broken, the backend is simply occupied.
+          Column {
+            anchors.centerIn: parent
+            width: parent.width - Style.spacing.panelPadding * 2
+            spacing: Style.spacing.md
+            visible: root.blocked
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "◐  Indexing in progress"
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: "lilbee has a single embedder, and an index run is holding it.\n"
+                  + "Search comes back on its own when the run finishes."
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Text {
+            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+            visible: root.notice.length > 0
+            text: root.notice
+            color: root.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Text {
             anchors.centerIn: parent
             visible: backend.phase === "error"
