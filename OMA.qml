@@ -153,10 +153,14 @@ Item {
     }
   }
 
-  function close() { root.opened = false }
+  function close() {
+    root.opened = false
+    backend.releaseEngine()
+  }
 
   function dismiss() {
     root.opened = false
+    backend.releaseEngine()
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "kaufmann.omarag")
   }

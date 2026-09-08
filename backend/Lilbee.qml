@@ -85,6 +85,20 @@ Item {
     busyPoll.restart()
   }
 
+  // Closing OMA kills the server, but not the model fleet it spawned: the
+  // llama-swap processes reparent to systemd and keep the weights in VRAM until
+  // their 30-minute TTL expires. Long enough to stop an external chat model from
+  // loading — which is exactly how `lilbee ask` failed here once.
+  //
+  // Only ever released when OMA started the server itself. A server the user is
+  // running from their TUI or a terminal owns its engine; `lilbee engine stop`
+  // takes it down "whoever started it", so it must not be aimed at someone
+  // else's work.
+  function releaseEngine() {
+    if (!root.ownsDaemon || root.persistDaemon) return
+    engineStop.running = true
+  }
+
   function retry() {
     root.phase = "idle"
     root.message = ""
@@ -221,12 +235,15 @@ Item {
     root.message = "Connecting"
     root.sessionId = ""
     root._readServerFiles()
+    serverProbe.start()
   }
 
+  // Reads only. Restarting the probe from here reset its own attempt counter
+  // on every tick, so it polled for a server forever: it never got far enough
+  // to start one, and never far enough to give up either.
   function _readServerFiles() {
     portFile.reload()
     tokenFile.reload()
-    serverProbe.restart()
   }
 
   function _tryConnect() {
@@ -264,12 +281,12 @@ Item {
   }
 
   function _startDaemon() {
-    if (daemon.running || root._daemonLaunched) { serverProbe.restart(); return }
+    if (daemon.running || root._daemonLaunched) return
     root.message = "Starting backend"
     root.ownsDaemon = true
     root._daemonLaunched = true
     daemon.running = true
-    serverProbe.restart()
+    if (!serverProbe.running) serverProbe.start()
   }
 
   // ---------------------------------------------------------------- queries
@@ -363,6 +380,14 @@ Item {
     }
   }
 
+  // Detached, because it has to outlive the teardown that triggers it.
+  Process {
+    id: engineStop
+    command: ["sh", "-c",
+              "exec setsid --fork \"$1\" engine stop >/dev/null 2>&1 </dev/null",
+              "oma", root.bin]
+  }
+
   // Poll the recorded port and token until a server shows up — ours, or one the
   // user started themselves.
   Timer {
@@ -374,11 +399,15 @@ Item {
     onTriggered: {
       tries += 1
       if (root.phase === "ready") { stop(); tries = 0; return }
-      if (tries > 30) {
+      if (tries > 45) {
         stop(); tries = 0
-        root._fail("Backend did not start", "no server recorded in " + root.dataDir + " after 60s")
+        root._fail("Backend did not start", "no server recorded in " + root.dataDir + " after 90s")
         return
       }
+      // No server has registered itself, so there is none to join — start one.
+      // The first tick is skipped because the file reads are asynchronous and
+      // an existing server would still be landing.
+      if (tries >= 2 && (root.port <= 0 || !root.token.length)) root._startDaemon()
       root._readServerFiles()
     }
     onRunningChanged: if (running) tries = 0

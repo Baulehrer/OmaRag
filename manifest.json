@@ -21,7 +21,7 @@
         "key": "backendWhenClosed",
         "type": "enum",
         "label": "Backend when OMA is closed",
-        "description": "Stop with OMA frees everything the moment you close it, and the next question waits for the backend to come back. Keep running holds roughly 378 MB with no models loaded, so the next question starts straight away.",
+        "description": "Stop with OMA frees everything the moment you close it \u2014 the server and the models it loaded \u2014 and the next question waits for both to come back. Keep running holds the server, roughly 430 MB, and leaves loaded models in place until they time out, so the next question starts straight away.",
         "options": [
           "Stop with OMA",
           "Keep running"
