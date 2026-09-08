@@ -7,10 +7,12 @@
   "license": "MIT",
   "description": "Local knowledge. Ask your own documents and see where every answer comes from.",
   "kinds": [
-    "overlay"
+    "overlay",
+    "bar-widget"
   ],
   "entryPoints": {
-    "overlay": "OMA.qml"
+    "overlay": "OMA.qml",
+    "barWidget": "BarWidget.qml"
   },
   "settings": {
     "defaults": {
@@ -29,5 +31,11 @@
         "defaultValue": "Stop with OMA"
       }
     ]
+  },
+  "barWidget": {
+    "displayName": "OMA",
+    "description": "Open your local knowledge base.",
+    "category": "AI",
+    "allowMultiple": false
   }
 }

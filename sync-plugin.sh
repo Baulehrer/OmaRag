@@ -18,7 +18,7 @@ dst="$HOME/.config/omarchy/plugins/kaufmann.omarag"
 # shell briefly discover and load a phantom plugin from the temp folder.
 stage="$(mktemp -d "${TMPDIR:-/tmp}/omarag-stage.XXXXXX")"
 mkdir -p "$stage/backend" "$stage/ui"
-cp "$src/manifest.json" "$src/OMA.qml" "$stage/"
+cp "$src/manifest.json" "$src/OMA.qml" "$src/BarWidget.qml" "$stage/"
 cp "$src/backend/"*.qml "$stage/backend/"
 cp "$src/ui/"*.qml "$stage/ui/"
 

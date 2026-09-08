@@ -24,11 +24,22 @@ omarchy plugin enable kaufmann.omarag
 omarchy restart shell
 ```
 
-Open it:
+Open it from the bar — the plugin ships a button — or by hand:
 
 ```bash
 omarchy-shell shell summon kaufmann.omarag '{}'
 ```
+
+To put the button on the bar, add it to `bar.layout` in
+`~/.config/omarchy/shell.json`:
+
+```json
+{ "id": "kaufmann.omarag" }
+```
+
+`omarchy bar put` reports success but does nothing here: the plugin already
+counts as enabled through the top-level `plugins[]` entry, so the placement is
+skipped.
 
 The payload may carry a query, which is handy for a keybind:
 
@@ -70,6 +81,10 @@ loading. OMA releases them, but only when it started the server itself.
 |---|---|
 | `Enter` | Search |
 | `Esc` | Fold details → clear the query → close |
+
+The bar button toggles the same overlay. A plugin that is both `overlay` and
+`bar-widget` stays owned by the overlay loader, so the button triggers OMA
+rather than replacing it — the same arrangement `omarchy.menu` uses.
 
 More to come as the tabs arrive.
 
