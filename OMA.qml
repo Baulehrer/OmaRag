@@ -88,7 +88,21 @@ Item {
 
   // Shown briefly when an action was turned away, so a dead keypress is never
   // silent.
+  property bool detailsOpen: false
   property string notice: ""
+
+  // Elapsed seconds while we wait. The one honest thing to show when the
+  // remaining time is unknowable — a cold embedder takes past a minute, and a
+  // progress bar would be a guess.
+  property int waited: 0
+  readonly property bool waiting: backend.phase === "searching" || backend.phase === "starting"
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.waiting && root.opened
+    onTriggered: root.waited += 1
+  }
+  onWaitingChanged: root.waited = 0
   Timer { id: noticeTimer; interval: 4000; onTriggered: root.notice = "" }
   function flash(text) { root.notice = text; noticeTimer.restart() }
 
@@ -99,6 +113,9 @@ Item {
     root.opened = true
     root.hits = []
     root.query = ""
+    root.detailsOpen = false
+    root.notice = ""
+    root.pending = ""
 
     var wanted = ""
     if (payloadJson) {
@@ -108,25 +125,32 @@ Item {
       } catch (e) { /* an unreadable payload just opens OMA empty */ }
     }
     input.text = wanted
+    root.pending = wanted
 
     if (backend.phase === "idle" || backend.phase === "error") backend.connect()
     Qt.callLater(function() { input.forceActiveFocus() })
-    if (wanted) pendingQuery.restart()
+    if (wanted && backend.phase === "ready") root.runPending()
   }
 
-  // Fires the payload query once the backend is up.
-  Timer {
-    id: pendingQuery
-    interval: 700
-    repeat: true
-    running: false
-    property int tries: 0
-    onTriggered: {
-      tries += 1
-      if (tries > 90) { stop(); tries = 0; return }
-      if (backend.phase === "ready") { stop(); tries = 0; root.runQuery() }
+  // A payload query waits for the backend rather than polling for it. A timer
+  // here used to give up after a minute and leave the UI claiming nothing
+  // matched — for a query that had never run. A cold backend takes longer than
+  // any deadline worth guessing.
+  property string pending: ""
+
+  function runPending() {
+    if (!root.pending.length) return
+    var q = root.pending
+    root.pending = ""
+    input.text = q
+    root.runQuery()
+  }
+
+  Connections {
+    target: backend
+    function onPhaseChanged() {
+      if (backend.phase === "ready") root.runPending()
     }
-    onRunningChanged: if (running) tries = 0
   }
 
   function close() { root.opened = false }
@@ -203,7 +227,9 @@ Item {
 
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Escape) {
-            if (input.text.length) { input.text = ""; root.hits = [] }
+            // Work outwards: fold details, clear the query, then close.
+            if (root.detailsOpen) root.detailsOpen = false
+            else if (input.text.length) { input.text = ""; root.hits = [] }
             else root.dismiss()
             event.accepted = true
           }
@@ -360,11 +386,7 @@ Item {
             id: resultHeading
             anchors { top: inputBox.bottom; left: parent.left }
             anchors.topMargin: Style.spacing.panelGap
-            text: backend.phase === "searching" ? "SEARCHING…"
-                : root.blocked ? ""
-                : root.hits.length ? "SOURCES"
-                : root.query ? "NO MATCHES"
-                : ""
+            text: root.hits.length ? "SOURCES" : ""
             color: root.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
@@ -427,6 +449,60 @@ Item {
 
           // ------------------------------------------------------- states
 
+          Column {
+            anchors.centerIn: parent
+            width: parent.width - Style.spacing.panelPadding * 2
+            spacing: Style.spacing.md
+            visible: root.waiting && !root.hits.length
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: (backend.phase === "searching" ? "◐  Searching" : "◐  " + (backend.message || "Starting"))
+                  + (root.waited > 2 ? "   " + root.waited + "s" : "")
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              visible: root.waited > 20
+              text: "The embedding model is loading. First use after a rest takes a while."
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Column {
+            anchors.centerIn: parent
+            width: parent.width - Style.spacing.panelPadding * 2
+            spacing: Style.spacing.md
+            visible: backend.phase === "ready" && root.query.length > 0 && !root.hits.length
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Nothing matched"
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+            }
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: backend.totalChunks > 0
+                  ? "Try a more specific noun phrase — retrieval works better with the words the document itself would use."
+                  : "Nothing is indexed yet, so there is nothing to match."
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
           // The single-embedder constraint, said out loud. Muted, not red:
           // nothing is broken, the backend is simply occupied.
           Column {
@@ -465,16 +541,62 @@ Item {
             wrapMode: Text.WordWrap
           }
 
-          Text {
+          // No stack traces in the ordinary view. A sentence, one action, and
+          // the technical text folded away for whoever needs it.
+          Column {
             anchors.centerIn: parent
-            visible: backend.phase === "error"
             width: parent.width - Style.spacing.panelPadding * 2
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-            text: backend.message + "\n\n" + backend.detail
-            color: root.urgent
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            spacing: Style.spacing.lg
+            visible: backend.phase === "error"
+
+            Text {
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+              text: backend.message
+              color: root.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.subtitle
+            }
+
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.spacing.controlGap
+
+              Button {
+                text: "Retry"
+                bordered: true
+                focusable: true
+                onClicked: {
+                  root.detailsOpen = false
+                  backend.retry()
+                }
+              }
+            }
+
+            Text {
+              anchors.horizontalCenter: parent.horizontalCenter
+              text: (root.detailsOpen ? "▾" : "▸") + "  Technical details"
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.detailsOpen = !root.detailsOpen
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.detailsOpen && backend.detail.length > 0
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WrapAnywhere
+              text: backend.detail
+              color: root.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
           }
         }
       }
