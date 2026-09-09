@@ -83,6 +83,10 @@ loading. OMA releases them, but only when it started the server itself.
 | `Ctrl+Enter` | Retrieve only, no model |
 | `Esc` | Cancel the answer → fold details → clear the query → close |
 
+Clicking a cited source opens the document at that page — lilbee reports PDF page
+numbers, and zathura, okular and evince all take exactly that. Clicking a search hit
+expands it to the full retrieved passage.
+
 The model is bound to what retrieval found. Ask it something the library does not
 cover and it says so instead of filling the gap from general knowledge — lilbee's
 system prompt enforces that, and it holds in practice.

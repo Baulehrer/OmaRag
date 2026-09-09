@@ -410,6 +410,37 @@ Item {
     }
   }
 
+  // Open a cited page in a document viewer. lilbee's page numbers are PDF page
+  // numbers, not printed page labels — verified against the book: what it cites
+  // as page 293 is PDF page 293. evince's --page-index takes exactly that
+  // ("the exact page number, not a page label"), and zathura and okular count
+  // the same way.
+  //
+  // Detached, because opening a source and then closing OMA is the normal move
+  // and the viewer must not go with it.
+  function openDocument(url, pages) {
+    var path = String(url || "")
+    if (path.indexOf("file://") === 0) path = decodeURIComponent(path.substring(7))
+    if (!path.length) return
+
+    // "334-335" or "334–335" — jump to where the passage starts.
+    var first = String(pages || "").split(/[\u2013-]/)[0]
+    var page = parseInt(first, 10)
+
+    openProc.command = ["sh", "-c",
+      'p="$2"; ' +
+      'if [ -n "$p" ]; then ' +
+        'command -v zathura >/dev/null 2>&1 && exec setsid --fork zathura -P "$p" "$1"; ' +
+        'command -v okular  >/dev/null 2>&1 && exec setsid --fork okular -p "$p" "$1"; ' +
+        'command -v evince  >/dev/null 2>&1 && exec setsid --fork evince --page-index="$p" "$1"; ' +
+      'fi; ' +
+      'exec setsid --fork xdg-open "$1"',
+      "oma", path, isNaN(page) ? "" : String(page)]
+    openProc.running = true
+  }
+
+  Process { id: openProc }
+
   // ---------------------------------------------------------------- files
 
   FileView {

@@ -386,6 +386,7 @@ Item {
             muted: root.muted
             accent: root.accent
             onCancelRequested: backend.cancelAsk()
+            onOpenRequested: function(url, pages) { backend.openDocument(url, pages) }
           }
 
           SourceList {
@@ -398,6 +399,7 @@ Item {
             hits: root.hits
             foreground: root.foreground
             muted: root.muted
+            accent: root.accent
           }
 
           StatePanel {

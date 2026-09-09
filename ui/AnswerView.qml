@@ -24,6 +24,7 @@ Item {
   property color accent: Color.accent
 
   signal cancelRequested()
+  signal openRequested(string url, string pages)
 
   Flickable {
     anchors.fill: parent
@@ -67,24 +68,32 @@ Item {
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         wrapMode: Text.WordWrap
-        textFormat: Text.PlainText
+        // The model writes Markdown — bold runs and bullet lists — and as plain
+        // text that arrives as literal asterisks in front of the reader.
+        textFormat: Text.MarkdownText
         lineHeight: 1.35
       }
 
       Text {
         visible: root.sources.length > 0
-        text: "PASSAGES USED"
+        text: "PASSAGES USED — click to open the page"
         color: root.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.letterSpacing: 1.5
       }
 
+      // The model reads the passages correctly and can still interpret them
+      // wrongly, so getting to the actual page in one click is the safety net,
+      // not a convenience. For a textbook the page beats the chunk anyway:
+      // figures, tables and formulae survive there, in OCR text they do not.
       Repeater {
         model: root.sources
 
         Row {
+          id: sourceRow
           spacing: Style.spacing.sm
+          property bool hot: hover.hovered
 
           Text {
             text: modelData.index + ""
@@ -94,7 +103,7 @@ Item {
           }
           Text {
             text: modelData.title || ""
-            color: root.foreground
+            color: sourceRow.hot ? root.accent : root.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             width: Math.min(implicitWidth, Style.space(420))
@@ -102,9 +111,14 @@ Item {
           }
           Text {
             text: modelData.pages ? "p. " + modelData.pages : ""
-            color: root.muted
+            color: sourceRow.hot ? root.accent : root.muted
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
+          }
+
+          HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
+          TapHandler {
+            onTapped: root.openRequested(modelData.url || "", modelData.pages || "")
           }
         }
       }
