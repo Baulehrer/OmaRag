@@ -1,6 +1,8 @@
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Ui
+import "Formula.js" as Formula
 
 // The answer, and the passages it was allowed to use.
 //
@@ -26,6 +28,7 @@ Item {
 
   signal cancelRequested()
   signal openRequested(string url, string pages)
+  signal copied(int characters)
 
   Flickable {
     anchors.fill: parent
@@ -61,18 +64,40 @@ Item {
         }
       }
 
-      Text {
+      // A TextEdit rather than a Text, because an answer you cannot select is
+      // an answer you cannot quote. Read-only, so it behaves like text that
+      // happens to be selectable.
+      TextEdit {
+        id: body
         width: parent.width
         visible: root.answer.length > 0
-        text: root.answer
+        // StyledText, not MarkdownText: subscripts matter more here than
+        // Markdown's own feature set, and Formula.js carries the light Markdown
+        // the model writes across into the same markup.
+        textFormat: TextEdit.RichText
+        text: Formula.toStyled(root.answer)
         color: root.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-        wrapMode: Text.WordWrap
-        // The model writes Markdown — bold runs and bullet lists — and as plain
-        // text that arrives as literal asterisks in front of the reader.
-        textFormat: Text.MarkdownText
-        lineHeight: 1.35
+        wrapMode: TextEdit.WordWrap
+        readOnly: true
+        selectByMouse: true
+        selectionColor: Style.selectionFill
+
+        // Copy on release rather than on every selection change: dragging a
+        // selection would otherwise write to the clipboard on every pixel.
+        onSelectedTextChanged: copyTimer.restart()
+        Timer {
+          id: copyTimer
+          interval: 400
+          onTriggered: {
+            var sel = body.selectedText
+            if (!sel || !sel.length) return
+            Quickshell.execDetached(["bash", "-c",
+                                     "printf %s " + Util.shellQuote(sel) + " | wl-copy"])
+            root.copied(sel.length)
+          }
+        }
       }
 
       Text {

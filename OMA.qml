@@ -249,6 +249,22 @@ Item {
   // Enter asks, Ctrl+Enter retrieves only. Both are slow here — retrieval alone
   // takes 15 seconds — so the difference is 15 versus 30-odd, not instant
   // versus slow. The short way is for when the passage is what you want.
+  property int historyIndex: -1
+
+  // Recall shows the stored answer as it was — no new call to the backend, and
+  // no pretence that it was answered again just now.
+  function recall(index) {
+    var e = history.entries[index]
+    if (!e) return
+    root.historyIndex = index
+    root.tab = "chat"
+    root.query = e.question
+    root.hits = []
+    root.selected = -1
+    chatTab.setInputText(e.question)
+    backend.showStored(e.answer, e.sources)
+  }
+
   function runQuery() {
     var q = chatTab.inputText().trim()
     if (!q) return
@@ -256,6 +272,7 @@ Item {
     root.query = q
     root.hits = []
     root.selected = -1
+    root.historyIndex = -1
     backend.ask(q)
   }
 
@@ -298,12 +315,17 @@ Item {
     onRunningChanged: if (!running) Qt.callLater(function() { chatTab.focusInput() })
   }
 
+  History { id: history }
+
   Lilbee {
     id: backend
     persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
     answerModel: root.setting("answerModel", "")
     onSearchFinished: function(rows) { root.hits = rows }
     onRefused: function(reason) { root.flash(reason) }
+    onAnswerFinished: function(ok) {
+      if (ok) history.add(root.query, backend.answerText, backend.answerSources)
+    }
   }
 
   Connections {
@@ -511,6 +533,11 @@ Item {
             onPickFiles: root.pickFiles()
             onPickFolder: root.pickFolder()
             onSelectedChanged: root.selected = Math.max(-1, Math.min(selected, root.rowCount - 1))
+            history: history.entries
+            historyIndex: root.historyIndex
+            onHistoryPicked: function(i) { root.recall(i) }
+            onHistoryRemoved: function(i) { history.removeAt(i) }
+            onCopied: function(n) { root.flash(n + " characters copied") }
           }
 
           LibraryTab {

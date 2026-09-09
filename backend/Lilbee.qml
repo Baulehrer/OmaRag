@@ -61,11 +61,13 @@ Item {
   // citations consistent — running our own search alongside would produce a
   // different list under the same numbers.
   readonly property string answerText: {
+    if (root.showingStored) return root.rawAnswer.trim()
     var i = root.rawAnswer.search(/\n\s*Sources:/)
     return (i === -1 ? root.rawAnswer : root.rawAnswer.substring(0, i)).trim()
   }
 
   readonly property var answerSources: {
+    if (root.showingStored) return root.storedSources
     var i = root.rawAnswer.search(/\n\s*Sources:/)
     if (i === -1) return []
     // `ask` wraps its output to a fixed width, pipe or not, so a single source
@@ -367,6 +369,18 @@ Item {
     }, root.searchTimeout)
   }
 
+  // Put a stored answer back on screen without asking anything. The parsed
+  // fields are set directly, so a recalled answer looks exactly like the one
+  // that was given — not a fresh reply that happens to match.
+  property var storedSources: []
+  property bool showingStored: false
+
+  function showStored(answer, sources) {
+    root.storedSources = sources || []
+    root.showingStored = true
+    root.rawAnswer = String(answer || "")
+  }
+
   // ---------------------------------------------------------------- indexing
 
   property string indexingWhat: ""
@@ -424,6 +438,7 @@ Item {
 
     root.rawAnswer = ""
     root.answerDetail = ""
+    root.showingStored = false
     root.phase = "answering"
 
     var cmd = [root.bin, "ask", String(question), "--no-sync"]

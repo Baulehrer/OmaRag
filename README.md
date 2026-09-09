@@ -87,6 +87,12 @@ loading. OMA releases them, but only when it started the server itself.
 | `Ctrl+O` | Add documents — files, one or many |
 | `Ctrl+Shift+O` | Add a folder |
 | `Esc` | Cancel the answer → fold details → drop the selection → clear the query → close |
+| `Tab` / `1`–`3` | Move between Setup, Chat and Library |
+
+Answers are selectable, and a selection lands on the clipboard on its own.
+Subscripts and superscripts are set properly — `f_ck` and `N/mm^2` come out as
+they should — and every question is kept in
+`~/.local/state/omarchy/omarag-history.json` so it can be opened again.
 
 `Enter` does the obvious thing for wherever you are: in the input it asks, on a
 result row it acts on that row. `Super+A` is a line in `~/.config/hypr/bindings.lua`:

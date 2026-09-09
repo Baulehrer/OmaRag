@@ -20,7 +20,7 @@ stage="$(mktemp -d "${TMPDIR:-/tmp}/omarag-stage.XXXXXX")"
 mkdir -p "$stage/backend" "$stage/ui"
 cp "$src/manifest.json" "$src/OMA.qml" "$src/BarWidget.qml" "$stage/"
 cp "$src/backend/"*.qml "$stage/backend/"
-cp "$src/ui/"*.qml "$stage/ui/"
+cp "$src/ui/"*.qml "$src/ui/"*.js "$stage/ui/"
 
 omarchy-plugin-validate "$stage" || { rm -rf "$stage"; exit 1; }
 rm -rf "$dst"

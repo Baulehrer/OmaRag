@@ -30,6 +30,7 @@ Item {
   signal detailsToggled()
   signal pickFiles()
   signal pickFolder()
+  signal copied(int characters)
 
   readonly property bool answering: backend && backend.phase === "answering"
   readonly property bool indexing: backend && backend.phase === "indexing"
@@ -52,9 +53,28 @@ Item {
   function inputText() { return input.text }
   function setInputText(t) { input.text = t }
 
+  property var history: []
+  property int historyIndex: -1
+  signal historyPicked(int index)
+  signal historyRemoved(int index)
+
+  HistoryPane {
+    id: historyPane
+    anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
+    width: Style.space(200)
+    entries: root.history
+    current: root.historyIndex
+    foreground: root.foreground
+    muted: root.muted
+    accent: root.accent
+    onPicked: function(i) { root.historyPicked(i) }
+    onRemoveRequested: function(i) { root.historyRemoved(i) }
+  }
+
   Rectangle {
     id: inputBox
-    anchors { top: parent.top; left: parent.left; right: parent.right }
+    anchors { top: parent.top; left: historyPane.right; right: parent.right }
+    anchors.leftMargin: Style.spacing.panelPadding
     height: Style.spacing.controlHeight + Style.spacing.md
     color: Style.controlFill(input.activeFocus, false, Color.menu.text, root.accent)
     border.color: Style.controlBorder(input.activeFocus, false, Color.menu.text, root.accent)
@@ -103,7 +123,7 @@ Item {
   }
 
   AnswerView {
-    anchors { top: inputBox.bottom; bottom: parent.bottom; left: parent.left; right: parent.right }
+    anchors { top: inputBox.bottom; bottom: parent.bottom; left: inputBox.left; right: parent.right }
     anchors.topMargin: Style.spacing.panelGap
     visible: root.showingAnswer && !root.indexing
     answer: root.backend ? root.backend.answerText : ""
@@ -115,11 +135,12 @@ Item {
     muted: root.muted
     accent: root.accent
     onOpenRequested: function(url, pages) { root.openSource(url, pages) }
+    onCopied: function(n) { root.copied(n) }
   }
 
   SourceList {
     id: sourceList
-    anchors { top: inputBox.bottom; bottom: parent.bottom; left: parent.left; right: parent.right }
+    anchors { top: inputBox.bottom; bottom: parent.bottom; left: inputBox.left; right: parent.right }
     anchors.topMargin: Style.spacing.panelGap
     visible: !root.showingAnswer && !root.indexing && root.hits.length > 0
     hits: root.hits
@@ -134,7 +155,7 @@ Item {
   }
 
   StatePanel {
-    anchors { top: inputBox.bottom; bottom: parent.bottom; left: parent.left; right: parent.right }
+    anchors { top: inputBox.bottom; bottom: parent.bottom; left: inputBox.left; right: parent.right }
     anchors.topMargin: Style.spacing.panelGap
     mode: root.panelMode
     what: root.backend ? root.backend.indexingWhat : ""
@@ -153,7 +174,7 @@ Item {
   }
 
   Text {
-    anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+    anchors { bottom: parent.bottom; left: inputBox.left; right: parent.right }
     visible: root.notice.length > 0
     text: root.notice
     color: root.muted
