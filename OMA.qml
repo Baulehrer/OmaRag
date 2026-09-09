@@ -637,6 +637,7 @@ Item {
             onPickFiles: root.pickFiles()
             onPickFolder: root.pickFolder()
             onSelectedChanged: root.selected = Math.max(-1, Math.min(selected, root.rowCount - 1))
+            onActivateRow: root.activateSelected()
             history: history.entries
             historyIndex: root.historyIndex
             onHistoryPicked: function(i) { root.recall(i) }

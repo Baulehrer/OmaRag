@@ -24,6 +24,7 @@ Item {
   property color accent: Color.accent
   property color urgent: Color.urgent
 
+  signal activateRow()
   signal ask()
   signal searchOnly()
   signal openSource(string url, string pages)
@@ -106,9 +107,13 @@ Item {
         if (event.key === Qt.Key_Down) { root.selected = root.selected + 1; event.accepted = true; return }
         if (event.key === Qt.Key_Up) { root.selected = root.selected - 1; event.accepted = true; return }
         if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
-        if (event.modifiers & Qt.ControlModifier) { root.searchOnly(); event.accepted = true }
-        // Enter with a row selected is handled by the card; otherwise
-        // onAccepted asks.
+        if (event.modifiers & Qt.ControlModifier) { root.searchOnly(); event.accepted = true; return }
+        // The card also handles Return, but it never gets the chance: a
+        // TextInput emits onAccepted for any Return this handler does not
+        // accept, and onAccepted asks. So a selected row has to be acted on
+        // here, and the event accepted, or Enter silently re-asks the question
+        // instead of opening the cited page.
+        if (root.selected >= 0) { root.activateRow(); event.accepted = true }
       }
 
       Text {

@@ -78,7 +78,14 @@ Item {
     var re = /(\d+)\.\s*\[([^\]]*)\]\(([^)]*)\)(?:\s*,\s*pages?\s*([0-9\u2013-]+))?/g
     var m
     while ((m = re.exec(block)) !== null)
-      out.push({ index: parseInt(m[1], 10), title: m[2], url: m[3], pages: m[4] || "" })
+      // The fold turned every line break into a space — right for the title,
+      // wrong inside the URL, where `ask` breaks mid-path and the space lands
+      // in the middle of an escape: ".../04%20Lehr-%20und%20L ernmaterial/...".
+      // That is also what made decodeURIComponent throw "URI malformed"; a
+      // lone `%` was never the cause. A real space in a markdown link is
+      // percent-encoded, so stripping whitespace here cannot lose anything.
+      out.push({ index: parseInt(m[1], 10), title: m[2],
+                 url: m[3].replace(/\s+/g, ""), pages: m[4] || "" })
     return out
   }
 

@@ -20,6 +20,14 @@ Item {
   signal changed(string key, var value)
   signal resetRequested(string key)
 
+  // Optional: a value we measured to work better than lilbee's default, with
+  // the reason. Shown under lilbee's own help, never applied on its own.
+  property var recommended: undefined
+  property string why: ""
+  readonly property bool hasHint: root.recommended !== undefined
+  readonly property bool atRecommended: root.hasHint && root.meta
+      && String(root.meta.value) === String(root.recommended)
+
   readonly property string key: meta ? String(meta.key) : ""
   readonly property string kind: {
     if (!meta) return "str"
@@ -31,7 +39,9 @@ Item {
   }
   readonly property bool modified: meta && JSON.stringify(meta.value) !== JSON.stringify(meta.default)
 
-  implicitHeight: row.implicitHeight + help.implicitHeight + Style.spacing.sm
+  implicitHeight: row.implicitHeight + help.implicitHeight
+                  + (hint.visible ? hint.implicitHeight + Style.spacing.xxs : 0)
+                  + Style.spacing.sm
 
   Row {
     id: row
@@ -126,6 +136,21 @@ Item {
     anchors.topMargin: Style.spacing.xxs
     text: root.meta ? String(root.meta.help || "") : ""
     color: root.muted
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
+    wrapMode: Text.WordWrap
+  }
+
+  Text {
+    id: hint
+    anchors { top: help.bottom; left: parent.left; right: parent.right }
+    anchors.leftMargin: Style.space(210) + Style.spacing.md
+    anchors.topMargin: Style.spacing.xxs
+    visible: root.hasHint
+    // Green-lit once the value matches; otherwise it reads as a suggestion.
+    text: (root.atRecommended ? "✓ empfohlen: " : "empfohlen: ")
+          + String(root.recommended) + (root.why.length ? " — " + root.why : "")
+    color: root.atRecommended ? root.muted : root.accent
     font.family: OmaFont.face
     font.pixelSize: OmaFont.caption
     wrapMode: Text.WordWrap

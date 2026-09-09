@@ -16,6 +16,8 @@ Column {
   property string title: ""
   property var keys: []
   property var backend: null
+  // { schluessel: { value: …, why: "…" } } — rein beschreibend, ändert nichts.
+  property var recommendations: ({})
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -47,6 +49,9 @@ Column {
       }
       visible: meta !== null
       height: meta !== null ? implicitHeight : 0
+      recommended: root.recommendations[modelData] ? root.recommendations[modelData].value
+                                                   : undefined
+      why: root.recommendations[modelData] ? (root.recommendations[modelData].why || "") : ""
       foreground: root.foreground
       muted: root.muted
       accent: root.accent
