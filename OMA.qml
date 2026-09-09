@@ -69,8 +69,16 @@ Item {
   // Which result row the keyboard is on. -1 means the input: typing continues,
   // and Enter asks. Once a row is picked, Enter acts on that row instead — the
   // one key does the obvious thing for wherever you are.
+  property string tab: "chat"
+  readonly property var tabs: [
+    { id: "setup",   label: "SETUP" },
+    { id: "chat",    label: "CHAT" },
+    { id: "library", label: "LIBRARY" }
+  ]
+
   property int selected: -1
-  readonly property int rowCount: root.showingAnswer ? backend.answerSources.length : root.hits.length
+  readonly property int rowCount: root.tab !== "chat" ? 0
+                               : (root.showingAnswer ? backend.answerSources.length : root.hits.length)
 
   function moveSelection(delta) {
     if (!root.rowCount) return
@@ -86,10 +94,16 @@ Item {
       var src = backend.answerSources[root.selected]
       if (src) backend.openDocument(src.url, src.pages)
     } else {
-      sourceList.expanded = (sourceList.expanded === root.selected) ? -1 : root.selected
+      chatTab.expandSelected()
     }
     return true
   }
+
+  // The wordmark breathes while work is happening — and only then. Movement
+  // that is always on stops meaning anything.
+  readonly property bool working: backend.phase === "starting" || backend.phase === "searching"
+                               || backend.phase === "answering" || backend.phase === "indexing"
+                               || backend.phase === "busy"
 
   readonly property bool blocked: backend.phase === "busy"
   readonly property bool indexing: backend.phase === "indexing"
@@ -177,11 +191,11 @@ Item {
         if (parsed && typeof parsed.query === "string") wanted = parsed.query
       } catch (e) { /* an unreadable payload just opens OMA empty */ }
     }
-    input.text = wanted
+    chatTab.setInputText(wanted)
     root.pending = wanted
 
     if (backend.phase === "idle" || backend.phase === "error") backend.connect()
-    Qt.callLater(function() { input.forceActiveFocus() })
+    Qt.callLater(function() { chatTab.focusInput() })
     if (wanted && backend.phase === "ready") root.runPending()
   }
 
@@ -206,7 +220,7 @@ Item {
     if (!root.pending.length) return
     var q = root.pending
     root.pending = ""
-    input.text = q
+    chatTab.setInputText(q)
     root.runQuery()
   }
 
@@ -214,7 +228,7 @@ Item {
   // takes 15 seconds — so the difference is 15 versus 30-odd, not instant
   // versus slow. The short way is for when the passage is what you want.
   function runQuery() {
-    var q = input.text.trim()
+    var q = chatTab.inputText().trim()
     if (!q) return
     if (root.blocked) { root.flash(backend.message); return }
     root.query = q
@@ -224,7 +238,7 @@ Item {
   }
 
   function runSearchOnly() {
-    var q = input.text.trim()
+    var q = chatTab.inputText().trim()
     if (!q) return
     if (root.blocked) { root.flash(backend.message); return }
     root.query = q
@@ -259,7 +273,7 @@ Item {
         if (paths.length) backend.addPaths(paths)
       }
     }
-    onRunningChanged: if (!running) Qt.callLater(function() { input.forceActiveFocus() })
+    onRunningChanged: if (!running) Qt.callLater(function() { chatTab.focusInput() })
   }
 
   Lilbee {
@@ -330,6 +344,20 @@ Item {
         // screen its Flickable can hold the focus, and navigation must not
         // depend on which child happens to have it.
         Keys.onPressed: function(event) {
+          // Tab walks the sections; 1-3 jump straight there. Both only when
+          // the text field is not where the typing should go.
+          if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            tabStrip.step(event.key === Qt.Key_Backtab ? -1 : 1)
+            event.accepted = true
+            return
+          }
+          if (event.key >= Qt.Key_1 && event.key <= Qt.Key_3
+              && !(event.modifiers & Qt.ControlModifier)
+              && !chatTab.inputText().length) {
+            root.tab = root.tabs[event.key - Qt.Key_1].id
+            event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
             if (event.modifiers & Qt.ShiftModifier) root.pickFolder()
             else root.pickFiles()
@@ -349,8 +377,8 @@ Item {
             if (root.answering) backend.cancelAsk()
             else if (root.detailsOpen) root.detailsOpen = false
             else if (root.selected >= 0) root.selected = -1
-            else if (input.text.length || backend.answerText.length) {
-              input.text = ""; root.hits = []; root.query = ""; backend.rawAnswer = ""
+            else if (chatTab.inputText().length || backend.answerText.length) {
+              chatTab.setInputText(""); root.hits = []; root.query = ""; backend.rawAnswer = ""
             }
             else root.dismiss()
             event.accepted = true
@@ -361,18 +389,46 @@ Item {
         Item {
           id: header
           anchors { top: parent.top; left: parent.left; right: parent.right }
-          height: Style.font.title + Style.spacing.md * 2
+          height: Style.font.title + Style.spacing.lg * 2
 
           Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: "OMA"
-            color: root.foreground
+            id: wordmark
+            anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+            text: "OmaRag"
+            color: root.working ? root.accent : root.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.title
             font.letterSpacing: 1.5
+
+            Behavior on color { ColorAnimation { duration: 240 } }
+
+            SequentialAnimation on opacity {
+              running: root.working && root.opened
+              loops: Animation.Infinite
+              alwaysRunToEnd: true
+              NumberAnimation { to: 0.55; duration: 800; easing.type: Easing.InOutSine }
+              NumberAnimation { to: 1.0;  duration: 800; easing.type: Easing.InOutSine }
+            }
+          }
+
+          TabStrip {
+            id: tabStrip
+            anchors {
+              left: wordmark.right; right: status.left
+              top: parent.top; bottom: parent.bottom
+            }
+            anchors.leftMargin: Style.spacing.huge
+            anchors.rightMargin: Style.spacing.huge
+            tabs: root.tabs
+            current: root.tab
+            foreground: root.foreground
+            muted: root.muted
+            accent: root.accent
+            onSelected: function(id) { root.tab = id }
           }
 
           Row {
+            id: status
             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
             spacing: Style.spacing.sm
 
@@ -393,142 +449,58 @@ Item {
           }
         }
 
-        // ---------------------------------------------------------- library
-        LibraryPane {
-          id: library
-          anchors { top: header.bottom; bottom: parent.bottom; left: parent.left }
-          anchors.topMargin: Style.spacing.panelGap
-          width: Style.space(220)
-          documents: backend.documents
-          totalChunks: backend.totalChunks
-          ready: backend.phase === "ready"
-          foreground: root.foreground
-          muted: root.muted
-        }
-
-        // ---------------------------------------------------------- ask
+        // ---------------------------------------------------------- tabs
         Item {
+          id: content
           anchors {
             top: header.bottom; bottom: parent.bottom
-            left: library.right; right: parent.right
+            left: parent.left; right: parent.right
           }
           anchors.topMargin: Style.spacing.panelGap
-          anchors.leftMargin: Style.spacing.panelPadding
 
-          Rectangle {
-            id: inputBox
-            anchors { top: parent.top; left: parent.left; right: parent.right }
-            height: Style.spacing.controlHeight + Style.spacing.md
-            color: Style.controlFill(input.activeFocus, false, Color.menu.text, root.accent)
-            border.color: Style.controlBorder(input.activeFocus, false, Color.menu.text, root.accent)
-            border.width: Style.controlBorderWidth(input.activeFocus, false)
-            radius: Style.cornerRadius
-
-            TextInput {
-              id: input
-              anchors.fill: parent
-              anchors.leftMargin: Style.spacing.rowPaddingX
-              anchors.rightMargin: Style.spacing.rowPaddingX
-              verticalAlignment: TextInput.AlignVCenter
-              color: root.foreground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-              selectByMouse: true
-              onAccepted: root.runQuery()
-
-              // Up and Down do nothing in a single-line field, so they are
-              // free to walk the results without stealing anything from typing.
-              Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
-                  if (event.modifiers & Qt.ShiftModifier) root.pickFolder()
-                  else root.pickFiles()
-                  event.accepted = true
-                  return
-                }
-                if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
-                if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
-                if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
-
-                if (event.modifiers & Qt.ControlModifier) {
-                  root.runSearchOnly()
-                  event.accepted = true
-                } else if (root.selected >= 0) {
-                  root.activateSelected()
-                  event.accepted = true
-                }
-                // Otherwise onAccepted asks, as before.
-              }
-
-              Text {
-                anchors.fill: parent
-                verticalAlignment: Text.AlignVCenter
-                visible: !input.text.length
-                text: "Ask your knowledge…"
-                color: root.muted
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-              }
-            }
-          }
-
-          AnswerView {
-            anchors {
-              top: inputBox.bottom; bottom: parent.bottom
-              left: parent.left; right: parent.right
-            }
-            anchors.topMargin: Style.spacing.panelGap
-            visible: root.showingAnswer
-            answer: backend.answerText
-            sources: backend.answerSources
-            answering: root.answering
-            waited: root.waited
-            current: root.selected
-            foreground: root.foreground
-            muted: root.muted
-            accent: root.accent
-            onCancelRequested: backend.cancelAsk()
-            onOpenRequested: function(url, pages) { backend.openDocument(url, pages) }
-          }
-
-          SourceList {
-            id: sourceList
-            anchors {
-              top: inputBox.bottom; bottom: parent.bottom
-              left: parent.left; right: parent.right
-            }
-            anchors.topMargin: Style.spacing.panelGap
-            visible: !root.showingAnswer && root.hits.length > 0
-            hits: root.hits
-            current: root.selected
-            foreground: root.foreground
-            muted: root.muted
-            accent: root.accent
-          }
-
-          StatePanel {
+          SetupTab {
             anchors.fill: parent
-            mode: root.panelMode
-            what: backend.indexingWhat
-            headline: backend.phase === "error" ? backend.message : (backend.message || "Searching")
-            detail: backend.detail
-            waited: root.waited
-            hasLibrary: backend.totalChunks > 0
-            detailsOpen: root.detailsOpen
+            visible: root.tab === "setup"
+            backend: backend
             foreground: root.foreground
             muted: root.muted
-            urgent: root.urgent
-            onRetryRequested: backend.retry()
-            onDetailsToggled: root.detailsOpen = !root.detailsOpen
           }
 
-          Text {
-            anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
-            visible: root.notice.length > 0
-            text: root.notice
-            color: root.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
+          ChatTab {
+            id: chatTab
+            anchors.fill: parent
+            visible: root.tab === "chat"
+            backend: backend
+            hits: root.hits
+            query: root.query
+            selected: root.selected
+            waited: root.waited
+            detailsOpen: root.detailsOpen
+            notice: root.notice
+            foreground: root.foreground
+            muted: root.muted
+            accent: root.accent
+            urgent: root.urgent
+            onAsk: root.runQuery()
+            onSearchOnly: root.runSearchOnly()
+            onOpenSource: function(url, pages) { backend.openDocument(url, pages) }
+            onRetry: backend.retry()
+            onDetailsToggled: root.detailsOpen = !root.detailsOpen
+            onPickFiles: root.pickFiles()
+            onPickFolder: root.pickFolder()
+            onSelectedChanged: root.selected = Math.max(-1, Math.min(selected, root.rowCount - 1))
+          }
+
+          LibraryTab {
+            anchors.fill: parent
+            visible: root.tab === "library"
+            backend: backend
+            waited: root.waited
+            foreground: root.foreground
+            muted: root.muted
+            accent: root.accent
+            onPickFiles: root.pickFiles()
+            onPickFolder: root.pickFolder()
           }
         }
       }

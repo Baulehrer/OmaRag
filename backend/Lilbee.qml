@@ -370,6 +370,11 @@ Item {
   // ---------------------------------------------------------------- indexing
 
   property string indexingWhat: ""
+  // Filled by the log watcher — see IngestWatch. -1 means "not known yet",
+  // which the progress view renders as elapsed time only.
+  property string indexStage: ""
+  property int indexDone: -1
+  property int indexTotal: -1
 
   // `add` copies or links the files and indexes them in one call. It pins the
   // single embedder for its whole run, which is why everything else is locked
@@ -458,7 +463,12 @@ Item {
   // and the viewer must not go with it.
   function openDocument(url, pages) {
     var path = String(url || "")
-    if (path.indexOf("file://") === 0) path = decodeURIComponent(path.substring(7))
+    if (path.indexOf("file://") === 0) {
+      // A lone `%` in a filename makes decodeURIComponent throw. The raw path
+      // is still worth trying — better than dropping the click.
+      var encoded = path.substring(7)
+      try { path = decodeURIComponent(encoded) } catch (e) { path = encoded }
+    }
     if (!path.length) return
 
     // "334-335" or "334–335" — jump to where the passage starts.
