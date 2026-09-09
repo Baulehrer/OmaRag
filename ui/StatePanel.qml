@@ -9,8 +9,9 @@ import qs.Ui
 Item {
   id: root
 
-  // waiting · blocked · empty · error · none
+  // waiting · indexing · blocked · empty · error · none
   property string mode: "none"
+  property string what: ""
   property string headline: ""
   property string detail: ""
   property int waited: 0
@@ -48,6 +49,44 @@ Item {
       color: root.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
+    }
+  }
+
+  // ------------------------------------------------------------- indexing
+  // No percentage: lilbee reports no progress for `add`, so the only honest
+  // numbers are what is being indexed and how long it has been going.
+  Column {
+    anchors.centerIn: parent
+    width: parent.width - Style.spacing.panelPadding * 2
+    spacing: Style.spacing.md
+    visible: root.mode === "indexing"
+
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      text: "◐  Indexing" + (root.waited > 2 ? "   " + root.waited + "s" : "")
+      color: root.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.subtitle
+    }
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      wrapMode: Text.WordWrap
+      text: root.what
+      color: root.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+    }
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      wrapMode: Text.WordWrap
+      text: "Extracting, chunking and embedding. A book takes minutes.\n"
+          + "Search and answering wait until this finishes."
+      color: root.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
     }
   }
 

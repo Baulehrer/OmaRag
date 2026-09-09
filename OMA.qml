@@ -92,6 +92,7 @@ Item {
   }
 
   readonly property bool blocked: backend.phase === "busy"
+  readonly property bool indexing: backend.phase === "indexing"
   readonly property bool answering: backend.phase === "answering"
   readonly property bool waiting: backend.phase === "searching" || backend.phase === "starting"
 
@@ -102,18 +103,20 @@ Item {
   Timer {
     interval: 1000
     repeat: true
-    running: (root.waiting || root.answering) && root.opened
+    running: (root.waiting || root.answering || root.indexing) && root.opened
     onTriggered: root.waited += 1
   }
   onWaitingChanged: root.waited = 0
   onAnsweringChanged: root.waited = 0
+  onIndexingChanged: root.waited = 0
 
   readonly property bool showingAnswer: root.answering || backend.answerText.length > 0
 
   readonly property string panelMode: {
     if (backend.phase === "error") return "error"
+    if (root.indexing) return "indexing"
     if (root.blocked) return "blocked"
-    if (root.showingAnswer) return "none"
+    if (root.showingAnswer && !root.indexing) return "none"
     if (root.waiting && !root.hits.length) return "waiting"
     if (backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
     return "none"
@@ -126,6 +129,7 @@ Item {
       case "starting":
       case "searching":
       case "answering":
+      case "indexing":
       case "busy": return "◐"
       default: return "○"
     }
@@ -139,6 +143,7 @@ Item {
       case "starting": return backend.message || "Starting"
       case "searching": return "Searching"
       case "answering": return "Answering"
+      case "indexing": return "Indexing"
       case "busy": return "Busy"
       case "error": return "Error"
       default: return "Sleeping"
@@ -229,6 +234,34 @@ Item {
     backend.search(q, 5)
   }
 
+  // The overlay holds the keyboard exclusively, but a file chooser still gets
+  // it — verified: typing reached zenity's search field with OMA open. So no
+  // juggling of the layer-shell focus is needed.
+  function pickFiles() {
+    if (picker.running) return
+    picker.command = ["zenity", "--file-selection", "--multiple", "--separator=\n",
+                      "--title=Add documents to OMA"]
+    picker.running = true
+  }
+
+  function pickFolder() {
+    if (picker.running) return
+    picker.command = ["zenity", "--file-selection", "--directory",
+                      "--title=Add a folder to OMA"]
+    picker.running = true
+  }
+
+  Process {
+    id: picker
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var paths = String(text).split("\n").filter(function(p) { return p.trim().length > 0 })
+        if (paths.length) backend.addPaths(paths)
+      }
+    }
+    onRunningChanged: if (!running) Qt.callLater(function() { input.forceActiveFocus() })
+  }
+
   Lilbee {
     id: backend
     persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
@@ -248,12 +281,19 @@ Item {
 
   PanelWindow {
     id: panel
-    visible: root.opened
+    // Steps aside while the file chooser is up. An overlay layer sits above
+    // ordinary windows, so the dialog would otherwise be drawn behind it —
+    // running, focused, and invisible.
+    visible: root.opened && !picker.running
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
     WlrLayershell.namespace: "omarchy-omarag"
     WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+    // Released while the file chooser is up. Holding the keyboard exclusively
+    // meant the dialog never got it and the typing landed in OMA's own input
+    // instead — the path became a question.
+    WlrLayershell.keyboardFocus: picker.running ? WlrKeyboardFocus.None
+                                                : WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
     Rectangle { anchors.fill: parent; color: Color.menu.scrim }
@@ -290,6 +330,12 @@ Item {
         // screen its Flickable can hold the focus, and navigation must not
         // depend on which child happens to have it.
         Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
+            if (event.modifiers & Qt.ShiftModifier) root.pickFolder()
+            else root.pickFiles()
+            event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
           if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
           if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.selected >= 0) {
@@ -393,6 +439,12 @@ Item {
               // Up and Down do nothing in a single-line field, so they are
               // free to walk the results without stealing anything from typing.
               Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
+                  if (event.modifiers & Qt.ShiftModifier) root.pickFolder()
+                  else root.pickFiles()
+                  event.accepted = true
+                  return
+                }
                 if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
                 if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
                 if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
@@ -456,6 +508,7 @@ Item {
           StatePanel {
             anchors.fill: parent
             mode: root.panelMode
+            what: backend.indexingWhat
             headline: backend.phase === "error" ? backend.message : (backend.message || "Searching")
             detail: backend.detail
             waited: root.waited

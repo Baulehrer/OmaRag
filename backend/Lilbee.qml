@@ -40,6 +40,9 @@ Item {
   // while the embedding model loads.
   readonly property int quickTimeout: 15000
   readonly property int searchTimeout: 180000
+  // Indexing a 670-page book took 13 minutes. A deadline here is a last
+  // resort, not a schedule.
+  readonly property int indexTimeout: 2400000
 
   property string sessionId: ""
   property bool ownsDaemon: false
@@ -77,6 +80,7 @@ Item {
     return out
   }
 
+  signal indexingFinished(bool ok)
   signal answerStarted()
   signal answerFinished(bool ok)
   signal statusUpdated()
@@ -361,6 +365,40 @@ Item {
       rows.sort(function(a, b) { return (b.score || 0) - (a.score || 0) })
       root.searchFinished(rows)
     }, root.searchTimeout)
+  }
+
+  // ---------------------------------------------------------------- indexing
+
+  property string indexingWhat: ""
+
+  // `add` copies or links the files and indexes them in one call. It pins the
+  // single embedder for its whole run, which is why everything else is locked
+  // out while it works rather than left to hang.
+  function addPaths(paths) {
+    if (!paths || !paths.length) return
+    if (root.phase === "busy") { root.refused(root.message); return }
+    if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
+
+    root.indexingWhat = paths.length === 1
+      ? String(paths[0]).split("/").pop()
+      : paths.length + " items"
+    root.phase = "indexing"
+    root.message = ""
+
+    root._callTool("add", { paths: paths }, function(rows, err) {
+      // A timeout does not mean it stopped — the daemon keeps working, and
+      // there is no cancel for `add`. Saying "busy" is the truthful state.
+      if (err === "timeout") { root._enterBusy(); root.indexingFinished(false); return }
+      root.phase = "ready"
+      root.indexingWhat = ""
+      if (err) {
+        root._fail(root._humanise(err), "add: " + err)
+        root.indexingFinished(false)
+        return
+      }
+      root.refresh()
+      root.indexingFinished(true)
+    }, root.indexTimeout)
   }
 
   // ---------------------------------------------------------------- answering

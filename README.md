@@ -84,6 +84,8 @@ loading. OMA releases them, but only when it started the server itself.
 | `Ctrl+Enter` | Retrieve only, no model |
 | `↑` `↓` | Walk the results; up from the first row returns to the input |
 | `Enter` on a row | Open the cited page, or expand the passage |
+| `Ctrl+O` | Add documents — files, one or many |
+| `Ctrl+Shift+O` | Add a folder |
 | `Esc` | Cancel the answer → fold details → drop the selection → clear the query → close |
 
 `Enter` does the obvious thing for wherever you are: in the input it asks, on a
