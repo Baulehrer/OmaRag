@@ -16,7 +16,8 @@
   },
   "settings": {
     "defaults": {
-      "backendWhenClosed": "Stop with OMA"
+      "backendWhenClosed": "Stop with OMA",
+      "answerModel": ""
     },
     "schema": [
       {
@@ -29,6 +30,13 @@
           "Keep running"
         ],
         "defaultValue": "Stop with OMA"
+      },
+      {
+        "key": "answerModel",
+        "type": "string",
+        "label": "Answering model",
+        "description": "Passed to `lilbee ask --model`. Leave empty to use whatever lilbee is configured with. Useful when the configured model is too large to load next to the retrieval models.",
+        "defaultValue": ""
       }
     ]
   },

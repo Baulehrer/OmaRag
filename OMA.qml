@@ -67,6 +67,7 @@ Item {
   property bool detailsOpen: false
 
   readonly property bool blocked: backend.phase === "busy"
+  readonly property bool answering: backend.phase === "answering"
   readonly property bool waiting: backend.phase === "searching" || backend.phase === "starting"
 
   // Elapsed seconds while we wait. The one honest thing to show when the
@@ -76,14 +77,18 @@ Item {
   Timer {
     interval: 1000
     repeat: true
-    running: root.waiting && root.opened
+    running: (root.waiting || root.answering) && root.opened
     onTriggered: root.waited += 1
   }
   onWaitingChanged: root.waited = 0
+  onAnsweringChanged: root.waited = 0
+
+  readonly property bool showingAnswer: root.answering || backend.answerText.length > 0
 
   readonly property string panelMode: {
     if (backend.phase === "error") return "error"
     if (root.blocked) return "blocked"
+    if (root.showingAnswer) return "none"
     if (root.waiting && !root.hits.length) return "waiting"
     if (backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
     return "none"
@@ -95,6 +100,7 @@ Item {
       case "error": return "!"
       case "starting":
       case "searching":
+      case "answering":
       case "busy": return "◐"
       default: return "○"
     }
@@ -107,6 +113,7 @@ Item {
       case "ready": return "Ready"
       case "starting": return backend.message || "Starting"
       case "searching": return "Searching"
+      case "answering": return "Answering"
       case "busy": return "Busy"
       case "error": return "Error"
       default: return "Sleeping"
@@ -127,6 +134,7 @@ Item {
     root.opened = true
     root.hits = []
     root.query = ""
+    backend.rawAnswer = ""
     root.detailsOpen = false
     root.notice = ""
     root.pending = ""
@@ -171,18 +179,32 @@ Item {
     root.runQuery()
   }
 
+  // Enter asks, Ctrl+Enter retrieves only. Both are slow here — retrieval alone
+  // takes 15 seconds — so the difference is 15 versus 30-odd, not instant
+  // versus slow. The short way is for when the passage is what you want.
   function runQuery() {
     var q = input.text.trim()
     if (!q) return
     if (root.blocked) { root.flash(backend.message); return }
     root.query = q
     root.hits = []
+    backend.ask(q)
+  }
+
+  function runSearchOnly() {
+    var q = input.text.trim()
+    if (!q) return
+    if (root.blocked) { root.flash(backend.message); return }
+    root.query = q
+    root.hits = []
+    backend.rawAnswer = ""
     backend.search(q, 5)
   }
 
   Lilbee {
     id: backend
     persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
+    answerModel: root.setting("answerModel", "")
     onSearchFinished: function(rows) { root.hits = rows }
     onRefused: function(reason) { root.flash(reason) }
   }
@@ -238,9 +260,13 @@ Item {
 
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Escape) {
-            // Work outwards: fold details, clear the query, then close.
-            if (root.detailsOpen) root.detailsOpen = false
-            else if (input.text.length) { input.text = ""; root.hits = []; root.query = "" }
+            // Work outwards: stop what is running, fold details, clear the
+            // query, then close.
+            if (root.answering) backend.cancelAsk()
+            else if (root.detailsOpen) root.detailsOpen = false
+            else if (input.text.length || backend.answerText.length) {
+              input.text = ""; root.hits = []; root.query = ""; backend.rawAnswer = ""
+            }
             else root.dismiss()
             event.accepted = true
           }
@@ -325,16 +351,41 @@ Item {
               selectByMouse: true
               onAccepted: root.runQuery()
 
+              Keys.onPressed: function(event) {
+                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                    && (event.modifiers & Qt.ControlModifier)) {
+                  root.runSearchOnly()
+                  event.accepted = true
+                }
+              }
+
               Text {
                 anchors.fill: parent
                 verticalAlignment: Text.AlignVCenter
                 visible: !input.text.length
-                text: "Search your knowledge…"
+                text: "Ask your knowledge…"
                 color: root.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.font.subtitle
               }
             }
+          }
+
+          AnswerView {
+            anchors {
+              top: inputBox.bottom; bottom: parent.bottom
+              left: parent.left; right: parent.right
+            }
+            anchors.topMargin: Style.spacing.panelGap
+            visible: root.showingAnswer
+            answer: backend.answerText
+            sources: backend.answerSources
+            answering: root.answering
+            waited: root.waited
+            foreground: root.foreground
+            muted: root.muted
+            accent: root.accent
+            onCancelRequested: backend.cancelAsk()
           }
 
           SourceList {
@@ -343,7 +394,7 @@ Item {
               left: parent.left; right: parent.right
             }
             anchors.topMargin: Style.spacing.panelGap
-            visible: root.hits.length > 0
+            visible: !root.showingAnswer && root.hits.length > 0
             hits: root.hits
             foreground: root.foreground
             muted: root.muted

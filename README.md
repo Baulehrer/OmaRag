@@ -79,8 +79,13 @@ loading. OMA releases them, but only when it started the server itself.
 
 | Key | |
 |---|---|
-| `Enter` | Search |
-| `Esc` | Fold details → clear the query → close |
+| `Enter` | Ask — the model answers from the retrieved passages |
+| `Ctrl+Enter` | Retrieve only, no model |
+| `Esc` | Cancel the answer → fold details → clear the query → close |
+
+The model is bound to what retrieval found. Ask it something the library does not
+cover and it says so instead of filling the gap from general knowledge — lilbee's
+system prompt enforces that, and it holds in practice.
 
 The bar button toggles the same overlay. A plugin that is both `overlay` and
 `bar-widget` stays owned by the overlay loader, so the button triggers OMA

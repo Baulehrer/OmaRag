@@ -46,6 +46,39 @@ Item {
   property int totalChunks: -1
   property var documents: []
 
+  // Answering runs through `lilbee ask` as a short-lived process: MCP has no
+  // ask tool, and rebuilding lilbee's RAG prompt here would make OMA the very
+  // engine it is meant not to be.
+  property string answerModel: ""   // empty: whatever lilbee is configured with
+  property string rawAnswer: ""
+  property string answerDetail: ""
+
+  // `ask` prints the answer, then a "Sources:" block whose numbering the [1]
+  // markers in the answer refer to. Splitting its output keeps answer and
+  // citations consistent — running our own search alongside would produce a
+  // different list under the same numbers.
+  readonly property string answerText: {
+    var i = root.rawAnswer.search(/\n\s*Sources:/)
+    return (i === -1 ? root.rawAnswer : root.rawAnswer.substring(0, i)).trim()
+  }
+
+  readonly property var answerSources: {
+    var i = root.rawAnswer.search(/\n\s*Sources:/)
+    if (i === -1) return []
+    // `ask` wraps its output to a fixed width, pipe or not, so a single source
+    // entry is spread over several lines and a line-by-line match finds
+    // nothing. Fold the block into one string first.
+    var block = root.rawAnswer.substring(i).replace(/\s*\n\s*/g, " ")
+    var out = []
+    var re = /(\d+)\.\s*\[([^\]]*)\]\(([^)]*)\)(?:\s*,\s*pages?\s*([0-9\u2013-]+))?/g
+    var m
+    while ((m = re.exec(block)) !== null)
+      out.push({ index: parseInt(m[1], 10), title: m[2], url: m[3], pages: m[4] || "" })
+    return out
+  }
+
+  signal answerStarted()
+  signal answerFinished(bool ok)
   signal statusUpdated()
   signal documentsUpdated()
   signal searchFinished(var hits)
@@ -328,6 +361,53 @@ Item {
       rows.sort(function(a, b) { return (b.score || 0) - (a.score || 0) })
       root.searchFinished(rows)
     }, root.searchTimeout)
+  }
+
+  // ---------------------------------------------------------------- answering
+
+  function ask(question) {
+    if (root.phase === "busy") { root.refused(root.message); return }
+    if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
+
+    root.rawAnswer = ""
+    root.answerDetail = ""
+    root.phase = "answering"
+
+    var cmd = [root.bin, "ask", String(question), "--no-sync"]
+    if (root.answerModel.length) { cmd.push("--model"); cmd.push(root.answerModel) }
+    askProc.command = cmd
+    askProc.running = true
+    root.answerStarted()
+  }
+
+  // There is no server-side cancel, so stopping means ending the process.
+  function cancelAsk() {
+    if (askProc.running) askProc.running = false
+  }
+
+  Process {
+    id: askProc
+    // Line-buffered rather than a single collector: the answer arrives over
+    // several seconds and should appear as it does.
+    stdout: SplitParser {
+      onRead: function(line) { root.rawAnswer += line + "\n" }
+    }
+    stderr: SplitParser {
+      onRead: function(line) { root.answerDetail += line + "\n" }
+    }
+    onExited: function(code) {
+      root.phase = "ready"
+      if (code === 0 && root.answerText.length) { root.answerFinished(true); return }
+      // A model that cannot be loaded is the common failure here, and it is
+      // worth naming rather than dumping LiteLLM's output into the window.
+      var det = root.answerDetail + root.rawAnswer
+      if (det.indexOf("unavailable") !== -1 || det.indexOf("insufficient safe memory") !== -1)
+        root._fail("The answering model could not be loaded",
+                   "Retrieval models hold memory the chat model needs.\n" + det.trim())
+      else if (code !== 0)
+        root._fail("Answering failed", "lilbee ask exited with code " + code + "\n" + det.trim())
+      root.answerFinished(false)
+    }
   }
 
   // ---------------------------------------------------------------- files
