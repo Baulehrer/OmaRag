@@ -88,6 +88,7 @@ loading. OMA releases them, but only when it started the server itself.
 | `Ctrl+Shift+O` | Add a folder |
 | `Esc` | Cancel the answer → fold details → drop the selection → clear the query → close |
 | `Tab` / `1`–`3` | Move between Setup, Chat and Library |
+| `PgUp` `PgDn` `Home` `End` | Scroll the Setup sheet |
 
 Answers are selectable, and a selection lands on the clipboard on its own.
 Subscripts and superscripts are set properly — `f_ck` and `N/mm^2` come out as
@@ -113,7 +114,31 @@ The bar button toggles the same overlay. A plugin that is both `overlay` and
 `bar-widget` stays owned by the overlay loader, so the button triggers OMA
 rather than replacing it — the same arrangement `omarchy.menu` uses.
 
-More to come as the tabs arrive.
+### Setup
+
+Everything in one sheet: which lilbee is installed and where its server is
+listening, buttons to check for an update, release the loaded models, and open
+the backend log. Below that OMA's own settings — whether the backend stops when
+you close OMA, which model answers, and OMA's text size and font, which apply to
+OMA alone and never touch the shell's.
+
+Then lilbee's own settings, generated from what lilbee reports rather than
+hard-coded, so the help text beside each field is lilbee's: the four model
+roles, the answering knobs, the warm-up time, and the retrieval knobs. A field
+that differs from its default offers `reset`.
+
+Each model role opens a list of what is already on this machine — no network,
+so it comes with the tab. Searching lilbee's catalogue reaches Hugging Face and
+therefore waits behind a button that says so, and nothing downloads until you
+press `Get`. A download holds the single embedder, so questions and indexing
+wait for it, and OMA says so while it runs.
+
+### What OMA never does on its own
+
+No root, no telemetry, no cloud. The only three things that leave this machine
+are `Check for updates` (asks GitHub through mise), `Search catalogue` (asks
+Hugging Face through lilbee) and `Get` (downloads a model) — each one a button
+you press, none of them on a timer or on opening a view.
 
 ## Development
 
