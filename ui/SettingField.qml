@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // One lilbee setting, drawn from what lilbee says about it.
 //
@@ -46,8 +47,8 @@ Item {
         anchors { left: parent.left; verticalCenter: parent.verticalCenter }
         text: root.key
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
       }
     }
 
@@ -102,8 +103,8 @@ Item {
       visible: root.modified
       text: "reset"
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
       HoverHandler { cursorShape: Qt.PointingHandCursor }
       TapHandler { onTapped: root.resetRequested(root.key) }
     }
@@ -113,8 +114,8 @@ Item {
       visible: root.meta && root.meta.reindex_required === true
       text: "needs reindex"
       color: root.urgent
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
     }
   }
 
@@ -125,8 +126,8 @@ Item {
     anchors.topMargin: Style.spacing.xxs
     text: root.meta ? String(root.meta.help || "") : ""
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     wrapMode: Text.WordWrap
   }
 }

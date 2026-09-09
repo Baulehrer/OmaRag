@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // Everything the middle of the window says when there are no results to show:
 // waiting, occupied, empty, broken. Kept together because the rules that decide
@@ -37,8 +38,8 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       text: "◐  " + root.headline + (root.waited > 2 ? "   " + root.waited + "s" : "")
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
     }
     Text {
       width: parent.width
@@ -47,8 +48,8 @@ Item {
       visible: root.waited > 20
       text: "The embedding model is loading. First use after a rest takes a while."
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
     }
   }
 
@@ -66,8 +67,8 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       text: "◐  Indexing" + (root.waited > 2 ? "   " + root.waited + "s" : "")
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
     }
     Text {
       width: parent.width
@@ -75,8 +76,8 @@ Item {
       wrapMode: Text.WordWrap
       text: root.what
       color: root.foreground
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
     }
     Text {
       width: parent.width
@@ -85,8 +86,8 @@ Item {
       text: "Extracting, chunking and embedding. A book takes minutes.\n"
           + "Search and answering wait until this finishes."
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
     }
   }
 
@@ -104,8 +105,8 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       text: "◐  Indexing in progress"
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
     }
     Text {
       width: parent.width
@@ -114,8 +115,8 @@ Item {
       text: "lilbee has a single embedder, and an index run is holding it.\n"
           + "Search comes back on its own when the run finishes."
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
     }
   }
 
@@ -131,8 +132,8 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       text: "Nothing matched"
       color: root.foreground
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
     }
     Text {
       width: parent.width
@@ -142,8 +143,8 @@ Item {
           ? "Try a more specific noun phrase — retrieval works better with the words the document itself would use."
           : "Nothing is indexed yet, so there is nothing to match."
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
     }
   }
 
@@ -162,8 +163,8 @@ Item {
       wrapMode: Text.WordWrap
       text: root.headline
       color: root.urgent
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
     }
 
     Button {
@@ -181,8 +182,8 @@ Item {
       anchors.horizontalCenter: parent.horizontalCenter
       text: (root.detailsOpen ? "▾" : "▸") + "  Technical details"
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
       MouseArea {
         anchors.fill: parent
         cursorShape: Qt.PointingHandCursor
@@ -197,8 +198,8 @@ Item {
       wrapMode: Text.WrapAnywhere
       text: root.detail
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
     }
   }
 }

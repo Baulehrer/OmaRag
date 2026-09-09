@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 import "backend"
+import "common"
 import "ui"
 
 // OMA — local knowledge for Omarchy.
@@ -26,14 +27,49 @@ Item {
     return value === undefined || value === null ? fallback : value
   }
 
+  // The type scale is read once here and pushed into the singleton the rest of
+  // OMA reads; nothing else touches it.
+  Binding { target: OmaFont; property: "scale"; value: Number(root.setting("omaFontScale", 1.0)) || 1.0 }
+  Binding { target: OmaFont; property: "family"; value: String(root.setting("omaFontFamily", "")) }
+
+  // The shell injects `settings` into bar widgets (Bar.qml:611) but into
+  // nothing else — an overlay's loader hands it omarchyPath, shell, manifest
+  // and the two registries, and stops there (shell.qml:1341). Writing works
+  // (`updateEntryInline`), reading does not, so OMA reads its own entry out of
+  // shell.json, which the README names as the one place settings live:
+  // "Settings are inline on the entry. No config: sub-object, no separate
+  // per-plugin settings file, no merge layers."
+  property var configEntry: ({})
+
   function entrySettings() {
     var id = String((manifest && manifest.id) || "kaufmann.omarag")
+    // If a future shell does expose the config to overlays, prefer it.
     var config = shell ? shell.shellConfig : null
-    var plugins = config ? config.plugins : []
-    if (!Array.isArray(plugins)) return settings || ({})
-    for (var i = 0; i < plugins.length; i++)
-      if (String((plugins[i] && plugins[i].id) || "") === id) return plugins[i]
-    return settings || ({})
+    var plugins = config ? config.plugins : null
+    if (Array.isArray(plugins))
+      for (var i = 0; i < plugins.length; i++)
+        if (String((plugins[i] && plugins[i].id) || "") === id) return plugins[i]
+    return root.configEntry || ({})
+  }
+
+  FileView {
+    id: shellConfigFile
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: {
+      var id = String((root.manifest && root.manifest.id) || "kaufmann.omarag")
+      var found = ({})
+      try {
+        var doc = JSON.parse(text())
+        var list = Array.isArray(doc.plugins) ? doc.plugins : []
+        for (var i = 0; i < list.length; i++)
+          if (String((list[i] && list[i].id) || "") === id) { found = list[i]; break }
+      } catch (e) { /* a config we cannot read leaves every setting at default */ }
+      root.configEntry = found
+      root.syncSettings()
+    }
+    onLoadFailed: { root.configEntry = ({}); root.syncSettings() }
   }
 
   function syncSettings() { root.settings = entrySettings() || ({}) }
@@ -482,15 +518,15 @@ Item {
         Item {
           id: header
           anchors { top: parent.top; left: parent.left; right: parent.right }
-          height: Style.font.title + Style.spacing.lg * 2
+          height: OmaFont.title + Style.spacing.lg * 2
 
           Text {
             id: wordmark
             anchors { left: parent.left; verticalCenter: parent.verticalCenter }
             text: "OmaRag"
             color: root.working ? root.accent : root.foreground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.title
             font.letterSpacing: 1.5
 
             Behavior on color { ColorAnimation { duration: 240 } }
@@ -528,15 +564,15 @@ Item {
             Text {
               text: root.phaseGlyph
               color: root.phaseColor
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              font.family: OmaFont.face
+              font.pixelSize: OmaFont.bodySmall
               anchors.verticalCenter: parent.verticalCenter
             }
             Text {
               text: root.phaseLabel
               color: root.muted
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              font.family: OmaFont.face
+              font.pixelSize: OmaFont.bodySmall
               anchors.verticalCenter: parent.verticalCenter
             }
           }
@@ -562,6 +598,7 @@ Item {
             backendWhenClosed: root.setting("backendWhenClosed", "Stop with OMA")
             answerModel: root.setting("answerModel", "")
             fontScale: root.setting("omaFontScale", 1.0)
+            fontFamily: root.setting("omaFontFamily", "")
             foreground: root.foreground
             muted: root.muted
             accent: root.accent

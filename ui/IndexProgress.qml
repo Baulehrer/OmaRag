@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // Indexing, with the honest amount of detail.
 //
@@ -41,8 +42,8 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       text: root.what
       color: root.foreground
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
       elide: Text.ElideMiddle
     }
 
@@ -70,8 +71,8 @@ Item {
           Text {
             text: (stageRow.active ? "◐" : (stageRow.passed ? "●" : "○")) + "  " + modelData.label
             color: stageRow.active ? root.accent : (stageRow.passed ? root.foreground : root.muted)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.bodySmall
 
             SequentialAnimation on opacity {
               running: stageRow.active
@@ -85,8 +86,8 @@ Item {
             visible: index < 2
             text: "—"
             color: root.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.bodySmall
           }
         }
       }
@@ -123,8 +124,8 @@ Item {
              ? "approx. " + Math.round(root.calls * 2) + " chunks so far  ·  " + root.elapsed(root.waited)
              : root.elapsed(root.waited) + " elapsed")
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
     }
 
     Text {
@@ -133,8 +134,8 @@ Item {
       wrapMode: Text.WordWrap
       text: "Search and answering wait until this finishes."
       color: root.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.caption
     }
   }
 }

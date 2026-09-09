@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // Everything OMA and lilbee can be told, in one place.
 //
@@ -69,8 +70,8 @@ Item {
       Text {
         text: "BACKEND"
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         font.letterSpacing: 1.5
       }
 
@@ -82,21 +83,21 @@ Item {
         Text {
           text: "lilbee"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Text {
           text: root.lilbeeVersion || "…"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
 
         Text {
           text: "Server"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Text {
           text: root.backend && root.backend.port > 0
@@ -104,23 +105,23 @@ Item {
                 + (root.backend.ownsDaemon ? "  ·  started by OMA" : "  ·  already running")
               : "not connected"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
 
         Text {
           text: "Library"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Text {
           text: root.backend && root.backend.totalChunks >= 0
               ? root.backend.documents.length + " documents  ·  " + root.backend.totalChunks + " chunks"
               : "—"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
       }
 
@@ -154,8 +155,8 @@ Item {
         visible: root.updateNote.length > 0
         text: root.updateNote
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         wrapMode: Text.WordWrap
       }
 
@@ -164,8 +165,8 @@ Item {
         text: "“Check for updates” asks GitHub through mise. Nothing here contacts the "
             + "network on its own."
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         wrapMode: Text.WordWrap
       }
 
@@ -173,8 +174,8 @@ Item {
       Text {
         text: "OMA"
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         font.letterSpacing: 1.5
       }
 
@@ -186,8 +187,8 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: "backend when closed"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Dropdown {
           width: Style.space(240)
@@ -205,8 +206,8 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: "answering model"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         TextField {
           width: Style.space(240)
@@ -217,8 +218,8 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: "empty: whatever lilbee is set to"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
         }
       }
 
@@ -230,8 +231,8 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
           text: "text size"
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         ButtonGroup {
           options: [
@@ -240,17 +241,52 @@ Item {
             { value: "1.15", label: "Large" },
             { value: "1.3",  label: "Larger" }
           ]
-          value: String(root.fontScale)
+          // Matched as a number: String(1.0) is "1", which would never equal
+          // the "1.0" in the options and leave every button unlit.
+          value: {
+            var opts = ["0.9", "1.0", "1.15", "1.3"]
+            for (var i = 0; i < opts.length; i++)
+              if (Math.abs(parseFloat(opts[i]) - root.fontScale) < 0.001) return opts[i]
+            return ""
+          }
           onChanged: function(v) { root.omaSettingChanged("omaFontScale", parseFloat(v)) }
+        }
+      }
+
+      Row {
+        width: parent.width
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(210)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "font"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        TextField {
+          id: familyField
+          width: Style.space(270)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.fontFamily
+          onAccepted: root.omaSettingChanged("omaFontFamily", text)
+        }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "empty: the shell's font"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
         }
       }
 
       Text {
         width: parent.width
-        text: "Text size applies to OMA alone. The shell's own font is left as it is."
+        text: "Text size and font apply to OMA's own text. Buttons and dropdowns keep the shell's kit styling, and the shell's font is never changed."
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         wrapMode: Text.WordWrap
       }
 
@@ -284,8 +320,8 @@ Item {
         text: "Warm-up is what llama-swap is given as its unload timer — measured: the "
             + "value here and the engine's ttl are the same number."
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         wrapMode: Text.WordWrap
       }
 
@@ -302,8 +338,8 @@ Item {
         visible: root.flash.length > 0
         text: root.flash
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         wrapMode: Text.WordWrap
       }
 

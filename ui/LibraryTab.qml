@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // What is in the knowledge base, and what is currently going into it.
 // Library and Indexing are one place because they are one subject: an index
@@ -25,8 +26,8 @@ Item {
     anchors { top: parent.top; left: parent.left }
     text: root.indexing ? "INDEXING" : "LIBRARY"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
   }
 
@@ -37,8 +38,8 @@ Item {
         ? root.backend.documents.length + " documents · " + root.backend.totalChunks + " chunks"
         : ""
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
   }
 
   // ------------------------------------------------------------ documents
@@ -63,8 +64,8 @@ Item {
         anchors.rightMargin: Style.spacing.md
         text: modelData.filename || modelData.source || modelData.title || ""
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         elide: Text.ElideMiddle
       }
       Text {
@@ -72,8 +73,8 @@ Item {
         anchors { right: parent.right; verticalCenter: parent.verticalCenter }
         text: modelData.chunk_count ? modelData.chunk_count + " chunks" : ""
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
       }
     }
   }
@@ -85,8 +86,8 @@ Item {
              && !root.backend.documents.length
     text: "Nothing indexed yet"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.bodySmall
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.bodySmall
   }
 
   // ------------------------------------------------------------ add
@@ -107,8 +108,8 @@ Item {
         anchors.centerIn: parent
         text: "Ctrl+O  add files          Ctrl+Shift+O  add a folder"
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
       }
 
       HoverHandler { cursorShape: Qt.PointingHandCursor }

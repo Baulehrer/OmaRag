@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // The three sections, spread across the width of the header.
 //
@@ -47,8 +48,8 @@ Item {
           anchors.centerIn: parent
           text: modelData.label
           color: parent.active ? root.accent : (hover.hovered ? root.foreground : root.muted)
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
           font.letterSpacing: 1.5
 
           Behavior on color { ColorAnimation { duration: 90 } }

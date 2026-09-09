@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import qs.Commons
 import qs.Ui
+import "../common"
 import "Formula.js" as Formula
 
 // The answer, and the passages it was allowed to use.
@@ -52,14 +53,14 @@ Item {
         Text {
           text: "◐  Thinking" + (root.waited > 2 ? "   " + root.waited + "s" : "")
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.subtitle
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.subtitle
         }
         Text {
           text: "· Esc to cancel"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
           anchors.verticalCenter: parent.verticalCenter
         }
       }
@@ -77,8 +78,8 @@ Item {
         textFormat: TextEdit.RichText
         text: Formula.toStyled(root.answer)
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.body
         wrapMode: TextEdit.WordWrap
         readOnly: true
         selectByMouse: true
@@ -104,8 +105,8 @@ Item {
         visible: root.sources.length > 0
         text: "PASSAGES USED — click to open the page"
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
         font.letterSpacing: 1.5
       }
 
@@ -124,22 +125,22 @@ Item {
           Text {
             text: modelData.index + ""
             color: root.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.bodySmall
           }
           Text {
             text: modelData.title || ""
             color: sourceRow.hot ? root.accent : root.foreground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.bodySmall
             width: Math.min(implicitWidth, Style.space(420))
             elide: Text.ElideMiddle
           }
           Text {
             text: modelData.pages ? "p. " + modelData.pages : ""
             color: sourceRow.hot ? root.accent : root.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.bodySmall
           }
 
           HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }

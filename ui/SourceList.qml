@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // The list of hits. Sources are the product here — the answer is only as good
 // as the passage behind it — so this is the part meant to grow: expanding a
@@ -32,8 +33,8 @@ Item {
     id: heading
     text: root.hits.length ? "SOURCES — click to read the passage" : ""
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
   }
 
@@ -65,28 +66,28 @@ Item {
         Text {
           text: hitRow.open ? "▾" : "▸"
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Text {
           text: (index + 1) + ""
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
         Text {
           text: modelData.title || modelData.source || ""
           color: (hover.hovered || index === root.current) ? root.accent : root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.body
           width: Math.min(implicitWidth, Style.space(420))
           elide: Text.ElideRight
         }
         Text {
           text: root.pageLabel(modelData)
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
         }
 
         HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
@@ -98,8 +99,8 @@ Item {
         visible: !hitRow.open
         text: String(modelData.chunk || "").replace(/\s+/g, " ").substring(0, 220)
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         wrapMode: Text.WordWrap
         maximumLineCount: 2
         elide: Text.ElideRight
@@ -114,8 +115,8 @@ Item {
           width: parent.width
           text: String(modelData.chunk || "")
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
           wrapMode: Text.WordWrap
           lineHeight: 1.3
         }
@@ -129,8 +130,8 @@ Item {
               + "  ·  lexical " + Number(modelData.bm25_score || 0).toFixed(1)
               + "  ·  rank " + (index + 1) + " of " + root.hits.length
           color: root.muted
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
         }
       }
     }

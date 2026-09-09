@@ -17,14 +17,16 @@
   "settings": {
     "defaults": {
       "backendWhenClosed": "Stop with OMA",
-      "answerModel": ""
+      "answerModel": "",
+      "omaFontScale": 1.0,
+      "omaFontFamily": ""
     },
     "schema": [
       {
         "key": "backendWhenClosed",
         "type": "enum",
         "label": "Backend when OMA is closed",
-        "description": "Stop with OMA frees everything the moment you close it \u2014 the server and the models it loaded \u2014 and the next question waits for both to come back. Keep running holds the server, roughly 430 MB, and leaves loaded models in place until they time out, so the next question starts straight away.",
+        "description": "Stop with OMA frees everything the moment you close it — the server and the models it loaded — and the next question waits for both to come back. Keep running holds the server, roughly 430 MB, and leaves loaded models in place until they time out, so the next question starts straight away.",
         "options": [
           "Stop with OMA",
           "Keep running"
@@ -36,6 +38,20 @@
         "type": "string",
         "label": "Answering model",
         "description": "Passed to `lilbee ask --model`. Leave empty to use whatever lilbee is configured with. Useful when the configured model is too large to load next to the retrieval models.",
+        "defaultValue": ""
+      },
+      {
+        "key": "omaFontScale",
+        "type": "number",
+        "label": "Text size",
+        "description": "A factor on the shell's text sizes, applied inside OMA only. 1.0 is exactly what the rest of Omarchy uses. The shell's own font is never changed.",
+        "defaultValue": 1.0
+      },
+      {
+        "key": "omaFontFamily",
+        "type": "string",
+        "label": "Font",
+        "description": "Font family for OMA alone. Leave empty to follow the shell's font, which is what `omarchy font set` configures.",
         "defaultValue": ""
       }
     ]

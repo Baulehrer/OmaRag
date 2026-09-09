@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // The questions asked before, newest first.
 Item {
@@ -20,8 +21,8 @@ Item {
     id: heading
     text: "HISTORY"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
   }
 
@@ -31,8 +32,8 @@ Item {
     visible: !root.entries.length
     text: "Questions you ask show up here."
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     wrapMode: Text.WordWrap
   }
 
@@ -68,8 +69,8 @@ Item {
         }
         text: modelData.question
         color: (parent.active || hover.hovered) ? root.foreground : root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         wrapMode: Text.WordWrap
         maximumLineCount: 2
         elide: Text.ElideRight

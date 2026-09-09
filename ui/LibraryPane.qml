@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // What is actually in the knowledge base. Becomes the Library tab once there
 // are tabs; until then it is the left column.
@@ -17,8 +18,8 @@ Item {
     id: heading
     text: "LIBRARY"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
   }
 
@@ -41,8 +42,8 @@ Item {
         anchors.rightMargin: Style.spacing.sm
         text: modelData.filename || modelData.source || modelData.title || ""
         color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
         elide: Text.ElideMiddle
       }
       Text {
@@ -50,8 +51,8 @@ Item {
         anchors { right: parent.right; verticalCenter: parent.verticalCenter }
         text: modelData.chunk_count ? modelData.chunk_count + "" : ""
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
       }
     }
   }
@@ -62,8 +63,8 @@ Item {
     visible: root.ready && !root.documents.length
     text: "Nothing indexed yet"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.bodySmall
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.bodySmall
     wrapMode: Text.WordWrap
   }
 
@@ -71,7 +72,7 @@ Item {
     anchors { bottom: parent.bottom; left: parent.left }
     text: root.totalChunks < 0 ? "" : root.totalChunks + " chunks"
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
   }
 }

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // Ask, read the answer, get to the passages behind it.
 //
@@ -88,8 +89,8 @@ Item {
       anchors.rightMargin: Style.spacing.rowPaddingX
       verticalAlignment: TextInput.AlignVCenter
       color: root.foreground
-      font.family: Style.font.family
-      font.pixelSize: Style.font.subtitle
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
       selectByMouse: true
       onAccepted: root.ask()
 
@@ -116,8 +117,8 @@ Item {
         visible: !input.text.length
         text: "Ask your knowledge…"
         color: root.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.subtitle
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.subtitle
       }
     }
   }
@@ -178,8 +179,8 @@ Item {
     visible: root.notice.length > 0
     text: root.notice
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     wrapMode: Text.WordWrap
   }
 }

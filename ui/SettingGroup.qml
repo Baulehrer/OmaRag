@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // One titled group of lilbee settings.
 //
@@ -24,8 +25,8 @@ Column {
   Text {
     text: root.title.toUpperCase()
     color: root.muted
-    font.family: Style.font.family
-    font.pixelSize: Style.font.caption
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
   }
 
