@@ -66,6 +66,31 @@ Item {
   property string notice: ""
   property bool detailsOpen: false
 
+  // Which result row the keyboard is on. -1 means the input: typing continues,
+  // and Enter asks. Once a row is picked, Enter acts on that row instead — the
+  // one key does the obvious thing for wherever you are.
+  property int selected: -1
+  readonly property int rowCount: root.showingAnswer ? backend.answerSources.length : root.hits.length
+
+  function moveSelection(delta) {
+    if (!root.rowCount) return
+    var n = root.selected + delta
+    if (n < -1) n = -1
+    if (n >= root.rowCount) n = root.rowCount - 1
+    root.selected = n
+  }
+
+  function activateSelected() {
+    if (root.selected < 0 || root.selected >= root.rowCount) return false
+    if (root.showingAnswer) {
+      var src = backend.answerSources[root.selected]
+      if (src) backend.openDocument(src.url, src.pages)
+    } else {
+      sourceList.expanded = (sourceList.expanded === root.selected) ? -1 : root.selected
+    }
+    return true
+  }
+
   readonly property bool blocked: backend.phase === "busy"
   readonly property bool answering: backend.phase === "answering"
   readonly property bool waiting: backend.phase === "searching" || backend.phase === "starting"
@@ -138,6 +163,7 @@ Item {
     root.detailsOpen = false
     root.notice = ""
     root.pending = ""
+    root.selected = -1
 
     var wanted = ""
     if (payloadJson) {
@@ -188,6 +214,7 @@ Item {
     if (root.blocked) { root.flash(backend.message); return }
     root.query = q
     root.hits = []
+    root.selected = -1
     backend.ask(q)
   }
 
@@ -197,6 +224,7 @@ Item {
     if (root.blocked) { root.flash(backend.message); return }
     root.query = q
     root.hits = []
+    root.selected = -1
     backend.rawAnswer = ""
     backend.search(q, 5)
   }
@@ -258,12 +286,23 @@ Item {
         anchors.margins: Style.spacing.panelPadding
         focus: true
 
+        // Also handled here, not only in the input: once an answer is on
+        // screen its Flickable can hold the focus, and navigation must not
+        // depend on which child happens to have it.
         Keys.onPressed: function(event) {
+          if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
+          if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
+          if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.selected >= 0) {
+            root.activateSelected()
+            event.accepted = true
+            return
+          }
           if (event.key === Qt.Key_Escape) {
             // Work outwards: stop what is running, fold details, clear the
             // query, then close.
             if (root.answering) backend.cancelAsk()
             else if (root.detailsOpen) root.detailsOpen = false
+            else if (root.selected >= 0) root.selected = -1
             else if (input.text.length || backend.answerText.length) {
               input.text = ""; root.hits = []; root.query = ""; backend.rawAnswer = ""
             }
@@ -351,12 +390,21 @@ Item {
               selectByMouse: true
               onAccepted: root.runQuery()
 
+              // Up and Down do nothing in a single-line field, so they are
+              // free to walk the results without stealing anything from typing.
               Keys.onPressed: function(event) {
-                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                    && (event.modifiers & Qt.ControlModifier)) {
+                if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
+                if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
+                if (event.key !== Qt.Key_Return && event.key !== Qt.Key_Enter) return
+
+                if (event.modifiers & Qt.ControlModifier) {
                   root.runSearchOnly()
                   event.accepted = true
+                } else if (root.selected >= 0) {
+                  root.activateSelected()
+                  event.accepted = true
                 }
+                // Otherwise onAccepted asks, as before.
               }
 
               Text {
@@ -382,6 +430,7 @@ Item {
             sources: backend.answerSources
             answering: root.answering
             waited: root.waited
+            current: root.selected
             foreground: root.foreground
             muted: root.muted
             accent: root.accent
@@ -390,6 +439,7 @@ Item {
           }
 
           SourceList {
+            id: sourceList
             anchors {
               top: inputBox.bottom; bottom: parent.bottom
               left: parent.left; right: parent.right
@@ -397,6 +447,7 @@ Item {
             anchors.topMargin: Style.spacing.panelGap
             visible: !root.showingAnswer && root.hits.length > 0
             hits: root.hits
+            current: root.selected
             foreground: root.foreground
             muted: root.muted
             accent: root.accent

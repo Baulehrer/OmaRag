@@ -79,9 +79,19 @@ loading. OMA releases them, but only when it started the server itself.
 
 | Key | |
 |---|---|
+| `Super+A` | Open OMA, and close it again |
 | `Enter` | Ask — the model answers from the retrieved passages |
 | `Ctrl+Enter` | Retrieve only, no model |
-| `Esc` | Cancel the answer → fold details → clear the query → close |
+| `↑` `↓` | Walk the results; up from the first row returns to the input |
+| `Enter` on a row | Open the cited page, or expand the passage |
+| `Esc` | Cancel the answer → fold details → drop the selection → clear the query → close |
+
+`Enter` does the obvious thing for wherever you are: in the input it asks, on a
+result row it acts on that row. `Super+A` is a line in `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + A", "OMA local knowledge", "omarchy-shell shell toggle kaufmann.omarag '{}'")
+```
 
 Clicking a cited source opens the document at that page — lilbee reports PDF page
 numbers, and zathura, okular and evince all take exactly that. Clicking a search hit

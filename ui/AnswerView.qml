@@ -18,6 +18,7 @@ Item {
   property var sources: []
   property bool answering: false
   property int waited: 0
+  property int current: -1
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -93,7 +94,7 @@ Item {
         Row {
           id: sourceRow
           spacing: Style.spacing.sm
-          property bool hot: hover.hovered
+          property bool hot: hover.hovered || index === root.current
 
           Text {
             text: modelData.index + ""

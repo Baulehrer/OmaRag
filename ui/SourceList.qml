@@ -16,6 +16,7 @@ Item {
   // Only one open at a time: the point is to read a passage, not to build a
   // wall of them.
   property int expanded: -1
+  property int current: -1
 
   // Page numbers exist only for PDFs; anything else reports 0 and gets no
   // label rather than a claimed "page 0".
@@ -75,7 +76,7 @@ Item {
         }
         Text {
           text: modelData.title || modelData.source || ""
-          color: hover.hovered ? root.accent : root.foreground
+          color: (hover.hovered || index === root.current) ? root.accent : root.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.body
           width: Math.min(implicitWidth, Style.space(420))
