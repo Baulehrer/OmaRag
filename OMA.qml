@@ -38,6 +38,27 @@ Item {
 
   function syncSettings() { root.settings = entrySettings() || ({}) }
 
+  // The scoped shell facade lets a plugin write its own inline settings back to
+  // shell.json — the same entry `setting()` reads from.
+  function writeOwnSetting(key, value) {
+    var s = root.shell
+    if (!s || typeof s.updateEntryInline !== "function") { root.flash("Could not save the setting"); return }
+    var patch = {}
+    patch[key] = value
+    s.updateEntryInline((root.manifest && root.manifest.id) || "kaufmann.omarag", patch)
+    root.flash(key + " saved")
+  }
+
+  // Loaded when the section is first opened rather than on startup: nobody
+  // needs 159 settings fetched to ask a question.
+  onTabChanged: {
+    if (root.tab === "setup") {
+      if (!toolchain.version.length) toolchain.readVersion()
+      if (backend.phase === "ready" && !backend.settings.length) backend.loadSettings()
+    }
+    Qt.callLater(function() { root.placeFocus() })
+  }
+
   onManifestChanged: syncSettings()
   onShellChanged: syncSettings()
   Component.onCompleted: syncSettings()
@@ -202,7 +223,9 @@ Item {
     root.pending = wanted
 
     if (backend.phase === "idle" || backend.phase === "error") backend.connect()
-    Qt.callLater(function() { chatTab.focusInput() })
+    // Only Chat wants the caret. Setup and Library are read-and-click screens,
+    // and handing the hidden input the focus there swallows Page/Home/End.
+    Qt.callLater(function() { root.placeFocus() })
     if (wanted && backend.phase === "ready") root.runPending()
 
     if (toAdd.length) {
@@ -316,6 +339,7 @@ Item {
   }
 
   History { id: history }
+  Toolchain { id: toolchain }
 
   Lilbee {
     id: backend
@@ -331,11 +355,24 @@ Item {
   Connections {
     target: backend
     function onPhaseChanged() {
-      if (backend.phase === "ready") { root.runPending(); root.runPendingAdd() }
+      if (backend.phase !== "ready") return
+      root.runPending()
+      root.runPendingAdd()
+      // Setup may have been opened before the backend was up; nothing retried
+      // the load, so the sections stayed empty.
+      if (root.tab === "setup" && !backend.settings.length) backend.loadSettings()
     }
   }
 
   // ------------------------------------------------------------- window
+
+  // Where the keyboard should point for the tab now on screen.
+  function placeFocus() {
+    if (root.tab === "chat") chatTab.focusInput()
+    else if (keyRoot) keyRoot.forceActiveFocus()
+  }
+
+
 
   PanelWindow {
     id: panel
@@ -380,6 +417,7 @@ Item {
       MouseArea { anchors.fill: parent; onClicked: {} }
 
       Item {
+        id: keyRoot
         anchors.fill: parent
         anchors.margins: Style.spacing.panelPadding
         focus: true
@@ -408,6 +446,17 @@ Item {
             event.accepted = true
             return
           }
+          // Page and Home/End scroll the sheet under the pointer-free hand.
+          // Setup is the long one, but the others may grow.
+          var sheet = root.tab === "setup" ? setupTab : null
+          if (sheet && typeof sheet.scrollBy === "function") {
+            var step = card.height - Style.space(80)
+            if (event.key === Qt.Key_PageDown) { sheet.scrollBy(step); event.accepted = true; return }
+            if (event.key === Qt.Key_PageUp) { sheet.scrollBy(-step); event.accepted = true; return }
+            if (event.key === Qt.Key_Home) { sheet.scrollBy(-1e6); event.accepted = true; return }
+            if (event.key === Qt.Key_End) { sheet.scrollBy(1e6); event.accepted = true; return }
+          }
+
           if (event.key === Qt.Key_Down) { root.moveSelection(1); event.accepted = true; return }
           if (event.key === Qt.Key_Up) { root.moveSelection(-1); event.accepted = true; return }
           if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && root.selected >= 0) {
@@ -503,11 +552,25 @@ Item {
           anchors.topMargin: Style.spacing.panelGap
 
           SetupTab {
+            id: setupTab
             anchors.fill: parent
             visible: root.tab === "setup"
             backend: backend
+            lilbeeVersion: toolchain.version
+            updateNote: toolchain.note
+            checkingUpdate: toolchain.checking
+            backendWhenClosed: root.setting("backendWhenClosed", "Stop with OMA")
+            answerModel: root.setting("answerModel", "")
+            fontScale: root.setting("omaFontScale", 1.0)
             foreground: root.foreground
             muted: root.muted
+            accent: root.accent
+            urgent: root.urgent
+            onCheckUpdate: toolchain.checkLatest()
+            onReleaseEngine: { backend.stopEngineNow(); root.flash("Models released") }
+            onOpenLog: backend.openDocument("file://" + Quickshell.env("HOME")
+                                            + "/.local/share/lilbee/logs/server.log", "")
+            onOmaSettingChanged: function(key, value) { root.writeOwnSetting(key, value) }
           }
 
           ChatTab {

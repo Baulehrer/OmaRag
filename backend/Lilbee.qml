@@ -138,6 +138,10 @@ Item {
     engineStop.running = true
   }
 
+  // Explicit "release the models now" from Setup. Unlike releaseEngine this is
+  // asked for directly, so it runs whoever started the server.
+  function stopEngineNow() { engineStop.running = true }
+
   function retry() {
     root.phase = "idle"
     root.message = ""
@@ -379,6 +383,93 @@ Item {
     root.storedSources = sources || []
     root.showingStored = true
     root.rawAnswer = String(answer || "")
+  }
+
+  // ---------------------------------------------------------------- settings
+
+  // lilbee describes its own configuration: every key comes with value,
+  // default, type, help text, choices and whether changing it invalidates the
+  // index. The Setup view is built from that rather than from a hardcoded list,
+  // so it stays right across lilbee versions.
+  property var settings: []
+  property bool settingsLoading: false
+  signal settingsLoaded()
+  signal settingWritten(string key, bool ok, bool needsReindex)
+
+  function loadSettings(force) {
+    if (root.phase !== "ready") return
+    // A reload right after a write must not be swallowed by a fetch that is
+    // still in flight — it would leave the field showing the old value.
+    if (root.settingsLoading && !force) return
+    root.settingsLoading = true
+    root._callTool("settings_list", {}, function(rows, err) {
+      root.settingsLoading = false
+      if (err) return
+      var payload = rows.length ? rows[0] : null
+      root.settings = (payload && payload.settings) || []
+      root.settingsLoaded()
+    })
+  }
+
+  function setting(key) {
+    for (var i = 0; i < root.settings.length; i++)
+      if (root.settings[i].key === key) return root.settings[i]
+    return null
+  }
+
+  function writeSetting(key, value) {
+    var updates = {}
+    updates[key] = value
+    root._callTool("settings_set", { updates: updates }, function(rows, err) {
+      if (err) { root.settingWritten(key, false, false); return }
+      // The answer says whether the change invalidates the index; that beats
+      // the flag on our own copy of the key, which may be a load behind.
+      var payload = rows.length ? rows[0] : null
+      var reindex = payload ? payload.reindex_required === true : false
+      root.loadSettings(true)
+      root.settingWritten(key, true, reindex)
+    })
+  }
+
+  function resetSetting(key) {
+    root._callTool("settings_reset", { keys: [key] }, function(rows, err) {
+      if (err) { root.settingWritten(key, false, false); return }
+      var payload = rows.length ? rows[0] : null
+      root.loadSettings(true)
+      root.settingWritten(key, true, payload ? payload.reindex_required === true : false)
+    })
+  }
+
+  // ---------------------------------------------------------------- models
+
+  property var installedModels: []
+  property var catalog: []
+  property bool catalogLoading: false
+  signal catalogLoaded()
+
+  // Local only — reads what is already on disk, no network.
+  function loadModels() {
+    root._callTool("model_list", {}, function(rows, err) {
+      if (err) return
+      var payload = rows.length ? rows[0] : null
+      root.installedModels = (payload && (payload.models || payload.installed)) || (Array.isArray(payload) ? payload : [])
+    })
+  }
+
+  // Reaches Hugging Face. Only ever called from an explicit button, never on
+  // opening a view — OMA does not telephone out unasked.
+  function browseCatalog(task, search) {
+    if (root.catalogLoading) return
+    root.catalogLoading = true
+    var args = { task: task || "", limit: 30 }
+    if (search && search.length) args.search = search
+    root._callTool("catalog_browse", args, function(rows, err) {
+      root.catalogLoading = false
+      if (err) { root._fail("Could not reach the model catalogue", "catalog_browse: " + err); return }
+      var payload = rows.length ? rows[0] : null
+      root.catalog = (payload && (payload.models || payload.results)) || (Array.isArray(payload) ? payload : [])
+      root.catalogLoaded()
+    }, 60000)
   }
 
   // ---------------------------------------------------------------- indexing
