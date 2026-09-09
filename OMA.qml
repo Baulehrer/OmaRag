@@ -91,6 +91,9 @@ Item {
     if (root.tab === "setup") {
       if (!toolchain.version.length) toolchain.readVersion()
       if (backend.phase === "ready" && !backend.settings.length) backend.loadSettings()
+      // Reads what is already on disk; no network, so it comes with the tab
+      // rather than waiting for a button.
+      if (backend.phase === "ready" && !backend.installedModels.length) backend.loadModels()
     }
     Qt.callLater(function() { root.placeFocus() })
   }
@@ -397,6 +400,7 @@ Item {
       // Setup may have been opened before the backend was up; nothing retried
       // the load, so the sections stayed empty.
       if (root.tab === "setup" && !backend.settings.length) backend.loadSettings()
+      if (root.tab === "setup" && !backend.installedModels.length) backend.loadModels()
     }
   }
 

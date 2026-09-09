@@ -472,6 +472,27 @@ Item {
     }, 60000)
   }
 
+  // Downloads. Never called on its own — only from a pressed button, and the
+  // download itself pins the single embedder, so everything else has to wait
+  // the way it does for indexing.
+  property string pulling: ""
+  signal pullFinished(string model, bool ok, string detail)
+
+  function pullModel(model) {
+    if (!model || !model.length) return
+    if (root.pulling.length) { root.refused("A model is already downloading"); return }
+    if (root.phase === "busy") { root.refused(root.message); return }
+    if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
+    root.pulling = model
+    root._callTool("model_pull", { model: model }, function(rows, err) {
+      root.pulling = ""
+      if (err) { root.pullFinished(model, false, err); return }
+      // A fresh file changes what the picker may offer.
+      root.loadModels()
+      root.pullFinished(model, true, "")
+    }, 30 * 60 * 1000)
+  }
+
   // ---------------------------------------------------------------- indexing
 
   property string indexingWhat: ""

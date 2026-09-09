@@ -5,9 +5,11 @@ import "../common"
 
 // One titled group of lilbee settings.
 //
-// A component rather than a Repeater inside a Repeater: nesting them left the
-// fields without usable heights and only the last one landed on screen. One
-// level of repetition, laid out by a Column that can measure its children.
+// A component rather than a Repeater inside a Repeater. The nesting itself was
+// not the problem — the width was: a delegate that binds its width to an id
+// from the enclosing file scope gets zero for every instance but the last, so
+// all of them piled up at the same spot. Inside a component the delegate can
+// bind to the component's own root, which resolves in time.
 Column {
   id: root
 

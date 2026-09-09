@@ -291,12 +291,49 @@ Item {
       }
 
       // -------------------------------------------------------- lilbee keys
-      SettingGroup {
-        width: column.width
-        title: "Models"
-        keys: ["chat_model", "embedding_model", "reranker_model", "vision_model"]
-        backend: root.backend
-        foreground: root.foreground; muted: root.muted; accent: root.accent; urgent: root.urgent
+      Text {
+        text: "MODELS"
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        font.letterSpacing: 1.5
+      }
+
+      Repeater {
+        model: [
+          { key: "chat_model",      task: "chat",      label: "chat" },
+          { key: "embedding_model", task: "embedding", label: "embedding" },
+          { key: "reranker_model",  task: "rerank",    label: "reranker" },
+          { key: "vision_model",    task: "vision",    label: "vision (OCR)" }
+        ]
+
+        ModelPicker {
+          // parent, not the outer `column` id: inside a Repeater delegate the
+          // outer id resolves too late and every instance but the last stays
+          // zero-wide.
+          width: parent.width
+          backend: root.backend
+          settingKey: modelData.key
+          task: modelData.task
+          label: modelData.label
+          foreground: root.foreground; muted: root.muted; accent: root.accent; urgent: root.urgent
+          onChoose: function(key, model) {
+            if (root.backend) root.backend.writeSetting(key, model)
+            open = false
+          }
+          onDownload: function(model) { if (root.backend) root.backend.pullModel(model) }
+        }
+      }
+
+      Text {
+        width: parent.width
+        visible: root.backend && root.backend.pulling.length > 0
+        text: root.backend ? "Downloading " + root.backend.pulling
+                           + " — indexing and questions wait until it finishes." : ""
+        color: root.accent
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
       }
 
       SettingGroup {
