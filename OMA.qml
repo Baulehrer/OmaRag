@@ -182,13 +182,20 @@ Item {
     root.detailsOpen = false
     root.notice = ""
     root.pending = ""
+    root.pendingAdd = []
     root.selected = -1
 
     var wanted = ""
+    var toAdd = []
     if (payloadJson) {
       try {
         var parsed = JSON.parse(String(payloadJson))
         if (parsed && typeof parsed.query === "string") wanted = parsed.query
+        // {"tab": "library"} opens straight into a section.
+        if (parsed && typeof parsed.tab === "string") root.tab = parsed.tab
+        // {"add": "/path"} or {"add": ["/a","/b"]} — lets a keybind hand OMA a
+        // document without going through the chooser.
+        if (parsed && parsed.add) toAdd = [].concat(parsed.add)
       } catch (e) { /* an unreadable payload just opens OMA empty */ }
     }
     chatTab.setInputText(wanted)
@@ -197,6 +204,12 @@ Item {
     if (backend.phase === "idle" || backend.phase === "error") backend.connect()
     Qt.callLater(function() { chatTab.focusInput() })
     if (wanted && backend.phase === "ready") root.runPending()
+
+    if (toAdd.length) {
+      root.tab = "library"
+      root.pendingAdd = toAdd
+      if (backend.phase === "ready") root.runPendingAdd()
+    }
   }
 
   function close() {
@@ -216,6 +229,15 @@ Item {
   // A payload query waits for the backend rather than polling for it. A timer
   // here used to give up after a minute and leave the UI claiming nothing
   // matched — for a query that had never run.
+  property var pendingAdd: []
+
+  function runPendingAdd() {
+    if (!root.pendingAdd.length) return
+    var paths = root.pendingAdd
+    root.pendingAdd = []
+    backend.addPaths(paths)
+  }
+
   function runPending() {
     if (!root.pending.length) return
     var q = root.pending
@@ -287,7 +309,7 @@ Item {
   Connections {
     target: backend
     function onPhaseChanged() {
-      if (backend.phase === "ready") root.runPending()
+      if (backend.phase === "ready") { root.runPending(); root.runPendingAdd() }
     }
   }
 

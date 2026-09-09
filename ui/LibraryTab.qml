@@ -125,6 +125,7 @@ Item {
     stage: root.backend ? root.backend.indexStage : ""
     done: root.backend ? root.backend.indexDone : -1
     total: root.backend ? root.backend.indexTotal : -1
+    calls: root.backend ? root.backend.indexCalls : 0
     waited: root.waited
     foreground: root.foreground
     muted: root.muted

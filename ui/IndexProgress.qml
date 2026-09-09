@@ -15,6 +15,7 @@ Item {
   property string stage: ""      // extracting · embedding · finishing
   property int done: -1
   property int total: -1
+  property int calls: 0
   property int waited: 0
 
   property color foreground: Color.menu.text
@@ -113,9 +114,14 @@ Item {
       horizontalAlignment: Text.AlignHCenter
       // "approx." is not modesty: the count comes from embedding calls, and a
       // call carries about two chunks. The number is derived, not reported.
+      // Three levels of knowledge, three honest sentences: a share of a known
+      // total, a bare count when only PDFs announce their total, or just the
+      // clock while extraction runs.
       text: root.hasCount
           ? "approx. " + root.done + " of " + root.total + " chunks  ·  " + root.elapsed(root.waited)
-          : root.elapsed(root.waited) + " elapsed"
+          : (root.calls > 0
+             ? "approx. " + Math.round(root.calls * 2) + " chunks so far  ·  " + root.elapsed(root.waited)
+             : root.elapsed(root.waited) + " elapsed")
       color: root.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall

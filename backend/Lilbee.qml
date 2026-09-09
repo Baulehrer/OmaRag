@@ -372,9 +372,17 @@ Item {
   property string indexingWhat: ""
   // Filled by the log watcher — see IngestWatch. -1 means "not known yet",
   // which the progress view renders as elapsed time only.
-  property string indexStage: ""
-  property int indexDone: -1
-  property int indexTotal: -1
+  readonly property string indexStage: watch.stage
+  readonly property int indexDone: watch.done
+  readonly property int indexTotal: watch.total
+  readonly property int indexCalls: watch.calls
+
+  // The log names the document once extraction reports it, which is more
+  // accurate than the path we guessed from — take it over when it arrives.
+  IngestWatch {
+    id: watch
+    onSourceChanged: if (source.length && root.phase === "indexing") root.indexingWhat = source
+  }
 
   // `add` copies or links the files and indexes them in one call. It pins the
   // single embedder for its whole run, which is why everything else is locked
@@ -389,10 +397,12 @@ Item {
       : paths.length + " items"
     root.phase = "indexing"
     root.message = ""
+    watch.begin()
 
     root._callTool("add", { paths: paths }, function(rows, err) {
       // A timeout does not mean it stopped — the daemon keeps working, and
       // there is no cancel for `add`. Saying "busy" is the truthful state.
+      watch.finish()
       if (err === "timeout") { root._enterBusy(); root.indexingFinished(false); return }
       root.phase = "ready"
       root.indexingWhat = ""
