@@ -295,6 +295,75 @@ Item {
     root.releaseEngine()
   }
 
+  // -------------------------------------------------------------- admission
+  //
+  // llama-manager reads MemAvailable, which on this APU is the only number that
+  // sees model weights at all — they live in the GPU translation table, where
+  // cgroup accounting cannot follow. So when lilbee is holding memory, the
+  // manager notices and refuses. The other direction had nobody watching:
+  // lilbee loads its embedder, reranker and vision model without asking, and on
+  // 2026-09-09 that met a chat model in pi and ended in an OOM.
+  //
+  // tools/admit.py answers under llama-manager's own lock, with llama-manager's
+  // own numbers. OMA neither evicts nor waits — it asks, and passes on a no.
+  // Measured 2026-09-10: embedder and reranker together 8.2 GiB, vision 5.0.
+  readonly property real retrievalGib: 8.5
+  readonly property real visionGib: 5.0
+
+  // The chat model is deliberately not counted. lilbee reaches it through
+  // llama-manager's own proxy, so the manager already gates that half; adding
+  // it here would refuse work twice for the same weights — and holding the lock
+  // across an answer would deadlock against the load the answer triggers.
+  property var _afterAdmission: null
+
+  function _withAdmission(gib, proceed) {
+    // A warm engine loads nothing, so there is nothing to admit.
+    if (root.engineWarm) { proceed(); return }
+    if (root._afterAdmission) { root.refused("Still checking memory"); return }
+    root._afterAdmission = proceed
+    admitProc.command = ["python3",
+      String(Qt.resolvedUrl("../tools/admit.py")).replace(/^file:\/\//, ""),
+      "--gib", String(gib), "--wait", "3"]
+    admitProc.running = true
+  }
+
+  function _admissionReason(line) {
+    if (String(line).indexOf("lock=busy") !== -1)
+      return "llama-manager is loading a model — try again in a moment"
+    var held = String(line).split("holding: ")[1]
+    return held && held.length
+      ? "Not enough free memory — " + held + " is loaded"
+      : "Not enough free memory for the retrieval models"
+  }
+
+  Process {
+    id: admitProc
+    stdout: StdioCollector { }
+
+    onExited: function(code) {
+      var proceed = root._afterAdmission
+      root._afterAdmission = null
+      var line = String(admitProc.stdout.text || "").trim()
+      // The state may have moved on while the check ran — a close, a failure,
+      // another operation. Then the answer to a question nobody is asking any
+      // more is simply dropped.
+      if (root.phase !== "ready") return
+      if (code === 0) { if (proceed) proceed(); return }
+      // Only exit 3 is an answer. Any other failure is the check itself being
+      // broken — a missing script, no python — and OMA does not refuse a
+      // question because its own precaution fell over.
+      if (code !== 3) {
+        console.warn("omarag: admission check failed (" + code + "): " + line)
+        if (proceed) proceed()
+        return
+      }
+      root.refused(root._admissionReason(line))
+      root.admissionRefused(line)
+    }
+  }
+
+  signal admissionRefused(string detail)
+
   // Explicit "release the models now" from Setup. Unlike releaseEngine this is
   // asked for directly, so it runs whoever started the server.
   function stopEngineNow() {
@@ -540,6 +609,10 @@ Item {
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
 
+    root._withAdmission(root.retrievalGib, function() { root._search(query, topK) })
+  }
+
+  function _search(query, topK) {
     root.phase = "searching"
     root.message = ""
     root._callTool("search", { query: query, top_k: topK || 5 }, function(rows, err) {
@@ -708,6 +781,13 @@ Item {
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
 
+    // Indexing may reach for the vision model as well: a scanned page is read
+    // by OCR, and that is a further 5 GiB nobody would have accounted for.
+    root._withAdmission(root.retrievalGib + root.visionGib,
+                        function() { root._addPaths(paths) })
+  }
+
+  function _addPaths(paths) {
     root.indexingWhat = paths.length === 1
       ? String(paths[0]).split("/").pop()
       : paths.length + " items"
@@ -757,7 +837,10 @@ Item {
     root._keepEngine()
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
+    root._withAdmission(root.retrievalGib, function() { root._ask(question) })
+  }
 
+  function _ask(question) {
     root.rawAnswer = ""
     root.answerDetail = ""
     root.showingStored = false

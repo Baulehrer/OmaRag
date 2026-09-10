@@ -165,6 +165,29 @@ therefore waits behind a button that says so, and nothing downloads until you
 press `Get`. A download holds the single embedder, so questions and indexing
 wait for it, and OMA says so while it runs.
 
+### Before it loads anything
+
+lilbee's embedder, reranker and vision model cost 8.2 and a further 5.0 GiB,
+and on this APU those weights live in the GPU translation table, where cgroup
+accounting cannot see them — only `MemAvailable` does. `llama-manager` reads
+`MemAvailable`, so it already notices when lilbee is holding memory and refuses
+a chat model. The other direction had nobody watching, and on 2026-09-09 lilbee
+loading beside a chat model in `pi` ended in an OOM.
+
+So before a question, a search or an index run — and only when nothing is loaded
+yet — OMA asks `tools/admit.py`, which takes `llama-manager`'s own admission
+lock and applies `llama-manager`'s own rule with its own numbers:
+`MemAvailable >= ram_reserve_gib + admission_margin_gib + what is about to
+load`. A no comes back as a refusal that names what is in the way; a lock that
+is busy means a load is in flight and the answer is "try again in a moment".
+
+OMA neither evicts nor waits, and it never counts the chat model — lilbee
+reaches that through `llama-manager`'s own proxy, so the manager already gates
+that half, and holding the lock across an answer would deadlock against the
+load the answer triggers. On a machine without `llama-manager` the check finds
+no configuration and stays out of the way: OMA does not refuse work because a
+component it does not require is missing.
+
 ### What OMA never does on its own
 
 No root, no telemetry, no cloud. The only three things that leave this machine
@@ -181,6 +204,7 @@ journalctl --user -f | grep -i omarag
 
 node tools/tests/formula-escaping.js   # no model output can become markup
 node tools/tests/answer-timing.js      # the estimate behind the progress bar
+bash tools/tests/admission.sh          # the gate in front of every model load
 ```
 
 Both tests read the real source — `ui/Formula.js`, and the three timing
