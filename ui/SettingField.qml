@@ -163,8 +163,8 @@ Item {
       var h = String(root.meta.help || "")
       if (root.kind === "unsupported")
         return (h.length ? h + " — " : "")
-             + "Diese Einstellung hat eine Form, die OMA nicht bearbeiten kann. "
-             + "Über lilbees eigene Oberfläche änderbar."
+             + "This setting has a shape OMA cannot edit. Change it in lilbee's "
+             + "own interface."
       return h
     }
     color: root.muted

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kaufmann.omarag",
   "name": "OMA",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Stephan Kaufmann",
   "license": "MIT",
   "description": "Local knowledge. Ask your own documents and see where every answer comes from.",
@@ -94,6 +94,8 @@
     "displayName": "OMA",
     "description": "Open your local knowledge base.",
     "category": "AI",
-    "allowMultiple": false
-  }
+    "allowMultiple": false,
+    "defaultSection": "left"
+  },
+  "homepage": "https://github.com/Baulehrer/omarchy-oma"
 }

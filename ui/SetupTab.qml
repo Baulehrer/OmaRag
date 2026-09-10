@@ -603,21 +603,20 @@ Item {
         // Measured against this library, both books, three chat models.
         recommendations: ({
           "top_k": { value: 6,
-                     why: "lilbee liefert das Doppelte, also 12 Passagen. Mehr Kontext "
-                        + "brachte in den Messungen keine bessere Antwort, nur eine längere." },
+                     why: "returns twice this, so 12 passages. More context did not "
+                        + "make answers better here, only longer." },
           "rerank_candidates": { value: 48,
-                     why: "muss über der zurückgelieferten Zahl liegen. Bei 24 bekommt der "
-                        + "Reranker genauso viele Kandidaten, wie am Ende zurückgehen — "
-                        + "er sortiert dann nur um, statt auszuwählen. Bei 48 tauscht er "
-                        + "5 von 24 Passagen gegen besser bewertete." }
+                     why: "has to exceed what comes back. At 24 the reranker sees as "
+                        + "many candidates as it returns and can only reorder them; "
+                        + "at 48 it replaces 5 of 24 with better-scoring passages." }
         })
         foreground: root.foreground; muted: root.muted; accent: root.accent; urgent: root.urgent
       }
 
       Text {
         width: parent.width
-        text: "Retrieval bestimmt, was das Modell überhaupt zu sehen bekommt — meist "
-            + "wirksamer als jede Anweisung im Prompt, weil das Modell ihr nicht folgen muss."
+        text: "Retrieval decides what the model gets to see at all — usually more "
+            + "effective than any instruction in the prompt, which it may ignore."
         color: root.muted
         font.family: OmaFont.face
         font.pixelSize: OmaFont.caption
