@@ -29,8 +29,22 @@ Item {
       && String(root.meta.value) === String(root.recommended)
 
   readonly property string key: meta ? String(meta.key) : ""
+  // Anything lilbee describes in a shape this view does not model is shown
+  // read-only rather than guessed at. A future lilbee that turns a number into
+  // an object would otherwise get "[object Object]" typed back at it — the
+  // field falls back to a text box, and a text box writes text.
+  readonly property bool unsupported: {
+    if (!meta) return false
+    var v = meta.value
+    if (v !== null && typeof v === "object") return true
+    var t = String(meta.type).replace("|null", "")
+    return ["bool", "int", "float", "str", "string"].indexOf(t) === -1
+        && !(meta.choices && meta.choices.length)
+  }
+
   readonly property string kind: {
     if (!meta) return "str"
+    if (root.unsupported) return "unsupported"
     var t = String(meta.type).replace("|null", "")
     if (meta.choices && meta.choices.length) return "enum"
     if (t === "bool") return "bool"
@@ -104,13 +118,23 @@ Item {
           }
         }
       }
+
+      Text {
+        anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter }
+        visible: root.kind === "unsupported"
+        text: root.meta ? JSON.stringify(root.meta.value) : ""
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
+        elide: Text.ElideRight
+      }
     }
 
     // Only offered where it means something — a value already at its default
     // has nothing to go back to.
     Text {
       anchors.verticalCenter: parent.verticalCenter
-      visible: root.modified
+      visible: root.modified && root.kind !== "unsupported"
       text: "reset"
       color: root.muted
       font.family: OmaFont.face
@@ -134,7 +158,15 @@ Item {
     anchors { top: row.bottom; left: parent.left; right: parent.right }
     anchors.leftMargin: Style.space(210) + Style.spacing.md
     anchors.topMargin: Style.spacing.xxs
-    text: root.meta ? String(root.meta.help || "") : ""
+    text: {
+      if (!root.meta) return ""
+      var h = String(root.meta.help || "")
+      if (root.kind === "unsupported")
+        return (h.length ? h + " — " : "")
+             + "Diese Einstellung hat eine Form, die OMA nicht bearbeiten kann. "
+             + "Über lilbees eigene Oberfläche änderbar."
+      return h
+    }
     color: root.muted
     font.family: OmaFont.face
     font.pixelSize: OmaFont.caption

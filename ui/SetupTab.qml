@@ -14,6 +14,12 @@ Item {
 
   property var backend: null
   property string lilbeeVersion: ""
+  // The version OMA's generated fields were built and measured against. A newer
+  // lilbee is not an error — the fields come from lilbee's own description — but
+  // a changed shape is worth a word before it produces nonsense.
+  readonly property string testedAgainst: "0.6.90b432"
+  readonly property bool versionKnown: root.lilbeeVersion.length > 0
+  readonly property bool versionMatches: root.lilbeeVersion === root.testedAgainst
   property string updateNote: ""
   property bool checkingUpdate: false
 
@@ -87,8 +93,13 @@ Item {
           font.pixelSize: OmaFont.bodySmall
         }
         Text {
-          text: root.lilbeeVersion || "…"
-          color: root.foreground
+          text: {
+            if (!root.versionKnown) return "…"
+            if (root.versionMatches) return root.lilbeeVersion + "   ✓ geprüft"
+            return root.lilbeeVersion + "   ⚠ nicht gegen diese Fassung geprüft ("
+                 + root.testedAgainst + ")"
+          }
+          color: root.versionKnown && !root.versionMatches ? root.accent : root.foreground
           font.family: OmaFont.face
           font.pixelSize: OmaFont.bodySmall
         }
