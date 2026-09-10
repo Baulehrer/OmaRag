@@ -269,14 +269,36 @@ Item {
   // else's work.
   function releaseEngine() {
     if (!root.ownsDaemon || root.persistDaemon) return
+    // Closing OMA while a question runs is the whole point of answering in the
+    // background — taking the engine away at that moment would end the answer
+    // it was closed to wait for. The release is remembered and happens when the
+    // work is done, which is also what "unload after the answer, unless it is
+    // being kept warm" asks for.
+    if (root.phase === "answering" || root.phase === "indexing"
+        || root.phase === "searching" || root.phase === "starting") {
+      root._releaseWhenDone = true
+      return
+    }
+    root._releaseWhenDone = false
     root.engineWarm = false
     root.chatWarm = false
     engineStop.running = true
   }
 
+  property bool _releaseWhenDone: false
+
+  // Called wherever work ends. Nothing happens unless a close asked for the
+  // release while that work was still running.
+  function _releaseIfDeferred() {
+    if (!root._releaseWhenDone) return
+    root._releaseWhenDone = false
+    root.releaseEngine()
+  }
+
   // Explicit "release the models now" from Setup. Unlike releaseEngine this is
   // asked for directly, so it runs whoever started the server.
   function stopEngineNow() {
+    root._releaseWhenDone = false
     root.engineWarm = false
     root.chatWarm = false
     engineStop.running = true
@@ -536,6 +558,7 @@ Item {
       // 0.953, …). Numbered rows imply a ranking, so establish one.
       rows.sort(function(a, b) { return (b.score || 0) - (a.score || 0) })
       root.searchFinished(rows)
+      root._releaseIfDeferred()
     }, root.searchTimeout)
   }
 
@@ -723,6 +746,7 @@ Item {
           }
       root.engineWarm = true
       root.indexingFinished(rejected.length === 0, rejected)
+      root._releaseIfDeferred()
       postIndexRelease.restart()
     }, root.indexTimeout)
   }
@@ -795,6 +819,7 @@ Item {
         root.engineWarm = true
         root.chatWarm = true
         root.answerFinished(true)
+        root._releaseIfDeferred()
         return
       }
       root.answerStage = ""
@@ -831,6 +856,7 @@ Item {
         root._fail("Answering failed",
                    "lilbee ask exited with code " + code + "\n" + detail)
       root.answerFinished(false)
+      root._releaseIfDeferred()
     }
   }
 
