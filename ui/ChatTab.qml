@@ -17,6 +17,9 @@ Item {
   property int selected: -1
   property int waited: 0
   property bool detailsOpen: false
+  // The small window is the chat alone: at 460 points a history column would
+  // take a third of the width from the thing it was opened for.
+  property bool compact: false
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -63,7 +66,8 @@ Item {
   HistoryPane {
     id: historyPane
     anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
-    width: Style.space(200)
+    visible: !root.compact
+    width: root.compact ? 0 : Style.space(200)
     entries: root.history
     current: root.historyIndex
     foreground: root.foreground
@@ -76,7 +80,7 @@ Item {
   Rectangle {
     id: inputBox
     anchors { top: parent.top; left: historyPane.right; right: parent.right }
-    anchors.leftMargin: Style.spacing.panelPadding
+    anchors.leftMargin: root.compact ? 0 : Style.spacing.panelPadding
     height: Style.spacing.controlHeight + Style.spacing.md
     color: Style.controlFill(input.activeFocus, false, Color.menu.text, root.accent)
     border.color: Style.controlBorder(input.activeFocus, false, Color.menu.text, root.accent)

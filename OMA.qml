@@ -30,9 +30,14 @@ Item {
 
   // The scoped shell facade lets a plugin write its own inline settings back to
   // shell.json — the same entry `setting()` reads from.
-  function writeOwnSetting(key, value) {
-    if (root.service && root.service.writeSetting(key, value)) root.flash(key + " saved")
-    else root.flash("Could not save the setting", true)
+  // `quiet` for a setting whose effect is the confirmation — the window
+  // changing size says more than the words "compactMode saved" beside it.
+  // A failure always speaks up.
+  function writeOwnSetting(key, value, quiet) {
+    var ok = root.service && root.service.writeSetting(key, value)
+    if (!ok) root.flash("Could not save the setting", true)
+    else if (!quiet) root.flash(key + " saved")
+    return ok === true
   }
 
   // Loaded when the section is first opened rather than on startup: nobody
@@ -72,6 +77,16 @@ Item {
   readonly property real anchorX: root.service ? root.service.anchorX : 0
   readonly property real anchorY: root.service ? root.service.anchorY : 0
   readonly property bool anchorAtTop: root.service ? root.service.anchorAtTop : true
+
+  // The overlay covers the whole output, so the bar is underneath it. The large
+  // window fills everything except the strip the bar occupies — which is what
+  // these four say, in the overlay's own coordinates.
+  readonly property string barSide: root.service ? root.service.barSide : "top"
+  readonly property real barThickness: root.service ? root.service.barThickness : 0
+  readonly property real insetTop: root.barSide === "top" ? root.barThickness : 0
+  readonly property real insetBottom: root.barSide === "bottom" ? root.barThickness : 0
+  readonly property real insetLeft: root.barSide === "left" ? root.barThickness : 0
+  readonly property real insetRight: root.barSide === "right" ? root.barThickness : 0
 
   // 1.0 is opaque. Clamped well short of invisible: a window you cannot read
   // is not a setting, it is a fault.
@@ -265,6 +280,15 @@ Item {
 
   function toggle() { if (root.opened) root.dismiss(); else root.open("{}") }
 
+  // One place for the size switch: the header glyph, Ctrl+M and the Setup
+  // buttons all end up here. Says what it became, not what was clicked, and
+  // stays quiet when the write did not take.
+  function toggleSize() {
+    var wanted = !root.compact
+    if (root.writeOwnSetting("compactMode", wanted, true))
+      root.flash(wanted ? "Compact window" : "Large window")
+  }
+
   // A payload query waits for the backend rather than polling for it. A timer
   // here used to give up after a minute and leave the UI claiming nothing
   // matched — for a query that had never run.
@@ -427,8 +451,28 @@ Item {
                                                 : WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
-    Rectangle { anchors.fill: parent; color: Color.menu.scrim }
-    MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+    // Both stop at the bar. Dimming it would make the bar look disabled, and a
+    // click catcher over it would swallow the press on OMA's own icon.
+    Rectangle {
+      anchors.fill: parent
+      anchors.topMargin: root.insetTop
+      anchors.bottomMargin: root.insetBottom
+      anchors.leftMargin: root.insetLeft
+      anchors.rightMargin: root.insetRight
+      color: Color.menu.scrim
+      // Only the large window dims what is behind it. The small one is meant to
+      // sit beside the work, and darkening the whole screen for it would make
+      // it as intrusive as the window it replaces.
+      visible: !root.compact
+    }
+    MouseArea {
+      anchors.fill: parent
+      anchors.topMargin: root.insetTop
+      anchors.bottomMargin: root.insetBottom
+      anchors.leftMargin: root.insetLeft
+      anchors.rightMargin: root.insetRight
+      onClicked: root.dismiss()
+    }
 
     // The [menu] section is empty in some themes, which leaves the surface
     // token without a usable fill and lets the desktop show straight through
@@ -437,7 +481,7 @@ Item {
     Rectangle {
       anchors.fill: card
       color: Color.background
-      radius: Style.cornerRadius
+      radius: card.radius
     }
 
     // Two sizes, one window. The shell gives a plugin exactly one window loader
@@ -449,27 +493,31 @@ Item {
       id: card
       // Math.max because the panel reports a placeholder size while the layer
       // surface is being configured, and a negative width leaves an empty card.
+      // Math.max because the panel reports a placeholder size while the layer
+      // surface is being configured, and a negative width leaves an empty card.
       width: Math.max(Style.space(280), root.compact
         ? Math.min(Style.space(460), panel.width - Style.gapsOut * 2)
-        : Math.min(Style.space(900), panel.width - Style.gapsOut * 4))
+        : panel.width - root.insetLeft - root.insetRight)
       height: Math.max(Style.space(200), root.compact
         ? Math.min(Style.space(520), panel.height - Style.gapsOut * 4)
-        : Math.min(Style.space(620), panel.height - Style.gapsOut * 4))
-      radius: Style.cornerRadius
+        : panel.height - root.insetTop - root.insetBottom)
+      // Square corners when it fills the screen: a rounded card floating on
+      // nothing would show the desktop in four notches.
+      radius: root.compact ? Style.cornerRadius : 0
 
-      // Centred when big; under the icon when compact, clamped so it never
-      // hangs off an edge. The bar may sit at the top or the bottom, so the
-      // card goes below or above the anchor accordingly.
-      anchors.centerIn: root.compact ? undefined : parent
+      // Under the icon when compact, clamped so it never hangs off an edge; the
+      // bar may sit at the top or the bottom, so the card goes below or above
+      // the anchor accordingly. Large, it starts where the bar ends.
       x: root.compact ? Math.max(Style.gapsOut,
                         Math.min(panel.width - width - Style.gapsOut,
-                                 root.anchorX - width / 2)) : 0
+                                 root.anchorX - width / 2))
+                      : root.insetLeft
       y: root.compact
         ? (root.anchorAtTop ? Math.min(panel.height - height - Style.gapsOut,
                                        root.anchorY + Style.gapsOut)
                             : Math.max(Style.gapsOut,
                                        root.anchorY - height - Style.gapsOut))
-        : 0
+        : root.insetTop
 
       // Only the card's ground takes the alpha. Fading the text with it would
       // trade legibility for looks, and this is a window for reading numbers
@@ -502,6 +550,13 @@ Item {
               && !(event.modifiers & Qt.ControlModifier)
               && !chatTab.inputText().length) {
             root.tab = root.tabs[event.key - Qt.Key_1].id
+            event.accepted = true
+            return
+          }
+          // Ctrl+M switches the window size. The header glyph does the same;
+          // this is for the hand that never leaves the keyboard.
+          if (event.key === Qt.Key_M && (event.modifiers & Qt.ControlModifier)) {
+            root.toggleSize()
             event.accepted = true
             return
           }
@@ -581,12 +636,7 @@ Item {
             font.pixelSize: OmaFont.subtitle
 
             HoverHandler { id: sizeHover }
-            TapHandler {
-              onTapped: {
-                root.writeOwnSetting("compactMode", !root.compact)
-                root.flash(root.compact ? "Large window" : "Compact window")
-              }
-            }
+            TapHandler { onTapped: root.toggleSize() }
           }
 
           TabStrip {
@@ -700,6 +750,7 @@ Item {
             id: chatTab
             anchors.fill: parent
             visible: root.tab === "chat"
+            compact: root.compact
             backend: root.backend
             hits: root.hits
             query: root.query

@@ -47,6 +47,8 @@ BarWidget {
                          : (pos === "top") ? w.height
                          : p.y
     root.service.anchorAtTop = (pos !== "bottom")
+    root.service.barSide = pos
+    root.service.barThickness = (pos === "left" || pos === "right") ? w.width : w.height
   }
 
   onXChanged: reportAnchor()

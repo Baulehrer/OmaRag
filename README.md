@@ -88,6 +88,7 @@ loading. OMA releases them, but only when it started the server itself.
 | `Ctrl+Shift+O` | Add a folder |
 | `Esc` | Cancel the answer → fold details → drop the selection → clear the query → close |
 | `Tab` / `1`–`3` | Move between Setup, Chat and Library |
+| `Ctrl+M` | Switch between the large and the small window |
 | `PgUp` `PgDn` `Home` `End` | Scroll the Setup sheet |
 
 Answers are selectable, and a selection lands on the clipboard on its own.
@@ -118,6 +119,20 @@ take the bar away again.
 The model is bound to what retrieval found. Ask it something the library does not
 cover and it says so instead of filling the gap from general knowledge — lilbee's
 system prompt enforces that, and it holds in practice.
+
+### Two sizes
+
+Large fills the screen except the bar, which stays visible and usable — OMA's
+own icon included. Small opens under that icon, on the side of the screen the
+icon is on and above or below the bar depending on where the bar sits, and
+shows the chat alone: at that width a history column would take a third of the
+room from the thing it was opened for. The large window dims what is behind it,
+the small one does not — it is meant to sit beside the work.
+
+The header glyph switches between them, so does `Ctrl+M`, and so do the buttons
+in Setup. There is one window either way: the shell gives a plugin exactly one
+window loader and prefers `panel` over `overlay` (`computePanelEntries`), so the
+card changes size and place rather than there being two windows.
 
 The bar button toggles the same overlay. A plugin that is both `overlay` and
 `bar-widget` stays owned by the overlay loader, so the button triggers OMA

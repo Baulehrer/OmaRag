@@ -35,17 +35,21 @@ Item {
   // `updateEntryInline`, reading does not, so OMA reads its own entry out of
   // shell.json, which the shell's README names as the one place settings live.
   property var settings: ({})
+  // The two places a plugin's settings can sit in shell.json. OMA is both a
+  // plugin and a bar widget, and the shell treats those as separate homes:
+  // `plugins` is where an entry starts, `bar.layout` is where the shell puts a
+  // bar widget's settings and — crucially — where updateEntryInline writes
+  // whenever the id appears in the layout (shell.qml:1078). Reading only
+  // `plugins` meant every setting written from Setup vanished on the next open.
   property var configEntry: ({})
+  property var barEntry: ({})
 
   function entrySettings() {
-    var id = String((manifest && manifest.id) || "kaufmann.omarag")
-    // If a future shell does expose the config to plugins, prefer it.
-    var config = shell ? shell.shellConfig : null
-    var plugins = config ? config.plugins : null
-    if (Array.isArray(plugins))
-      for (var i = 0; i < plugins.length; i++)
-        if (String((plugins[i] && plugins[i].id) || "") === id) return plugins[i]
-    return root.configEntry || ({})
+    var merged = ({})
+    var from = [root.configEntry || ({}), root.barEntry || ({})]
+    for (var i = 0; i < from.length; i++)
+      for (var k in from[i]) if (k !== "id") merged[k] = from[i][k]
+    return merged
   }
 
   function syncSettings() { root.settings = entrySettings() || ({}) }
@@ -55,12 +59,22 @@ Item {
     return value === undefined || value === null ? fallback : value
   }
 
-  // The scoped facade can write a plugin's own entry back to shell.json.
+  // The scoped facade can write a plugin's own entry back to shell.json —
+  // but updateEntryInline *replaces* the entry with { id, ...settings } rather
+  // than merging into it, so sending one key would delete every other setting.
+  // The whole set goes out on every write.
   function writeSetting(key, value) {
     if (!root.shell || typeof root.shell.updateEntryInline !== "function") return false
-    var patch = ({})
-    patch[key] = value
-    root.shell.updateEntryInline((root.manifest && root.manifest.id) || "kaufmann.omarag", patch)
+    var next = ({})
+    var current = root.settings || ({})
+    for (var k in current) if (k !== "id") next[k] = current[k]
+    next[key] = value
+    var id = String((root.manifest && root.manifest.id) || "kaufmann.omarag")
+    if (!root.shell.updateEntryInline(id, next)) return false
+    // Shown at once rather than waiting for the file to come back: the write is
+    // asynchronous, and a switch that only moves on the next reload reads as
+    // broken.
+    root.settings = next
     return true
   }
 
@@ -74,16 +88,28 @@ Item {
     onLoaded: {
       var id = String((root.manifest && root.manifest.id) || "kaufmann.omarag")
       var found = ({})
+      var inBar = ({})
       try {
         var doc = JSON.parse(text())
         var list = Array.isArray(doc.plugins) ? doc.plugins : []
         for (var i = 0; i < list.length; i++)
           if (String((list[i] && list[i].id) || "") === id) { found = list[i]; break }
+
+        // The bar layout holds the same id when OMA is placed in the bar, and
+        // that is the copy the shell writes to.
+        var layout = (doc.bar && doc.bar.layout) || ({})
+        var sections = ["left", "center", "right"]
+        for (var s = 0; s < sections.length; s++) {
+          var arr = layout[sections[s]] || []
+          for (var j = 0; j < arr.length; j++)
+            if (String((arr[j] && arr[j].id) || "") === id) { inBar = arr[j]; break }
+        }
       } catch (e) { /* a config we cannot read leaves every setting at default */ }
       root.configEntry = found
+      root.barEntry = inBar
       root.syncSettings()
     }
-    onLoadFailed: { root.configEntry = ({}); root.syncSettings() }
+    onLoadFailed: { root.configEntry = ({}); root.barEntry = ({}); root.syncSettings() }
   }
 
   // OMA's own type scale, read once and pushed into the singleton every view
@@ -123,6 +149,12 @@ Item {
   property real anchorX: 0
   property real anchorY: 0
   property bool anchorAtTop: true
+  // Which edge the bar is on and how thick it is, so the large window can fill
+  // the screen and still leave the bar visible. The overlay covers the whole
+  // output (exclusionMode Ignore) — without these it would have no way to know
+  // where the bar ends.
+  property string barSide: "top"
+  property real barThickness: 0
 
   property bool viewOpen: false
   property bool unseenAnswer: false
