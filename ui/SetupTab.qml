@@ -502,6 +502,28 @@ Item {
       }
 
       // -------------------------------------------------------- lilbee keys
+      // A setting that is on and does nothing is worse than one that is off:
+      // lilbee turns the table model off whenever layout detection is, and says
+      // so only in its log. Every table in the library is a flattened stream of
+      // text until both are on — which is what makes a strength class table
+      // unreadable to the model that is asked about it.
+      Text {
+        width: parent.width
+        visible: {
+          if (!root.backend) return false
+          var table = root.backend.setting("table_extraction")
+          var layout = root.backend.setting("layout_detection")
+          return table && layout && table.value === true && layout.value === false
+        }
+        text: "Table extraction is on but layout detection is off, so lilbee "
+            + "ignores the table model and tables stay flat text. Turning both "
+            + "on means indexing the library again."
+        color: root.accent
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
+      }
+
       Text {
         text: "MODELS"
         color: root.muted
