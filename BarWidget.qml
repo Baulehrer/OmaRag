@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Ui
 
@@ -25,6 +26,47 @@ BarWidget {
      || root.backend.phase === "searching" || root.backend.phase === "starting")
   readonly property bool warm: root.backend && root.backend.engineWarm
   readonly property bool unseen: root.service && root.service.unseenAnswer
+
+  // Where the icon sits, so the compact window can open under it. Reported in
+  // screen coordinates: the bar is a layer surface, so its window position plus
+  // the button's offset inside it is where the icon really is.
+  function reportAnchor() {
+    if (!root.service || !root.bar) return
+    var w = button.QsWindow ? button.QsWindow.window : null
+    if (!w || !w.screen) return
+    var p = button.mapToItem(null, button.width / 2, 0)
+    var pos = String(root.bar.position || "top")
+
+    // A layer surface reports no x/y, so the bar's own `position` says where it
+    // sits — the same thing Ui/PopupCard reads. Only top and bottom bars are
+    // treated as horizontal; a side bar anchors on its own edge.
+    root.service.anchorX = (pos === "left") ? w.width
+                         : (pos === "right") ? (w.screen.width - w.width)
+                         : p.x
+    root.service.anchorY = (pos === "bottom") ? (w.screen.height - w.height)
+                         : (pos === "top") ? w.height
+                         : p.y
+    root.service.anchorAtTop = (pos !== "bottom")
+  }
+
+  onXChanged: reportAnchor()
+  onWidthChanged: reportAnchor()
+
+  // The bar's window, the button's place in it and the service all arrive at
+  // their own pace, so this keeps trying briefly rather than reporting once
+  // into a half-built bar.
+  Timer {
+    id: anchorSettle
+    interval: 400
+    repeat: true
+    running: true
+    property int tries: 0
+    onTriggered: {
+      root.reportAnchor()
+      tries += 1
+      if ((root.service && root.service.anchorX > 0) || tries > 20) running = false
+    }
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight

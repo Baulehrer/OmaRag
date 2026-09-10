@@ -118,6 +118,12 @@ Item {
   // Set by whichever window is on screen. Without it the service cannot tell a
   // finished answer somebody is watching from one that arrived into an empty
   // desk.
+  // Where the bar icon is, filled in by the bar widget. The compact window
+  // opens under it, the way the shell's own popups do.
+  property real anchorX: 0
+  property real anchorY: 0
+  property bool anchorAtTop: true
+
   property bool viewOpen: false
   property bool unseenAnswer: false
 

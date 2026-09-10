@@ -22,7 +22,9 @@
       "answerModel": "",
       "omaFontScale": 1.0,
       "omaFontFamily": "",
-      "notifySound": "/usr/share/sounds/freedesktop/stereo/complete.oga"
+      "notifySound": "/usr/share/sounds/freedesktop/stereo/complete.oga",
+      "compactMode": false,
+      "windowOpacity": 1.0
     },
     "schema": [
       {
@@ -63,6 +65,20 @@
         "label": "Sound when an answer arrives",
         "description": "Played only when the answer finishes while OMA is closed. Any file the desktop can play; leave empty for silence. Point it at the same file another tool uses and you get the same sound.",
         "defaultValue": "/usr/share/sounds/freedesktop/stereo/complete.oga"
+      },
+      {
+        "key": "compactMode",
+        "type": "bool",
+        "label": "Compact window",
+        "description": "Opens a small window under the bar icon showing the chat alone, instead of the large one in the middle of the screen. The icon in the header switches between them.",
+        "defaultValue": false
+      },
+      {
+        "key": "windowOpacity",
+        "type": "number",
+        "label": "Window opacity",
+        "description": "How solid the window's background is, from 1.0 for opaque down to 0.45. Only the background fades — the text stays fully legible, because this is a window for reading numbers out of a textbook.",
+        "defaultValue": 1.0
       }
     ]
   },

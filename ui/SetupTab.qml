@@ -27,6 +27,8 @@ Item {
   property real fontScale: 1.0
   property string backendWhenClosed: "Stop with OMA"
   property string answerModel: ""
+  property bool compactMode: false
+  property real windowOpacity: 1.0
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -261,6 +263,61 @@ Item {
             return ""
           }
           onChanged: function(v) { root.omaSettingChanged("omaFontScale", parseFloat(v)) }
+        }
+      }
+
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(210)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "window"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        ButtonGroup {
+          anchors.verticalCenter: parent.verticalCenter
+          options: [
+            { value: "compact", label: "Compact" },
+            { value: "big",     label: "Large" }
+          ]
+          value: root.compactMode ? "compact" : "big"
+          onChanged: function(v) { root.omaSettingChanged("compactMode", v === "compact") }
+        }
+      }
+
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(210)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "opacity"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        ButtonGroup {
+          anchors.verticalCenter: parent.verticalCenter
+          options: [
+            { value: "1.0",  label: "Solid" },
+            { value: "0.9",  label: "90%" },
+            { value: "0.75", label: "75%" },
+            { value: "0.6",  label: "60%" }
+          ]
+          value: {
+            var opts = ["1.0", "0.9", "0.75", "0.6"]
+            for (var i = 0; i < opts.length; i++)
+              if (Math.abs(parseFloat(opts[i]) - root.windowOpacity) < 0.001) return opts[i]
+            return ""
+          }
+          onChanged: function(v) { root.omaSettingChanged("windowOpacity", parseFloat(v)) }
         }
       }
 

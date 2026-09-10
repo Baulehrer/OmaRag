@@ -63,6 +63,21 @@ Item {
   property var hits: []
   property string query: ""
   property string pending: ""
+  // Compact opens a small card under the bar icon, big fills the middle of the
+  // screen. Remembered, because the choice is a habit rather than a per-use
+  // decision.
+  onCompactChanged: if (root.compact) root.tab = "chat"
+  readonly property bool compact: root.setting("compactMode", false) === true
+                               || String(root.setting("compactMode", false)) === "true"
+  readonly property real anchorX: root.service ? root.service.anchorX : 0
+  readonly property real anchorY: root.service ? root.service.anchorY : 0
+  readonly property bool anchorAtTop: root.service ? root.service.anchorAtTop : true
+
+  // 1.0 is opaque. Clamped well short of invisible: a window you cannot read
+  // is not a setting, it is a fault.
+  readonly property real cardOpacity: Math.max(0.45,
+      Math.min(1.0, Number(root.setting("windowOpacity", 1.0)) || 1.0))
+
   property string notice: ""
   // A failure earns a longer look and the urgent colour; a confirmation does not.
   property bool noticeIsProblem: false
@@ -420,13 +435,42 @@ Item {
       radius: Style.cornerRadius
     }
 
+    // Two sizes, one window. The shell gives a plugin exactly one window loader
+    // and prefers `panel` over `overlay` (shell.qml computePanelEntries), so a
+    // separate popup for the compact mode is not available. The card simply
+    // shrinks and moves under the bar icon instead, which also makes switching
+    // a matter of two numbers rather than two windows.
     BorderSurface {
       id: card
-      width: Math.min(Style.space(900), panel.width - Style.gapsOut * 4)
-      height: Math.min(Style.space(620), panel.height - Style.gapsOut * 4)
+      // Math.max because the panel reports a placeholder size while the layer
+      // surface is being configured, and a negative width leaves an empty card.
+      width: Math.max(Style.space(280), root.compact
+        ? Math.min(Style.space(460), panel.width - Style.gapsOut * 2)
+        : Math.min(Style.space(900), panel.width - Style.gapsOut * 4))
+      height: Math.max(Style.space(200), root.compact
+        ? Math.min(Style.space(520), panel.height - Style.gapsOut * 4)
+        : Math.min(Style.space(620), panel.height - Style.gapsOut * 4))
       radius: Style.cornerRadius
-      anchors.centerIn: parent
-      color: Color.menu.background
+
+      // Centred when big; under the icon when compact, clamped so it never
+      // hangs off an edge. The bar may sit at the top or the bottom, so the
+      // card goes below or above the anchor accordingly.
+      anchors.centerIn: root.compact ? undefined : parent
+      x: root.compact ? Math.max(Style.gapsOut,
+                        Math.min(panel.width - width - Style.gapsOut,
+                                 root.anchorX - width / 2)) : 0
+      y: root.compact
+        ? (root.anchorAtTop ? Math.min(panel.height - height - Style.gapsOut,
+                                       root.anchorY + Style.gapsOut)
+                            : Math.max(Style.gapsOut,
+                                       root.anchorY - height - Style.gapsOut))
+        : 0
+
+      // Only the card's ground takes the alpha. Fading the text with it would
+      // trade legibility for looks, and this is a window for reading numbers
+      // out of a textbook.
+      color: Qt.rgba(Color.menu.background.r, Color.menu.background.g,
+                     Color.menu.background.b, root.cardOpacity)
       borderSpec: root.borderSpec
       padding: Style.spacing.panelPadding
 
@@ -520,10 +564,32 @@ Item {
             }
           }
 
+          // Two sizes, one control. A Nerd Font glyph rather than a word, so it
+          // stays out of the way of the wordmark in the small window.
+          Text {
+            id: sizeToggle
+            anchors { right: status.left; verticalCenter: parent.verticalCenter }
+            anchors.rightMargin: Style.spacing.lg
+            text: root.compact ? "" : ""
+            color: sizeHover.hovered ? root.accent : root.muted
+            font.family: OmaFont.face
+            font.pixelSize: OmaFont.subtitle
+
+            HoverHandler { id: sizeHover }
+            TapHandler {
+              onTapped: {
+                root.writeOwnSetting("compactMode", !root.compact)
+                root.flash(root.compact ? "Large window" : "Compact window")
+              }
+            }
+          }
+
           TabStrip {
             id: tabStrip
+            // Compact is the chat alone, so there is nothing to switch between.
+            visible: !root.compact
             anchors {
-              left: wordmark.right; right: status.left
+              left: wordmark.right; right: sizeToggle.left
               top: parent.top; bottom: parent.bottom
             }
             anchors.leftMargin: Style.spacing.huge
@@ -596,6 +662,8 @@ Item {
             answerModel: root.setting("answerModel", "")
             fontScale: root.setting("omaFontScale", 1.0)
             fontFamily: root.setting("omaFontFamily", "")
+            compactMode: root.compact
+            windowOpacity: root.cardOpacity
             foreground: root.foreground
             muted: root.muted
             accent: root.accent
