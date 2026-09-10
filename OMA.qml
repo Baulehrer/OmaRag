@@ -124,7 +124,7 @@ Item {
     if (root.selected < 0 || root.selected >= root.rowCount) return false
     if (root.showingAnswer) {
       var src = root.backend.answerSources[root.selected]
-      if (src) root.backend.openDocument(src.url, src.pages)
+      if (src) root.backend.locatePassage(root.query, src.title, src.url, src.pages)
     } else {
       chatTab.expandSelected()
     }
@@ -409,6 +409,7 @@ Item {
     }
     function onIndexingFinished(ok, rejected) { root.reportIndexing(ok, rejected) }
     function onEnginePutAway() { root.flash("Retrieval models released") }
+    function onLocating(running) { if (running) root.flash("Finding the passage…") }
     // The guard speaks rarely and only about something that just happened to
     // the machine, so it goes on screen the way a failure does.
     function onMemoryPressure(text, severe) { root.flash(text, severe) }
@@ -627,16 +628,34 @@ Item {
             }
           }
 
-          // Two sizes, one control. A Nerd Font glyph rather than a word, so it
-          // stays out of the way of the wordmark in the small window.
-          Text {
+          // Two sizes, one control. A glyph alone was the wrong idea in the
+          // small window: with the tabs hidden there is nothing else in the
+          // header to read it against, and the way back to the large window has
+          // to be obvious. So it says what it does, and names the key too.
+          Row {
             id: sizeToggle
             anchors { right: status.left; verticalCenter: parent.verticalCenter }
             anchors.rightMargin: Style.spacing.lg
-            text: root.compact ? "" : ""
-            color: sizeHover.hovered ? root.accent : root.muted
-            font.family: OmaFont.face
-            font.pixelSize: OmaFont.subtitle
+            spacing: Style.spacing.xs
+
+            // No glyph: the two Nerd Font arrows this used draw as nothing in
+            // the shell's font, which is worse than a word — a control nobody
+            // can see is a control nobody presses.
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.compact ? "Large" : "Compact"
+              color: sizeHover.hovered ? root.accent : root.muted
+              font.family: OmaFont.face
+              font.pixelSize: OmaFont.bodySmall
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Ctrl+M"
+              color: root.muted
+              opacity: 0.6
+              font.family: OmaFont.face
+              font.pixelSize: OmaFont.caption
+            }
 
             HoverHandler { id: sizeHover }
             TapHandler { onTapped: root.toggleSize() }
@@ -723,6 +742,8 @@ Item {
             compactMode: root.compact
             windowOpacity: root.cardOpacity
             soundFile: root.service ? root.service.soundFile : ""
+            memoryReserve: String(root.setting("memoryReserveGib", ""))
+            historyCount: root.history ? root.history.entries.length : 0
             herdrSoundFile: root.service ? root.service.herdrSoundFile : ""
             desktopSoundFile: root.service ? root.service.desktopSoundFile : ""
             foreground: root.foreground
@@ -766,7 +787,11 @@ Item {
             urgent: root.urgent
             onAsk: root.runQuery()
             onSearchOnly: root.runSearchOnly()
-            onOpenSource: function(url, pages) { root.backend.openDocument(url, pages) }
+            // The cited page is the document's, not the passage's, so the
+            // passage is looked up before the book is opened.
+            onOpenSource: function(url, pages, title) {
+              root.backend.locatePassage(root.query, title, url, pages)
+            }
             onRetry: root.backend.retry()
             onDetailsToggled: root.detailsOpen = !root.detailsOpen
             onPickFiles: root.pickFiles()
@@ -777,6 +802,13 @@ Item {
             historyIndex: root.historyIndex
             onHistoryPicked: function(i) { root.recall(i) }
             onHistoryRemoved: function(i) { if (root.history) root.history.removeAt(i) }
+            onHistoryCleared: {
+              if (!root.history) return
+              var n = root.history.entries.length
+              root.history.clear()
+              root.historyIndex = -1
+              root.flash(n + " questions cleared")
+            }
             onCopied: function(n) { root.flash(n + " characters copied") }
           }
 

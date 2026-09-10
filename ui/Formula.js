@@ -66,9 +66,36 @@ function markdown(s) {
   return s
 }
 
+// `lilbee ask` wraps its output to a fixed width whether or not a terminal is
+// attached, so the answer arrives pre-broken at some other window's idea of a
+// line. Rendering that inside a window with its own width breaks it twice, and
+// the result reads like ransom mail.
+//
+// So the hard wraps come out and the real structure stays: a blank line, a
+// heading, a bullet, a numbered item or a table row all begin something and
+// keep their break. Anything else is the middle of a sentence and is joined.
+function unwrap(text) {
+  var lines = String(text).replace(/\r/g, "").split("\n")
+  var out = []
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    var starts = /^\s*$/.test(line)
+             || /^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>|```)/.test(line)
+    var previous = out.length ? out[out.length - 1] : null
+    var joinable = previous !== null && !/^\s*$/.test(previous)
+                && !/^\s*(#{1,6}\s|\||```)/.test(previous)
+                // A line the wrap broke never ends a paragraph on its own, but
+                // one that ends in nothing at all did not come from a wrap.
+                && previous.length > 0
+    if (!starts && joinable) out[out.length - 1] = previous.replace(/\s+$/, "") + " " + line.replace(/^\s+/, "")
+    else out.push(line)
+  }
+  return out.join("\n")
+}
+
 function toStyled(text) {
   if (!text) return ""
-  var s = escapeHtml(text)
+  var s = escapeHtml(unwrap(text))
   s = greek(s)
   s = scripts(s)
   s = markdown(s)

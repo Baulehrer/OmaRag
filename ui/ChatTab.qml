@@ -29,7 +29,7 @@ Item {
   signal activateRow()
   signal ask()
   signal searchOnly()
-  signal openSource(string url, string pages)
+  signal openSource(string url, string pages, string title)
   signal retry()
   signal detailsToggled()
   signal pickFiles()
@@ -44,6 +44,7 @@ Item {
 
   readonly property string panelMode: {
     if (!backend) return "none"
+    if (backend.toolMissing) return "missing"
     if (backend.phase === "error") return "error"
     if (root.indexing) return "indexing"
     if (root.blocked) return "blocked"
@@ -51,6 +52,9 @@ Item {
     if (root.showingAnswer) return "none"
     if (root.waiting && !root.hits.length) return "waiting"
     if (backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
+    // Before anything has been asked: an empty library is the state to report,
+    // not a blank window that looks ready for a question it cannot answer.
+    if (backend.phase === "ready" && backend.totalChunks === 0) return "empty"
     return "none"
   }
 
@@ -62,6 +66,7 @@ Item {
   property int historyIndex: -1
   signal historyPicked(int index)
   signal historyRemoved(int index)
+  signal historyCleared()
 
   HistoryPane {
     id: historyPane
@@ -75,6 +80,7 @@ Item {
     accent: root.accent
     onPicked: function(i) { root.historyPicked(i) }
     onRemoveRequested: function(i) { root.historyRemoved(i) }
+    onClearRequested: root.historyCleared()
   }
 
   Rectangle {
@@ -144,7 +150,7 @@ Item {
     foreground: root.foreground
     muted: root.muted
     accent: root.accent
-    onOpenRequested: function(url, pages) { root.openSource(url, pages) }
+    onOpenRequested: function(url, pages, title) { root.openSource(url, pages, title) }
     onCopied: function(n) { root.copied(n) }
   }
 
@@ -193,6 +199,7 @@ Item {
     urgent: root.urgent
     onRetryRequested: root.retry()
     onDetailsToggled: root.detailsToggled()
+    onAddRequested: root.pickFiles()
   }
 
 }

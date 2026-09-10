@@ -18,6 +18,7 @@ Item {
 
   signal picked(int index)
   signal removeRequested(int index)
+  signal clearRequested()
 
   Text {
     id: heading
@@ -26,6 +27,30 @@ Item {
     font.family: OmaFont.face
     font.pixelSize: OmaFont.caption
     font.letterSpacing: 1.5
+  }
+
+  // Beside the heading, where what it clears is in view. Two steps, because the
+  // file is the only copy of every answer OMA has given.
+  Text {
+    id: clearAll
+    anchors { right: parent.right; rightMargin: Style.spacing.md
+              verticalCenter: heading.verticalCenter }
+    visible: root.entries && root.entries.length > 0
+    text: clearArmed ? "sure?" : "clear"
+    color: clearArmed ? root.accent : (clearHover.hovered ? root.foreground : root.muted)
+    font.family: OmaFont.face
+    font.pixelSize: OmaFont.caption
+
+    property bool clearArmed: false
+
+    HoverHandler { id: clearHover }
+    TapHandler {
+      onTapped: {
+        if (clearAll.clearArmed) { clearAll.clearArmed = false; root.clearRequested() }
+        else { clearAll.clearArmed = true; disarm.restart() }
+      }
+    }
+    Timer { id: disarm; interval: 4000; onTriggered: clearAll.clearArmed = false }
   }
 
   Text {

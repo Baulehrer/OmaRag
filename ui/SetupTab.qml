@@ -30,6 +30,8 @@ Item {
   property bool compactMode: false
   property real windowOpacity: 1.0
   property string soundFile: ""
+  property string memoryReserve: ""
+  property int historyCount: 0
   property string herdrSoundFile: ""
   property string desktopSoundFile: ""
 
@@ -79,207 +81,22 @@ Item {
       width: parent.width
       spacing: Style.spacing.xl
 
-      // ----------------------------------------------------------- backend
       Text {
-        text: "BACKEND"
+        text: "WINDOW"
         color: root.muted
         font.family: OmaFont.face
         font.pixelSize: OmaFont.caption
         font.letterSpacing: 1.5
       }
-
-      Grid {
-        columns: 2
-        columnSpacing: Style.spacing.xxl
-        rowSpacing: Style.spacing.sm
-
-        Text {
-          text: "lilbee"
-          color: root.muted
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        Text {
-          text: {
-            if (!root.versionKnown) return "…"
-            if (root.versionMatches) return root.lilbeeVersion + "   ✓ geprüft"
-            return root.lilbeeVersion + "   ⚠ nicht gegen diese Fassung geprüft ("
-                 + root.testedAgainst + ")"
-          }
-          color: root.versionKnown && !root.versionMatches ? root.accent : root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-
-        Text {
-          text: "Server"
-          color: root.muted
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        Text {
-          text: root.backend && root.backend.port > 0
-              ? "127.0.0.1:" + root.backend.port
-                + (root.backend.ownsDaemon ? "  ·  started by OMA" : "  ·  already running")
-              : "not connected"
-          color: root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-
-        Text {
-          text: "Library"
-          color: root.muted
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        Text {
-          text: root.backend && root.backend.totalChunks >= 0
-              ? root.backend.documents.length + " documents  ·  " + root.backend.totalChunks + " chunks"
-              : "—"
-          color: root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-      }
-
-      // Every one of these reaches outside the machine or ends a running
-      // process, so each says what it does before it does it.
-      Row {
-        spacing: Style.spacing.controlGap
-
-        Button {
-          text: root.checkingUpdate ? "Checking…" : "Check for updates"
-          bordered: true
-          focusable: true
-          onClicked: root.checkUpdate()
-        }
-        Button {
-          text: "Release models now"
-          bordered: true
-          focusable: true
-          onClicked: root.releaseEngine()
-        }
-        Button {
-          text: "Open backend log"
-          bordered: true
-          focusable: true
-          onClicked: root.openLog()
-        }
-      }
-
-      Text {
-        width: parent.width
-        visible: root.updateNote.length > 0
-        text: root.updateNote
-        color: root.foreground
-        font.family: OmaFont.face
-        font.pixelSize: OmaFont.bodySmall
-        wrapMode: Text.WordWrap
-      }
-
-      Text {
-        width: parent.width
-        text: "“Check for updates” asks GitHub through mise. Nothing here contacts the "
-            + "network on its own."
-        color: root.muted
-        font.family: OmaFont.face
-        font.pixelSize: OmaFont.caption
-        wrapMode: Text.WordWrap
-      }
-
-      // ------------------------------------------------------------- OMA
-      Text {
-        text: "OMA"
-        color: root.muted
-        font.family: OmaFont.face
-        font.pixelSize: OmaFont.caption
-        font.letterSpacing: 1.5
-      }
-
-      Row {
-        spacing: Style.spacing.md
-
-        Text {
-          width: Style.space(210)
-          anchors.verticalCenter: parent.verticalCenter
-          text: "backend when closed"
-          color: root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        Dropdown {
-          width: Style.space(240)
-          options: ["Stop with OMA", "Keep running"]
-          value: root.backendWhenClosed
-          onChanged: function(v) { root.omaSettingChanged("backendWhenClosed", v) }
-        }
-      }
-
-      Row {
-        spacing: Style.spacing.md
-
-        Text {
-          width: Style.space(210)
-          anchors.verticalCenter: parent.verticalCenter
-          text: "answering model"
-          color: root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        TextField {
-          width: Style.space(240)
-          text: root.answerModel
-          onAccepted: root.omaSettingChanged("answerModel", text)
-        }
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          text: "empty: whatever lilbee is set to"
-          color: root.muted
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.caption
-        }
-      }
-
-      Row {
-        spacing: Style.spacing.md
-
-        Text {
-          width: Style.space(210)
-          anchors.verticalCenter: parent.verticalCenter
-          text: "text size"
-          color: root.foreground
-          font.family: OmaFont.face
-          font.pixelSize: OmaFont.bodySmall
-        }
-        ButtonGroup {
-          options: [
-            { value: "0.9",  label: "Small" },
-            { value: "1.0",  label: "Normal" },
-            { value: "1.15", label: "Large" },
-            { value: "1.3",  label: "Larger" }
-          ]
-          // Matched as a number: String(1.0) is "1", which would never equal
-          // the "1.0" in the options and leave every button unlit.
-          value: {
-            var opts = ["0.9", "1.0", "1.15", "1.3"]
-            for (var i = 0; i < opts.length; i++)
-              if (Math.abs(parseFloat(opts[i]) - root.fontScale) < 0.001) return opts[i]
-            return ""
-          }
-          onChanged: function(v) { root.omaSettingChanged("omaFontScale", parseFloat(v)) }
-        }
-      }
-
       Row {
         width: parent.width
         height: Style.space(34)
         spacing: Style.spacing.md
 
         Text {
-          width: Style.space(210)
+          width: Style.space(180)
           anchors.verticalCenter: parent.verticalCenter
-          text: "window"
+          text: "size"
           color: root.foreground
           font.family: OmaFont.face
           font.pixelSize: OmaFont.bodySmall
@@ -293,15 +110,21 @@ Item {
           value: root.compactMode ? "compact" : "big"
           onChanged: function(v) { root.omaSettingChanged("compactMode", v === "compact") }
         }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Ctrl+M"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
+        }
       }
-
       Row {
         width: parent.width
         height: Style.space(34)
         spacing: Style.spacing.md
 
         Text {
-          width: Style.space(210)
+          width: Style.space(180)
           anchors.verticalCenter: parent.verticalCenter
           text: "opacity"
           color: root.foreground
@@ -316,6 +139,8 @@ Item {
             { value: "0.75", label: "75%" },
             { value: "0.6",  label: "60%" }
           ]
+          // Matched as a number: String(1.0) is "1", which would never equal
+          // the "1.0" in the options and leave every button unlit.
           value: {
             var opts = ["1.0", "0.9", "0.75", "0.6"]
             for (var i = 0; i < opts.length; i++)
@@ -325,14 +150,114 @@ Item {
           onChanged: function(v) { root.omaSettingChanged("windowOpacity", parseFloat(v)) }
         }
       }
-
       Row {
         width: parent.width
         height: Style.space(34)
         spacing: Style.spacing.md
 
         Text {
-          width: Style.space(210)
+          width: Style.space(180)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "text size"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        ButtonGroup {
+          anchors.verticalCenter: parent.verticalCenter
+          options: [
+            { value: "0.9",  label: "Small" },
+            { value: "1.0",  label: "Normal" },
+            { value: "1.15", label: "Large" },
+            { value: "1.3",  label: "Larger" }
+          ]
+          value: {
+            var opts = ["0.9", "1.0", "1.15", "1.3"]
+            for (var i = 0; i < opts.length; i++)
+              if (Math.abs(parseFloat(opts[i]) - root.fontScale) < 0.001) return opts[i]
+            return ""
+          }
+          onChanged: function(v) { root.omaSettingChanged("omaFontScale", parseFloat(v)) }
+        }
+      }
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(180)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "font"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        TextField {
+          id: familyField
+          width: Style.space(240)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.fontFamily
+          onAccepted: root.omaSettingChanged("omaFontFamily", text)
+        }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "empty: the shell's"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
+        }
+      }
+      Text {
+        width: parent.width
+        text: "OMA's own text only. The shell's font is never changed."
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        text: "ANSWERS"
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        font.letterSpacing: 1.5
+      }
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(180)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "model"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        TextField {
+          width: Style.space(240)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.answerModel
+          onAccepted: root.omaSettingChanged("answerModel", text)
+        }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "empty: lilbee's"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
+        }
+      }
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(180)
           anchors.verticalCenter: parent.verticalCenter
           text: "sound when done"
           color: root.foreground
@@ -367,38 +292,209 @@ Item {
           onClicked: root.soundTested()
         }
       }
-
+      Text {
+        width: parent.width
+        text: "Played when an answer lands while OMA is closed."
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
+      }
       Row {
         width: parent.width
+        height: Style.space(34)
         spacing: Style.spacing.md
 
         Text {
-          width: Style.space(210)
+          width: Style.space(180)
           anchors.verticalCenter: parent.verticalCenter
-          text: "font"
+          text: "history"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.historyCount + " kept, newest first"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+      }
+      Text {
+        width: parent.width
+        text: "~/.local/state/omarchy/omarag-history.json, readable only by you. Clear it in Chat."
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        text: "MEMORY"
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        font.letterSpacing: 1.5
+      }
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(180)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "keep free"
           color: root.foreground
           font.family: OmaFont.face
           font.pixelSize: OmaFont.bodySmall
         }
         TextField {
-          id: familyField
-          width: Style.space(270)
+          width: Style.space(120)
           anchors.verticalCenter: parent.verticalCenter
-          text: root.fontFamily
-          onAccepted: root.omaSettingChanged("omaFontFamily", text)
+          text: root.memoryReserve
+          onAccepted: root.omaSettingChanged("memoryReserveGib", text)
         }
         Text {
           anchors.verticalCenter: parent.verticalCenter
-          text: "empty: the shell's font"
+          text: "GiB · empty: 6% of RAM"
           color: root.muted
           font.family: OmaFont.face
           font.pixelSize: OmaFont.caption
+        }
+        Button {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Release models now"
+          bordered: true
+          focusable: true
+          fontFamily: OmaFont.face
+          fontSize: OmaFont.bodySmall
+          onClicked: root.releaseEngine()
+        }
+      }
+      Text {
+        width: parent.width
+        text: "Nothing loads that would eat into it, and the models are given back when something else needs the memory."
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        text: "BACKEND"
+        color: root.muted
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.caption
+        font.letterSpacing: 1.5
+      }
+      Grid {
+        columns: 2
+        columnSpacing: Style.spacing.xxl
+        rowSpacing: Style.spacing.sm
+
+        Text {
+          text: "lilbee"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        Text {
+          text: {
+            if (!root.versionKnown) return "…"
+            if (root.versionMatches) return root.lilbeeVersion + "   ✓ tested"
+            return root.lilbeeVersion + "   ⚠ untested here (tested against "
+                 + root.testedAgainst + ")"
+          }
+          color: root.versionKnown && !root.versionMatches ? root.accent : root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+
+        Text {
+          text: "server"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        Text {
+          text: root.backend && root.backend.port > 0
+              ? "127.0.0.1:" + root.backend.port
+                + (root.backend.ownsDaemon ? "  ·  started by OMA" : "  ·  already running")
+              : "not connected"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+
+        Text {
+          text: "library"
+          color: root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        Text {
+          text: root.backend && root.backend.totalChunks >= 0
+              ? root.backend.documents.length + " documents  ·  " + root.backend.totalChunks + " chunks"
+              : "—"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+      }
+
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(180)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "when OMA closes"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        Dropdown {
+          width: Style.space(200)
+          anchors.verticalCenter: parent.verticalCenter
+          options: ["Stop with OMA", "Keep running"]
+          value: root.backendWhenClosed
+          onChanged: function(v) { root.omaSettingChanged("backendWhenClosed", v) }
+        }
+      }
+      Row {
+        spacing: Style.spacing.controlGap
+
+        Button {
+          text: root.checkingUpdate ? "Checking…" : "Check for updates"
+          bordered: true
+          focusable: true
+          onClicked: root.checkUpdate()
+        }
+        Button {
+          text: "Open backend log"
+          bordered: true
+          focusable: true
+          onClicked: root.openLog()
         }
       }
 
       Text {
         width: parent.width
-        text: "Text size and font apply to OMA's own text. Buttons and dropdowns keep the shell's kit styling, and the shell's font is never changed."
+        visible: root.updateNote.length > 0
+        text: root.updateNote
+        color: root.foreground
+        font.family: OmaFont.face
+        font.pixelSize: OmaFont.bodySmall
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        width: parent.width
+        text: "Checking asks GitHub through mise. Nothing else here reaches the network."
         color: root.muted
         font.family: OmaFont.face
         font.pixelSize: OmaFont.caption

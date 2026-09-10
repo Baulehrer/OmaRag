@@ -28,7 +28,7 @@ Item {
   property color accent: Color.accent
 
   signal cancelRequested()
-  signal openRequested(string url, string pages)
+  signal openRequested(string url, string pages, string title)
   signal copied(int characters)
 
   Flickable {
@@ -103,7 +103,7 @@ Item {
 
       Text {
         visible: root.sources.length > 0
-        text: "PASSAGES USED — click to open the page"
+        text: "SOURCES — click to find the passage"
         color: root.muted
         font.family: OmaFont.face
         font.pixelSize: OmaFont.caption
@@ -145,7 +145,8 @@ Item {
 
           HoverHandler { id: hover; cursorShape: Qt.PointingHandCursor }
           TapHandler {
-            onTapped: root.openRequested(modelData.url || "", modelData.pages || "")
+            onTapped: root.openRequested(modelData.url || "", modelData.pages || "",
+                                        modelData.title || "")
           }
         }
       }

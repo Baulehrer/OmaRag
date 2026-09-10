@@ -10,7 +10,7 @@ import "../common"
 Item {
   id: root
 
-  // waiting · indexing · blocked · empty · error · none
+  // waiting · indexing · blocked · empty · missing · error · none
   property string mode: "none"
   property string what: ""
   property string headline: ""
@@ -25,6 +25,57 @@ Item {
 
   signal retryRequested()
   signal detailsToggled()
+  signal addRequested()
+
+  // ------------------------------------------------------------- missing
+  //
+  // The one state that is not a failure but a first step. Everything else OMA
+  // could say here is technically true and useless to somebody who has just
+  // installed the plugin.
+  Column {
+    anchors.centerIn: parent
+    width: parent.width - Style.spacing.panelPadding * 2
+    spacing: Style.spacing.md
+    visible: root.mode === "missing"
+
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      text: "lilbee is not installed"
+      color: root.foreground
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.subtitle
+    }
+    Text {
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      wrapMode: Text.WordWrap
+      text: "OMA is the window; lilbee does the retrieval and holds the "
+          + "library. Install it, then press Retry."
+      color: root.muted
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
+    }
+    // Selectable, because it is meant to be copied into a terminal. OMA does
+    // not run it: installing software is not something a bar plugin should do
+    // behind a button.
+    TextEdit {
+      anchors.horizontalCenter: parent.horizontalCenter
+      readOnly: true
+      selectByMouse: true
+      text: "mise use -g github:tobocop2/lilbee"
+      color: root.foreground
+      font.family: OmaFont.face
+      font.pixelSize: OmaFont.bodySmall
+    }
+    Button {
+      anchors.horizontalCenter: parent.horizontalCenter
+      text: "Retry"
+      bordered: true
+      focusable: true
+      onClicked: root.retryRequested()
+    }
+  }
 
   // ------------------------------------------------------------- waiting
   Column {
@@ -141,10 +192,18 @@ Item {
       wrapMode: Text.WordWrap
       text: root.hasLibrary
           ? "Try a more specific noun phrase — retrieval works better with the words the document itself would use."
-          : "Nothing is indexed yet, so there is nothing to match."
+          : "There are no documents yet. Ctrl+O adds files, Ctrl+Shift+O a whole folder."
       color: root.muted
       font.family: OmaFont.face
       font.pixelSize: OmaFont.bodySmall
+    }
+    Button {
+      anchors.horizontalCenter: parent.horizontalCenter
+      visible: !root.hasLibrary
+      text: "Add documents"
+      bordered: true
+      focusable: true
+      onClicked: root.addRequested()
     }
   }
 

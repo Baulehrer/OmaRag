@@ -93,7 +93,24 @@ Item {
     return (i === -1 ? root.rawAnswer : root.rawAnswer.substring(0, i)).trim()
   }
 
+  // Pages found by looking the passage up, keyed by document URL. Applied over
+  // whatever the citation said, because by then OMA knows better — see
+  // locatePassage.
+  property var locatedPages: ({})
+
   readonly property var answerSources: {
+    var fixed = []
+    var base = root._citedSources
+    for (var n = 0; n < base.length; n++) {
+      var found = root.locatedPages[base[n].url]
+      fixed.push(found ? { index: base[n].index, title: base[n].title,
+                           url: base[n].url, pages: found }
+                       : base[n])
+    }
+    return fixed
+  }
+
+  readonly property var _citedSources: {
     if (root.showingStored) return root.storedSources
     var i = root.rawAnswer.search(/\n\s*Sources:/)
     if (i === -1) return []
@@ -608,13 +625,38 @@ Item {
 
   // ---------------------------------------------------------------- connect
 
+  // True when lilbee is not on PATH at all. Worth its own state: everything
+  // else OMA could say at that point — "backend stopped", "not reachable",
+  // "exit code 127" — is true and useless. A first run on a machine without
+  // lilbee is the most common way to meet this plugin.
+  property bool toolMissing: false
+
   function connect() {
     if (root.phase === "starting") return
     root.phase = "starting"
     root.message = "Connecting"
     root.sessionId = ""
-    root._readServerFiles()
-    serverProbe.start()
+    root.toolMissing = false
+    // Asked before anything is started, because the answer changes what the
+    // window should say rather than how long it should wait.
+    presence.running = true
+  }
+
+  Process {
+    id: presence
+    command: ["sh", "-c", 'command -v "$1" >/dev/null 2>&1', "oma", root.bin]
+
+    onExited: function(code) {
+      if (code !== 0) {
+        root.toolMissing = true
+        root._fail("lilbee is not installed",
+                   "OMA is a front end for lilbee — it does the retrieval and "
+                   + "holds the library. Install it, then open OMA again.")
+        return
+      }
+      root._readServerFiles()
+      serverProbe.start()
+    }
   }
 
   // Reads only. Restarting the probe from here reset its own attempt counter
@@ -718,6 +760,67 @@ Item {
     }, root.searchTimeout)
   }
 
+  // ------------------------------------------------------- finding the page
+  //
+  // `ask` names one page per document, and it is not reliably the page the
+  // answer came from: measured on "C25/30", the Fachkunde contributed eight
+  // passages (263, 264, 278 twice, 279, 283, 334, 542) and the citation said
+  // 542, while the sentence that was used stood on 278. Opening the book at a
+  // page that merely appears in the same document is worse than not jumping.
+  //
+  // `search` does report a real page range per chunk, so the page is found by
+  // asking again with the same question and taking the best-scoring passage
+  // from the document that was clicked. That costs one retrieval — measured 7
+  // seconds warm — so it happens when the page is actually wanted, not behind
+  // every answer.
+  property string _locateUrl: ""
+  property string _locatePages: ""
+
+  signal locating(bool running)
+
+  function locatePassage(question, title, url, fallbackPages) {
+    if (root.phase !== "ready" || !String(question).length) {
+      root.openDocument(url, fallbackPages)
+      return
+    }
+    root._locateUrl = String(url)
+    root._locatePages = String(fallbackPages || "")
+    root.phase = "searching"
+    root.locating(true)
+
+    root._callTool("search", { query: String(question), top_k: 8 }, function(rows, err) {
+      root.phase = "ready"
+      root.locating(false)
+      var best = null
+      var wanted = String(title || "")
+      if (!err && Array.isArray(rows)) {
+        for (var i = 0; i < rows.length; i++) {
+          var name = String(rows[i].title || rows[i].source || "")
+          // Same document, by name: the search rows carry the title lilbee
+          // shows, and the citation carries the same one.
+          if (!name.length || (name !== wanted && wanted.indexOf(name) === -1
+                               && name.indexOf(wanted) === -1)) continue
+          if (!rows[i].page_start) continue
+          if (!best || (rows[i].score || 0) > (best.score || 0)) best = rows[i]
+        }
+      }
+      var pages = root._locatePages
+      if (best) {
+        pages = best.page_start === best.page_end
+          ? String(best.page_start)
+          : String(best.page_start) + "-" + String(best.page_end)
+        // The list said the document's page; now that the passage is known, it
+        // says the passage's. A citation that stays wrong after OMA has found
+        // out better would be the worse half of a half-fix.
+        var next = ({})
+        for (var k in root.locatedPages) next[k] = root.locatedPages[k]
+        next[root._locateUrl] = pages
+        root.locatedPages = next
+      }
+      root.openDocument(root._locateUrl, pages)
+    }, root.searchTimeout)
+  }
+
   // Put a stored answer back on screen without asking anything. The parsed
   // fields are set directly, so a recalled answer looks exactly like the one
   // that was given — not a fresh reply that happens to match.
@@ -725,6 +828,7 @@ Item {
   property bool showingStored: false
 
   function showStored(answer, sources) {
+    root.locatedPages = ({})
     root.storedSources = sources || []
     root.showingStored = true
     root.rawAnswer = String(answer || "")
@@ -926,6 +1030,7 @@ Item {
   }
 
   function _ask(question) {
+    root.locatedPages = ({})
     root.rawAnswer = ""
     root.answerDetail = ""
     root.showingStored = false
@@ -1130,7 +1235,10 @@ Item {
       if (root.persistDaemon && code === 0) return
       root.ownsDaemon = false
       if (root.phase !== "ready" && root.phase !== "busy")
-        root._fail("Backend stopped", "lilbee serve exited with code " + code)
+        root._fail(code === 127 ? "lilbee is not installed" : "Backend stopped",
+                   code === 127
+                     ? "OMA is a front end for lilbee. Install it, then open OMA again."
+                     : "lilbee serve exited with code " + code)
     }
   }
 
