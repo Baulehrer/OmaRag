@@ -28,6 +28,25 @@ Item {
   // only slot there is, and a query would simply hang. Saying so is the
   // difference between an app that looks broken and one that explains itself.
   property string phase: "idle"
+
+  // What the answer is doing right now, derived from what `ask` prints on its
+  // way: "Starting chat engine (loading …)" until "chat engine ready.", then
+  // retrieval, then the first words of the answer. Empty when not answering.
+  //   loading · retrieving · writing
+  property string answerStage: ""
+  property int answerStartedAt: 0
+  property int answerElapsed: 0
+  // Median of the last few completed answers for the model in use, in seconds,
+  // or 0 while nothing has been measured yet. An estimate is only offered once
+  // it rests on something.
+  property int answerExpected: 0
+
+  // Whether OMA is currently holding models. Tracked from what OMA itself did,
+  // not measured: lilbee reports no engine state over MCP, and polling for it
+  // would queue behind the single embedder. So this says "OMA has models
+  // loaded", which is the question the icon is answering, and it is set false
+  // the moment they are released.
+  property bool engineWarm: false
   property string message: ""
   property string detail: ""
 
@@ -116,6 +135,54 @@ Item {
 
   // Terminal colour codes end up in the output because `ask` writes for a
   // terminal whether or not one is attached.
+  // How long answers have taken, per model, kept in the service so it survives
+  // the window. The median of the last seven is used rather than the mean: one
+  // cold model load would otherwise skew the estimate for the rest of the day.
+  property var answerTimes: ({})
+
+  function _expectedFor(model) {
+    var key = String(model || "default")
+    var xs = root.answerTimes[key]
+    if (!xs || xs.length < 2) return 0
+    var sorted = xs.slice().sort(function(a, b) { return a - b })
+    return sorted[Math.floor(sorted.length / 2)]
+  }
+
+  function _recordAnswerTime(model, seconds) {
+    if (seconds <= 0 || seconds > 3600) return
+    var key = String(model || "default")
+    var next = ({})
+    for (var k in root.answerTimes) next[k] = root.answerTimes[k]
+    var xs = (next[key] || []).slice()
+    xs.push(seconds)
+    while (xs.length > 7) xs.shift()
+    next[key] = xs
+    root.answerTimes = next
+  }
+
+  Timer {
+    id: answerClock
+    interval: 1000
+    repeat: true
+    running: root.phase === "answering"
+    onTriggered: root.answerElapsed = Math.floor(Date.now() / 1000) - root.answerStartedAt
+  }
+
+  function _isEngineChatter(line) {
+    var l = String(line)
+    return l.indexOf("Starting chat engine") !== -1 || l.indexOf("chat engine ready") !== -1
+  }
+
+  function _readAnswerStage(line) {
+    if (root.phase !== "answering") return
+    var l = String(line)
+    if (l.indexOf("Starting chat engine") !== -1) { root.answerStage = "loading"; return }
+    if (l.indexOf("chat engine ready") !== -1) { root.answerStage = "retrieving"; return }
+    // The first line that is neither chatter nor blank is the answer beginning.
+    if (root.answerStage !== "writing" && l.trim().length && !root._isEngineChatter(l))
+      root.answerStage = "writing"
+  }
+
   function _stripAnsi(t) {
     return String(t || "").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
                           .replace(/\[[0-9;]{1,8}m/g, "")
@@ -151,12 +218,13 @@ Item {
   // else's work.
   function releaseEngine() {
     if (!root.ownsDaemon || root.persistDaemon) return
+    root.engineWarm = false
     engineStop.running = true
   }
 
   // Explicit "release the models now" from Setup. Unlike releaseEngine this is
   // asked for directly, so it runs whoever started the server.
-  function stopEngineNow() { engineStop.running = true }
+  function stopEngineNow() { root.engineWarm = false; engineStop.running = true }
 
   // An index run leaves the embedder, the reranker and — if any page needed OCR
   // — the vision model resident, measured at 8.2 GB and a further 5.0. lilbee
@@ -594,6 +662,8 @@ Item {
             if (typeof name !== "string") name = JSON.stringify(name)
             if (rejected.indexOf(name) === -1) rejected.push(name)
           }
+      root.engineWarm = true
+      root.engineWarm = true
       root.indexingFinished(rejected.length === 0, rejected)
       postIndexRelease.restart()
     }, root.indexTimeout)
@@ -610,6 +680,11 @@ Item {
     root.answerDetail = ""
     root.showingStored = false
     root.phase = "answering"
+    root.answerStage = "loading"
+    root.answerStartedAt = Math.floor(Date.now() / 1000)
+    root.answerElapsed = 0
+    root.answerExpected = root._expectedFor(root.answerModel)
+    answerClock.restart()
 
     var cmd = [root.bin, "ask", String(question), "--no-sync"]
     if (root.answerModel.length) { cmd.push("--model"); cmd.push(root.answerModel) }
@@ -628,10 +703,19 @@ Item {
     // Line-buffered rather than a single collector: the answer arrives over
     // several seconds and should appear as it does.
     stdout: SplitParser {
-      onRead: function(line) { root.rawAnswer += line + "\n" }
+      onRead: function(line) {
+        root._readAnswerStage(line)
+        // The engine's own chatter is progress, not answer. Keeping it out of
+        // rawAnswer also keeps it out of the window.
+        if (root._isEngineChatter(line)) return
+        root.rawAnswer += line + "\n"
+      }
     }
     stderr: SplitParser {
-      onRead: function(line) { root.answerDetail += line + "\n" }
+      onRead: function(line) {
+        root._readAnswerStage(line)
+        root.answerDetail += line + "\n"
+      }
     }
     onExited: function(code) {
       root.phase = "ready"
@@ -643,9 +727,14 @@ Item {
       var providerDown = det.indexOf("unavailable") !== -1
                       || det.indexOf("insufficient safe memory") !== -1
       if (code === 0 && !providerDown && root.answerText.length) {
+        root._recordAnswerTime(root.answerModel,
+                               Math.floor(Date.now() / 1000) - root.answerStartedAt)
+        root.answerStage = ""
+        root.engineWarm = true
         root.answerFinished(true)
         return
       }
+      root.answerStage = ""
 
       // The window is for answers. A failure belongs in the state panel, with
       // the raw output behind "Technical details" — stripped of the colour

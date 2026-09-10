@@ -21,7 +21,8 @@
       "backendWhenClosed": "Stop with OMA",
       "answerModel": "",
       "omaFontScale": 1.0,
-      "omaFontFamily": ""
+      "omaFontFamily": "",
+      "notifySound": "/usr/share/sounds/freedesktop/stereo/complete.oga"
     },
     "schema": [
       {
@@ -55,6 +56,13 @@
         "label": "Font",
         "description": "Font family for OMA alone. Leave empty to follow the shell's font, which is what `omarchy font set` configures.",
         "defaultValue": ""
+      },
+      {
+        "key": "notifySound",
+        "type": "string",
+        "label": "Sound when an answer arrives",
+        "description": "Played only when the answer finishes while OMA is closed. Any file the desktop can play; leave empty for silence. Point it at the same file another tool uses and you get the same sound.",
+        "defaultValue": "/usr/share/sounds/freedesktop/stereo/complete.oga"
       }
     ]
   },

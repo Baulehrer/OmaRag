@@ -101,5 +101,45 @@ Item {
     id: lilbee
     persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
     answerModel: root.setting("answerModel", "")
+
+    // An answer that finishes while the window is shut has nobody to tell, so
+    // the service says it: a short sound, and a flag the bar icon can show
+    // until the answer has been looked at.
+    onAnswerFinished: function(ok) {
+      if (!ok) return
+      if (root.viewOpen) return
+      root.unseenAnswer = true
+      root.chime()
+    }
   }
+
+  // -------------------------------------------------------------- attention
+
+  // Set by whichever window is on screen. Without it the service cannot tell a
+  // finished answer somebody is watching from one that arrived into an empty
+  // desk.
+  property bool viewOpen: false
+  property bool unseenAnswer: false
+
+  function markSeen() { root.unseenAnswer = false }
+
+  // Configurable because the good sound is whatever the user already
+  // recognises. Empty turns it off; the default is the desktop's own
+  // completion sound rather than something OMA invents.
+  readonly property string soundFile: String(root.setting("notifySound",
+      "/usr/share/sounds/freedesktop/stereo/complete.oga"))
+
+  function chime() {
+    if (!root.soundFile.length) return
+    chimeProc.command = ["sh", "-c",
+      '[ -f "$1" ] || exit 0; ' +
+      'command -v canberra-gtk-play >/dev/null 2>&1 && exec canberra-gtk-play -f "$1"; ' +
+      'command -v pw-play >/dev/null 2>&1 && exec pw-play "$1"; ' +
+      'command -v paplay >/dev/null 2>&1 && exec paplay "$1"; ' +
+      'exit 0',
+      "oma", root.soundFile]
+    chimeProc.running = true
+  }
+
+  Process { id: chimeProc }
 }

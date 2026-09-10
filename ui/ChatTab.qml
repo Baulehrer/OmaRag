@@ -44,6 +44,7 @@ Item {
     if (backend.phase === "error") return "error"
     if (root.indexing) return "indexing"
     if (root.blocked) return "blocked"
+    if (root.answering) return "none"
     if (root.showingAnswer) return "none"
     if (root.waiting && !root.hits.length) return "waiting"
     if (backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
@@ -157,6 +158,18 @@ Item {
 
   function expandSelected() {
     sourceList.expanded = (sourceList.expanded === root.selected) ? -1 : root.selected
+  }
+
+  AnswerProgress {
+    anchors { top: inputBox.bottom; bottom: parent.bottom; left: inputBox.left; right: parent.right }
+    anchors.topMargin: Style.spacing.panelGap
+    visible: root.answering
+    stage: root.backend ? root.backend.answerStage : ""
+    elapsed: root.backend ? root.backend.answerElapsed : 0
+    expected: root.backend ? root.backend.answerExpected : 0
+    foreground: root.foreground
+    muted: root.muted
+    accent: root.accent
   }
 
   StatePanel {

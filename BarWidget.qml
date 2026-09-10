@@ -1,4 +1,5 @@
 import QtQuick
+import qs.Commons
 import qs.Ui
 
 // A book in the bar: click it and OMA opens.
@@ -18,6 +19,12 @@ BarWidget {
     return s && typeof s.serviceFor === "function" ? s.serviceFor(root.moduleName) : null
   }
   readonly property var backend: root.service ? root.service.backend : null
+
+  readonly property bool working: root.backend
+    && (root.backend.phase === "answering" || root.backend.phase === "indexing"
+     || root.backend.phase === "searching" || root.backend.phase === "starting")
+  readonly property bool warm: root.backend && root.backend.engineWarm
+  readonly property bool unseen: root.service && root.service.unseenAnswer
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -41,6 +48,42 @@ BarWidget {
       // toggle itself.
       root.bar.shell.toggle(root.moduleName, "{}")
     }
+    // Breathing while there is something to breathe about, and still otherwise.
+    // Opacity rather than colour: the bar's own palette stays untouched.
+    SequentialAnimation on opacity {
+      running: root.working
+      loops: Animation.Infinite
+      alwaysRunToEnd: true
+      NumberAnimation { to: 0.55; duration: 800; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 1.0;  duration: 800; easing.type: Easing.InOutSine }
+    }
+  }
+
+  // The animation leaves opacity wherever it stopped; put it back.
+  Connections {
+    target: root
+    function onWorkingChanged() { if (!root.working) button.opacity = 1.0 }
+  }
+
+  // A dot in the corner, in the theme's own colours: the accent when an answer
+  // is waiting to be read, the muted foreground when models are merely loaded,
+  // nothing at all when OMA holds neither. No third colour is invented.
+  Rectangle {
+    visible: root.unseen || root.warm
+    width: Style.space(5)
+    height: width
+    radius: width / 2
+    color: root.unseen ? Color.accent : Color.muted
+    anchors { right: parent.right; top: parent.top; margins: Style.space(2) }
+
+    SequentialAnimation on opacity {
+      running: root.unseen
+      loops: Animation.Infinite
+      alwaysRunToEnd: true
+      NumberAnimation { to: 0.35; duration: 900; easing.type: Easing.InOutSine }
+      NumberAnimation { to: 1.0;  duration: 900; easing.type: Easing.InOutSine }
+    }
+    onVisibleChanged: if (!visible) opacity = 1.0
   }
 
   // A third-party plugin gets a scoped shell facade, not the shell itself: it

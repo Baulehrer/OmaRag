@@ -220,6 +220,7 @@ Item {
     chatTab.setInputText(wanted)
     root.pending = wanted
 
+    if (root.service) { root.service.viewOpen = true; root.service.markSeen() }
     root.connectIfWanted()
     // Only Chat wants the caret. Setup and Library are read-and-click screens,
     // and handing the hidden input the focus there swallows Page/Home/End.
@@ -235,11 +236,13 @@ Item {
 
   function close() {
     root.opened = false
+    if (root.service) root.service.viewOpen = false
     root.backend.releaseEngine()
   }
 
   function dismiss() {
     root.opened = false
+    if (root.service) root.service.viewOpen = false
     root.backend.releaseEngine()
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "kaufmann.omarag")
