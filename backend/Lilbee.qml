@@ -114,6 +114,13 @@ Item {
     root.failed(msg, root.detail)
   }
 
+  // Terminal colour codes end up in the output because `ask` writes for a
+  // terminal whether or not one is attached.
+  function _stripAnsi(t) {
+    return String(t || "").replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+                          .replace(/\[[0-9;]{1,8}m/g, "")
+  }
+
   function _humanise(err) {
     var e = String(err || "")
     if (e === "unreachable") return "Backend is not reachable"
@@ -602,15 +609,31 @@ Item {
     }
     onExited: function(code) {
       root.phase = "ready"
-      if (code === 0 && root.answerText.length) { root.answerFinished(true); return }
-      // A model that cannot be loaded is the common failure here, and it is
-      // worth naming rather than dumping LiteLLM's output into the window.
       var det = root.answerDetail + root.rawAnswer
-      if (det.indexOf("unavailable") !== -1 || det.indexOf("insufficient safe memory") !== -1)
+
+      // Checked before success, not after: LiteLLM writes this to stdout, and
+      // an exit code of 0 with the message in it would otherwise be shown as
+      // though it were the answer.
+      var providerDown = det.indexOf("unavailable") !== -1
+                      || det.indexOf("insufficient safe memory") !== -1
+      if (code === 0 && !providerDown && root.answerText.length) {
+        root.answerFinished(true)
+        return
+      }
+
+      // The window is for answers. A failure belongs in the state panel, with
+      // the raw output behind "Technical details" — stripped of the colour
+      // escapes, which the renderer would otherwise show as "[1;31m".
+      var detail = root._stripAnsi(det).trim()
+      root.rawAnswer = ""
+      root.answerDetail = ""
+
+      if (providerDown)
         root._fail("The answering model could not be loaded",
-                   "Retrieval models hold memory the chat model needs.\n" + det.trim())
-      else if (code !== 0)
-        root._fail("Answering failed", "lilbee ask exited with code " + code + "\n" + det.trim())
+                   "Retrieval models hold memory the chat model needs.\n" + detail)
+      else
+        root._fail("Answering failed",
+                   "lilbee ask exited with code " + code + "\n" + detail)
       root.answerFinished(false)
     }
   }

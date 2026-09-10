@@ -32,8 +32,19 @@ function scripts(s) {
   // The base of a formula symbol is short — f, A, σ, Rd. A file name is not.
   // Anchoring on a word boundary and capping the base at three characters
   // keeps `Datei_name.pdf` out of the subscript business.
-  s = s.replace(/\b([A-Za-zΑ-Ωα-ω][A-Za-z0-9]{0,2})_([A-Za-z0-9]{1,6}(?:,[A-Za-z0-9]{1,6})?)\b/g,
-                "$1<sub>$2</sub>")
+  //
+  // The cap alone was not enough: `lm_studio/ornith-…` came out as `lm` with a
+  // subscript `studio`, because the base is two characters and the tail six.
+  // What separates a formula from an identifier is its neighbourhood — a slash,
+  // a dot, a hyphen or a second underscore next to the match means a path or a
+  // model name, never a subscript. Those are excluded on both sides.
+  // Two limits, because either alone lets an identifier through. The base is at
+  // most two characters and the index at most four — f_ck, c_min, c_nom,
+  // Δc_dev, f_yk, E_cm all fit, while max_tokens, chunk_size and top_k do not.
+  // And neither side may touch a slash, dot, hyphen or second underscore, which
+  // is what turned `lm_studio/ornith-…` into `lm` with a subscript `studio`.
+  s = s.replace(/(^|[^\w/.\\-])([A-Za-zΑ-Ωα-ω][A-Za-z0-9]?)_([A-Za-z0-9]{1,4}(?:,[A-Za-z0-9]{1,4})?)(?![\w/.\\-])/g,
+                "$1$2<sub>$3</sub>")
   s = s.replace(/([A-Za-zÄÖÜäöüß0-9])\^([A-Za-z0-9]{1,4})\b/g, "$1<sup>$2</sup>")
   return s
 }
