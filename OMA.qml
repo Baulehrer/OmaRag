@@ -410,6 +410,7 @@ Item {
                  + " — has it been moved?", true)
     }
     onIndexingFinished: function(ok, rejected) { root.reportIndexing(ok, rejected) }
+    onEnginePutAway: root.flash("Retrieval models released")
     onAnswerFinished: function(ok) {
       if (ok) history.add(root.query, backend.answerText, backend.answerSources)
     }

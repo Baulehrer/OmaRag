@@ -158,6 +158,29 @@ Item {
   // asked for directly, so it runs whoever started the server.
   function stopEngineNow() { engineStop.running = true }
 
+  // An index run leaves the embedder, the reranker and — if any page needed OCR
+  // — the vision model resident, measured at 8.2 GB and a further 5.0. lilbee
+  // holds them for thirty minutes by default, which is long enough to stop a
+  // chat model from being admitted: it happened three times in one afternoon,
+  // each time needing `lilbee engine stop` by hand.
+  //
+  // Not released the instant indexing ends, because asking a question about
+  // what was just added is the obvious next move and would pay for a reload.
+  // Ninety seconds of quiet first, and any work at all cancels it.
+  Timer {
+    id: postIndexRelease
+    interval: 90000
+    onTriggered: {
+      if (root.phase === "ready" && root.ownsDaemon) {
+        root.releaseEngine()
+        root.enginePutAway()
+      }
+    }
+  }
+  signal enginePutAway()
+
+  function _keepEngine() { postIndexRelease.stop() }
+
   function retry() {
     root.phase = "idle"
     root.message = ""
@@ -367,6 +390,7 @@ Item {
   }
 
   function search(query, topK) {
+    root._keepEngine()
     // One operation at a time — there is only one embedder to go around.
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
@@ -572,12 +596,14 @@ Item {
             if (rejected.indexOf(name) === -1) rejected.push(name)
           }
       root.indexingFinished(rejected.length === 0, rejected)
+      postIndexRelease.restart()
     }, root.indexTimeout)
   }
 
   // ---------------------------------------------------------------- answering
 
   function ask(question) {
+    root._keepEngine()
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
 
