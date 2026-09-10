@@ -27,7 +27,7 @@ the reading and holds your library.
 
 ```bash
 mise use -g github:tobocop2/lilbee     # the engine
-omarchy plugin add https://github.com/Baulehrer/omarchy-oma.git --enable
+omarchy plugin add https://github.com/Baulehrer/OmaRag.git --enable
 omarchy restart shell
 ```
 
