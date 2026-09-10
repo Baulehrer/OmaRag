@@ -628,9 +628,27 @@ Item {
       root.rawAnswer = ""
       root.answerDetail = ""
 
+      // Two ways the answering model can be wrong, and each has its own remedy.
+      // Measured: a ref without a provider prefix fails validation before the
+      // request is made; a well-formed ref for a model nobody serves is
+      // rejected by the provider.
+      var named = root.answerModel.length ? "\"" + root.answerModel + "\"" : "the configured model"
+      var badRef = detail.indexOf("must be a HuggingFace ref") !== -1
+                || detail.indexOf("known provider prefix") !== -1
+      var unknownModel = detail.indexOf("provider rejected the request") !== -1
+
       if (providerDown)
         root._fail("The answering model could not be loaded",
                    "Retrieval models hold memory the chat model needs.\n" + detail)
+      else if (badRef)
+        root._fail(named + " is not a usable model name",
+                   "Setup > answering model takes a Hugging Face reference such as "
+                   + "org/repo/file.gguf, or a provider prefix such as lm_studio/name. "
+                   + "Leave it empty to use whatever lilbee is set to.\n\n" + detail)
+      else if (unknownModel)
+        root._fail("Nothing is serving " + named,
+                   "The name is well formed, but no provider offers it. Check Setup > "
+                   + "answering model against what is actually loaded.\n\n" + detail)
       else
         root._fail("Answering failed",
                    "lilbee ask exited with code " + code + "\n" + detail)
