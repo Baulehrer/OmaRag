@@ -17,6 +17,9 @@ Item {
   property int done: -1
   property int total: -1
   property int calls: 0
+  // The log has said nothing for a while. Not proof of a crash — a long OCR
+  // page is silent too — so it is phrased as an observation, not a verdict.
+  property bool stalled: false
   property int waited: 0
 
   property color foreground: Color.menu.text
@@ -132,8 +135,11 @@ Item {
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       wrapMode: Text.WordWrap
-      text: "Search and answering wait until this finishes."
-      color: root.muted
+      text: root.stalled
+          ? "The backend log has been quiet for three minutes. A long OCR page "
+            + "looks like this too, but so does a backend that has stopped."
+          : "Search and answering wait until this finishes."
+      color: root.stalled ? root.accent : root.muted
       font.family: OmaFont.face
       font.pixelSize: OmaFont.caption
     }

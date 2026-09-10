@@ -15,11 +15,16 @@ Item {
   property color foreground: Color.menu.text
   property color muted: Color.muted
   property color accent: Color.accent
+  property color urgent: Color.urgent
+  property bool detailsOpen: false
 
   signal pickFiles()
   signal pickFolder()
+  signal retry()
+  signal detailsToggled()
 
   readonly property bool indexing: backend && backend.phase === "indexing"
+  readonly property bool broken: backend && backend.phase === "error"
 
   Text {
     id: heading
@@ -127,9 +132,29 @@ Item {
     done: root.backend ? root.backend.indexDone : -1
     total: root.backend ? root.backend.indexTotal : -1
     calls: root.backend ? root.backend.indexCalls : 0
+    stalled: root.backend ? root.backend.indexStalled : false
     waited: root.waited
     foreground: root.foreground
     muted: root.muted
     accent: root.accent
+  }
+
+  // A broken backend is not a chat matter, but the panel that explains it used
+  // to live only in the chat view. Interrupt an index run from here and all the
+  // Library tab showed was "! Error" in the corner — no cause, no retry.
+  StatePanel {
+    anchors.fill: parent
+    anchors.topMargin: heading.height + Style.spacing.panelGap
+    visible: root.broken
+    mode: "error"
+    headline: root.backend ? root.backend.message : ""
+    detail: root.backend ? root.backend.detail : ""
+    hasLibrary: root.backend && root.backend.totalChunks > 0
+    detailsOpen: root.detailsOpen
+    foreground: root.foreground
+    muted: root.muted
+    urgent: root.urgent
+    onRetryRequested: root.retry()
+    onDetailsToggled: root.detailsToggled()
   }
 }

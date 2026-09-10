@@ -35,6 +35,14 @@ Item {
 
   property int calls: 0
 
+  // Seconds since the log last said anything, and whether that has gone on long
+  // enough to be worth mentioning. The index call itself waits forty minutes
+  // before giving up, so a backend that dies mid-run would otherwise leave a
+  // progress display running for most of an hour with nothing behind it.
+  property int quietFor: 0
+  readonly property int quietLimit: 180
+  readonly property bool stalled: root.active && root.quietFor >= root.quietLimit
+
   function begin() {
     root.stage = "extracting"
     root.source = ""
@@ -42,6 +50,7 @@ Item {
     root.done = -1
     root.ocrPages = 0
     root.calls = 0
+    root.quietFor = 0
     root.active = true
   }
 
@@ -52,6 +61,7 @@ Item {
 
   function _consume(line) {
     if (!root.active) return
+    root.quietFor = 0
 
     // extract source='Name.pdf' type=pdf elapsed_ms=85219 pages=532 chunks=459
     if (line.indexOf("ingest.trace") !== -1 && line.indexOf("extract ") !== -1) {
@@ -87,6 +97,13 @@ Item {
         if (root.done >= root.total) root.stage = "finishing"
       }
     }
+  }
+
+  Timer {
+    running: root.active
+    interval: 15000
+    repeat: true
+    onTriggered: root.quietFor += 15
   }
 
   // `tail -F` rather than FileView: the file grows while we watch, and -F also

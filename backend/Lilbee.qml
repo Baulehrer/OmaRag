@@ -518,6 +518,7 @@ Item {
   readonly property int indexDone: watch.done
   readonly property int indexTotal: watch.total
   readonly property int indexCalls: watch.calls
+  readonly property bool indexStalled: watch.stalled
 
   // The log names the document once extraction reports it, which is more
   // accurate than the path we guessed from — take it over when it arrives.

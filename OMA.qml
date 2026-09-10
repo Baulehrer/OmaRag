@@ -693,8 +693,12 @@ Item {
             foreground: root.foreground
             muted: root.muted
             accent: root.accent
+            urgent: root.urgent
+            detailsOpen: root.detailsOpen
             onPickFiles: root.pickFiles()
             onPickFolder: root.pickFolder()
+            onRetry: backend.retry()
+            onDetailsToggled: root.detailsOpen = !root.detailsOpen
           }
         }
       }
