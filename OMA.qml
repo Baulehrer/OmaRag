@@ -124,6 +124,8 @@ Item {
   property string query: ""
   property string pending: ""
   property string notice: ""
+  // A failure earns a longer look and the urgent colour; a confirmation does not.
+  property bool noticeIsProblem: false
   property bool detailsOpen: false
 
   // Which result row the keyboard is on. -1 means the input: typing continues,
@@ -226,8 +228,25 @@ Item {
 
   // Shown briefly when an action was turned away, so a dead keypress is never
   // silent.
-  Timer { id: noticeTimer; interval: 4000; onTriggered: root.notice = "" }
-  function flash(text) { root.notice = text; noticeTimer.restart() }
+  Timer { id: noticeTimer; onTriggered: root.notice = "" }
+  function flash(text, problem) {
+    root.notice = text
+    root.noticeIsProblem = problem === true
+    noticeTimer.interval = root.noticeIsProblem ? 9000 : 4000
+    noticeTimer.restart()
+  }
+
+  // Adding a document that lilbee cannot read used to end in silence: the call
+  // succeeded, the list refreshed, and nothing said the file was missing.
+  function reportIndexing(ok, rejected) {
+    if (ok) { root.flash("Indexing finished"); return }
+    if (!rejected || !rejected.length) { root.flash("Indexing did not finish", true); return }
+    var names = []
+    for (var i = 0; i < rejected.length && i < 3; i++)
+      names.push(String(rejected[i]).split("/").pop())
+    var more = rejected.length > names.length ? " and " + (rejected.length - names.length) + " more" : ""
+    root.flash("Could not read " + names.join(", ") + more, true)
+  }
 
   // ------------------------------------------------------------- lifecycle
 
@@ -386,6 +405,7 @@ Item {
     answerModel: root.setting("answerModel", "")
     onSearchFinished: function(rows) { root.hits = rows }
     onRefused: function(reason) { root.flash(reason) }
+    onIndexingFinished: function(ok, rejected) { root.reportIndexing(ok, rejected) }
     onAnswerFinished: function(ok) {
       if (ok) history.add(root.query, backend.answerText, backend.answerSources)
     }
@@ -583,13 +603,30 @@ Item {
         }
 
         // ---------------------------------------------------------- tabs
+        // One place for short-lived messages, at the card's foot rather than
+        // inside a tab. It lived in ChatTab, which meant adding a document —
+        // done from Library — reported failures into a line nobody could see.
+        Text {
+          id: noticeLine
+          anchors { bottom: parent.bottom; left: parent.left; right: parent.right }
+          visible: root.notice.length > 0
+          text: root.notice
+          color: root.noticeIsProblem ? root.urgent : root.muted
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.caption
+          wrapMode: Text.WordWrap
+          horizontalAlignment: Text.AlignHCenter
+        }
+
         Item {
           id: content
           anchors {
-            top: header.bottom; bottom: parent.bottom
+            top: header.bottom
+            bottom: noticeLine.visible ? noticeLine.top : parent.bottom
             left: parent.left; right: parent.right
           }
           anchors.topMargin: Style.spacing.panelGap
+          anchors.bottomMargin: noticeLine.visible ? Style.spacing.sm : 0
 
           SetupTab {
             id: setupTab
@@ -624,7 +661,6 @@ Item {
             selected: root.selected
             waited: root.waited
             detailsOpen: root.detailsOpen
-            notice: root.notice
             foreground: root.foreground
             muted: root.muted
             accent: root.accent

@@ -89,7 +89,9 @@ Item {
     return out
   }
 
-  signal indexingFinished(bool ok)
+  // `rejected` names the files lilbee could not read. They are not an error
+  // of the call — the call succeeds — so without this they vanish silently.
+  signal indexingFinished(bool ok, var rejected)
   signal answerStarted()
   signal answerFinished(bool ok)
   signal statusUpdated()
@@ -536,16 +538,32 @@ Item {
       // A timeout does not mean it stopped — the daemon keeps working, and
       // there is no cancel for `add`. Saying "busy" is the truthful state.
       watch.finish()
-      if (err === "timeout") { root._enterBusy(); root.indexingFinished(false); return }
+      if (err === "timeout") { root._enterBusy(); root.indexingFinished(false, []); return }
       root.phase = "ready"
       root.indexingWhat = ""
       if (err) {
         root._fail(root._humanise(err), "add: " + err)
-        root.indexingFinished(false)
+        root.indexingFinished(false, [])
         return
       }
       root.refresh()
-      root.indexingFinished(true)
+
+      // lilbee reports unreadable files inside a successful answer: the call
+      // returns 0 and `sync.failed` names them. Measured against a truncated
+      // PDF, a text file with a .pdf name, an empty file, random bytes and an
+      // encrypted document — four of the five come back this way.
+      var payload = rows.length ? rows[0] : null
+      var sync = (payload && payload.sync) || {}
+      var rejected = []
+      var lists = [sync.failed, sync.skipped, payload && payload.errors]
+      for (var i = 0; i < lists.length; i++)
+        if (Array.isArray(lists[i]))
+          for (var j = 0; j < lists[i].length; j++) {
+            var name = lists[i][j]
+            if (typeof name !== "string") name = JSON.stringify(name)
+            if (rejected.indexOf(name) === -1) rejected.push(name)
+          }
+      root.indexingFinished(rejected.length === 0, rejected)
     }, root.indexTimeout)
   }
 

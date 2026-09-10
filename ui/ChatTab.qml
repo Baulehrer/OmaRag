@@ -17,7 +17,6 @@ Item {
   property int selected: -1
   property int waited: 0
   property bool detailsOpen: false
-  property string notice: ""
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -179,13 +178,4 @@ Item {
     onDetailsToggled: root.detailsToggled()
   }
 
-  Text {
-    anchors { bottom: parent.bottom; left: inputBox.left; right: parent.right }
-    visible: root.notice.length > 0
-    text: root.notice
-    color: root.muted
-    font.family: OmaFont.face
-    font.pixelSize: OmaFont.caption
-    wrapMode: Text.WordWrap
-  }
 }
