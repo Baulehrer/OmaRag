@@ -163,7 +163,14 @@ you press, none of them on a timer or on opening a view.
 ./sync-plugin.sh        # copy + validate
 omarchy restart shell   # required: overlay QML is cached, saving is not enough
 journalctl --user -f | grep -i omarag
+
+node tools/tests/formula-escaping.js   # no model output can become markup
+node tools/tests/answer-timing.js      # the estimate behind the progress bar
 ```
+
+Both tests read the real source — `ui/Formula.js`, and the three timing
+functions lifted out of `backend/Lilbee.qml` — so they fail if the code they
+cover is renamed rather than passing against a stale copy.
 
 A plugin runs **inside** the shell process. A blocking call freezes the whole
 desktop — bar, notifications, lock screen. Everything here is asynchronous, and
