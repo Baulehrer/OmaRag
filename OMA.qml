@@ -371,6 +371,11 @@ Item {
   readonly property var toolchain: root.service ? root.service.toolchain : null
 
   Connections {
+    target: root.service
+    function onSoundNoticed(text, problem) { root.flash(text, problem) }
+  }
+
+  Connections {
     target: root.backend
     function onSearchFinished(rows) { root.hits = rows }
     function onRefused(reason) { root.flash(reason) }
@@ -664,6 +669,9 @@ Item {
             fontFamily: root.setting("omaFontFamily", "")
             compactMode: root.compact
             windowOpacity: root.cardOpacity
+            soundFile: root.service ? root.service.soundFile : ""
+            herdrSoundFile: root.service ? root.service.herdrSoundFile : ""
+            desktopSoundFile: root.service ? root.service.desktopSoundFile : ""
             foreground: root.foreground
             muted: root.muted
             accent: root.accent
@@ -673,6 +681,19 @@ Item {
             onOpenLog: root.backend.openDocument("file://" + Quickshell.env("HOME")
                                             + "/.local/share/lilbee/logs/server.log", "")
             onOmaSettingChanged: function(key, value) { root.writeOwnSetting(key, value) }
+            // Picking herdr means lifting its sound out of the installed binary
+            // first; the service writes the setting once it has a file.
+            onSoundChosen: function(which) {
+              if (!root.service) return
+              if (which === "herdr") { root.flash("Reading herdr's sound"); root.service.adoptHerdrSound() }
+              else root.writeOwnSetting("notifySound",
+                     which === "desktop" ? root.service.desktopSoundFile : "")
+            }
+            onSoundTested: {
+              if (!root.service) return
+              if (!root.service.soundFile.length) root.flash("Sound is off")
+              else root.service.chime()
+            }
           }
 
           ChatTab {

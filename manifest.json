@@ -63,7 +63,7 @@
         "key": "notifySound",
         "type": "string",
         "label": "Sound when an answer arrives",
-        "description": "Played only when the answer finishes while OMA is closed. Any file the desktop can play; leave empty for silence. Point it at the same file another tool uses and you get the same sound.",
+        "description": "Played only when the answer finishes while OMA is closed. Any file the desktop can play; leave empty for silence. Setup offers herdr's own notification sound, which OMA lifts out of the installed herdr binary because herdr ships it compiled in.",
         "defaultValue": "/usr/share/sounds/freedesktop/stereo/complete.oga"
       },
       {

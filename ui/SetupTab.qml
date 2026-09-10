@@ -29,6 +29,9 @@ Item {
   property string answerModel: ""
   property bool compactMode: false
   property real windowOpacity: 1.0
+  property string soundFile: ""
+  property string herdrSoundFile: ""
+  property string desktopSoundFile: ""
 
   property color foreground: Color.menu.text
   property color muted: Color.muted
@@ -39,6 +42,8 @@ Item {
   signal installUpdate()
   signal releaseEngine()
   signal omaSettingChanged(string key, var value)
+  signal soundChosen(string which)
+  signal soundTested()
   signal openLog()
 
   property var expandedGroups: ({})
@@ -318,6 +323,48 @@ Item {
             return ""
           }
           onChanged: function(v) { root.omaSettingChanged("windowOpacity", parseFloat(v)) }
+        }
+      }
+
+      Row {
+        width: parent.width
+        height: Style.space(34)
+        spacing: Style.spacing.md
+
+        Text {
+          width: Style.space(210)
+          anchors.verticalCenter: parent.verticalCenter
+          text: "sound when done"
+          color: root.foreground
+          font.family: OmaFont.face
+          font.pixelSize: OmaFont.bodySmall
+        }
+        ButtonGroup {
+          anchors.verticalCenter: parent.verticalCenter
+          options: [
+            { value: "herdr",   label: "herdr" },
+            { value: "desktop", label: "Desktop" },
+            { value: "off",     label: "Off" }
+          ]
+          // Matched by path, because that is what the setting holds: a sound
+          // chosen by hand in shell.json lights none of the three, which is
+          // honest — it is neither of them.
+          value: {
+            if (!root.soundFile.length) return "off"
+            if (root.soundFile === root.herdrSoundFile) return "herdr"
+            if (root.soundFile === root.desktopSoundFile) return "desktop"
+            return ""
+          }
+          onChanged: function(v) { root.soundChosen(v) }
+        }
+        Button {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "Play"
+          bordered: true
+          focusable: true
+          fontFamily: OmaFont.face
+          fontSize: OmaFont.bodySmall
+          onClicked: root.soundTested()
         }
       }
 

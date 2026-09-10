@@ -132,8 +132,47 @@ Item {
   // Configurable because the good sound is whatever the user already
   // recognises. Empty turns it off; the default is the desktop's own
   // completion sound rather than something OMA invents.
+  readonly property string desktopSoundFile:
+      "/usr/share/sounds/freedesktop/stereo/complete.oga"
   readonly property string soundFile: String(root.setting("notifySound",
-      "/usr/share/sounds/freedesktop/stereo/complete.oga"))
+      root.desktopSoundFile))
+
+  // herdr keeps its notification sounds compiled into its binary, so there is
+  // no file to point `notifySound` at until tools/herdr-sound.py has lifted one
+  // out of the copy already installed here. That keeps somebody else's asset
+  // out of this repository and means nothing is downloaded — on a machine
+  // without herdr the button just reports that there is nothing to take.
+  readonly property string herdrSoundFile: (Quickshell.env("XDG_DATA_HOME")
+      || Quickshell.env("HOME") + "/.local/share")
+      + "/omarchy/omarag/sounds/herdr-done.wav"
+
+  signal soundNoticed(string text, bool problem)
+
+  function adoptHerdrSound() {
+    herdrLift.command = ["python3",
+      String(Qt.resolvedUrl("../tools/herdr-sound.py")).replace(/^file:\/\//, "")]
+    herdrLift.running = true
+  }
+
+  Process {
+    id: herdrLift
+    stdout: StdioCollector { }
+    stderr: StdioCollector { }
+
+    onExited: function(code) {
+      // The script prints the finished file last, so the path comes back
+      // without OMA having to guess where it landed.
+      var lines = String(herdrLift.stdout.text || "").trim().split("\n")
+      var path = lines.length ? lines[lines.length - 1].trim() : ""
+      if (code === 0 && /\.wav$/.test(path)) {
+        root.writeSetting("notifySound", path)
+        root.soundNoticed("herdr's sound is now OMA's", false)
+      } else {
+        var why = String(herdrLift.stderr.text || "").trim().split("\n").pop()
+        root.soundNoticed(why.length ? why : "herdr's sound could not be read", true)
+      }
+    }
+  }
 
   function chime() {
     if (!root.soundFile.length) return

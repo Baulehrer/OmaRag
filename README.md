@@ -106,6 +106,15 @@ Clicking a cited source opens the document at that page — lilbee reports PDF p
 numbers, and zathura, okular and evince all take exactly that. Clicking a search hit
 expands it to the full retrieved passage.
 
+While an answer runs, the chat shows which of three things is happening —
+loading the model, finding passages, writing — with the clock beside it. From
+the second answer with the same model there is a bar as well, because by then
+there is a measured duration to put it against; cold and warm starts are counted
+separately, since loading the weights costs most of a minute on this machine.
+Overrun the estimate and the bar stops at the end and says so. The durations are
+kept in `~/.local/state/omarchy/omarag-timing.json` so a shell restart does not
+take the bar away again.
+
 The model is bound to what retrieval found. Ask it something the library does not
 cover and it says so instead of filling the gap from general knowledge — lilbee's
 system prompt enforces that, and it holds in practice.
@@ -119,8 +128,16 @@ rather than replacing it — the same arrangement `omarchy.menu` uses.
 Everything in one sheet: which lilbee is installed and where its server is
 listening, buttons to check for an update, release the loaded models, and open
 the backend log. Below that OMA's own settings — whether the backend stops when
-you close OMA, which model answers, and OMA's text size and font, which apply to
-OMA alone and never touch the shell's.
+you close OMA, which model answers, the window size and its opacity, and OMA's
+text size and font, which apply to OMA alone and never touch the shell's.
+
+`sound when done` picks what plays when an answer lands while OMA is closed:
+the desktop's own completion sound, silence, or herdr's. herdr ships its
+notification sounds compiled into its binary, so there is no file to point at —
+choosing `herdr` runs `tools/herdr-sound.py`, which reads the herdr already
+installed on this machine and writes the sound as a WAV under
+`~/.local/share/omarchy/omarag/sounds/`. Nothing is downloaded, and the sound
+exists only where herdr does. `Play` plays whatever is set.
 
 Then lilbee's own settings, generated from what lilbee reports rather than
 hard-coded, so the help text beside each field is lilbee's: the four model

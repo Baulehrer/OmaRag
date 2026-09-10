@@ -47,6 +47,14 @@ Item {
   // loaded", which is the question the icon is answering, and it is set false
   // the moment they are released.
   property bool engineWarm: false
+  // The chat engine specifically. Indexing leaves the embedder and reranker
+  // resident, which lights the icon but says nothing about the chat weights —
+  // and an estimate that mixed the two would be wrong for both, because loading
+  // the chat model costs most of a minute here.
+  property bool chatWarm: false
+  // Whether the chat engine was already warm when the running question was
+  // asked — read at the end, when chatWarm has since become true either way.
+  property bool _askedWarm: false
   property string message: ""
   property string detail: ""
 
@@ -140,17 +148,22 @@ Item {
   // cold model load would otherwise skew the estimate for the rest of the day.
   property var answerTimes: ({})
 
-  function _expectedFor(model) {
-    var key = String(model || "default")
-    var xs = root.answerTimes[key]
-    if (!xs || xs.length < 2) return 0
+  // Kept apart for a cold and a warm engine: loading the weights costs most of
+  // a minute here, so one estimate covering both would be wrong for both.
+  function _timingKey(model, warm) {
+    return String(model || "default") + (warm ? "|warm" : "|cold")
+  }
+
+  function _expectedFor(model, warm) {
+    var xs = root.answerTimes[root._timingKey(model, warm)]
+    if (!xs || !xs.length) return 0
     var sorted = xs.slice().sort(function(a, b) { return a - b })
     return sorted[Math.floor(sorted.length / 2)]
   }
 
-  function _recordAnswerTime(model, seconds) {
+  function _recordAnswerTime(model, warm, seconds) {
     if (seconds <= 0 || seconds > 3600) return
-    var key = String(model || "default")
+    var key = root._timingKey(model, warm)
     var next = ({})
     for (var k in root.answerTimes) next[k] = root.answerTimes[k]
     var xs = (next[key] || []).slice()
@@ -158,7 +171,45 @@ Item {
     while (xs.length > 7) xs.shift()
     next[key] = xs
     root.answerTimes = next
+    timing.setText(JSON.stringify({ version: 1, seconds: next }, null, 1))
   }
+
+  // Kept on disk as well as in the service: a shell restart would otherwise
+  // take the bar away again until the next answer had been measured, and the
+  // pace of a model does not change between restarts.
+  FileView {
+    id: timing
+    path: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
+          + "/omarchy/omarag-timing.json"
+    printErrors: false
+    atomicWrites: true
+
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(String(text()))
+        var seen = (parsed && parsed.seconds) || ({})
+        var next = ({})
+        // Filtered on the way in: the file is ours, but a hand-edited or
+        // half-written one must not put a nonsense estimate on screen.
+        for (var k in seen) {
+          if (!Array.isArray(seen[k])) continue
+          var xs = []
+          for (var i = 0; i < seen[k].length; i++) {
+            var v = Number(seen[k][i])
+            if (v > 0 && v <= 3600) xs.push(Math.round(v))
+          }
+          if (xs.length) next[k] = xs.slice(-7)
+        }
+        root.answerTimes = next
+      } catch (e) {
+        root.answerTimes = ({})
+      }
+    }
+    // No file yet on a first run.
+    onLoadFailed: root.answerTimes = ({})
+  }
+
+  Component.onCompleted: timing.reload()
 
   Timer {
     id: answerClock
@@ -219,12 +270,17 @@ Item {
   function releaseEngine() {
     if (!root.ownsDaemon || root.persistDaemon) return
     root.engineWarm = false
+    root.chatWarm = false
     engineStop.running = true
   }
 
   // Explicit "release the models now" from Setup. Unlike releaseEngine this is
   // asked for directly, so it runs whoever started the server.
-  function stopEngineNow() { root.engineWarm = false; engineStop.running = true }
+  function stopEngineNow() {
+    root.engineWarm = false
+    root.chatWarm = false
+    engineStop.running = true
+  }
 
   // An index run leaves the embedder, the reranker and — if any page needed OCR
   // — the vision model resident, measured at 8.2 GB and a further 5.0. lilbee
@@ -472,6 +528,9 @@ Item {
         return
       }
       root.phase = "ready"
+      // A search that returned rows went through the embedder, so the retrieval
+      // models are resident now whether or not OMA asked for them.
+      root.engineWarm = true
       // The backend returns roughly twice top_k — neighbouring chunks come
       // along as context — and not in score order (measured: 0.989, 0.944,
       // 0.953, …). Numbered rows imply a ranking, so establish one.
@@ -663,7 +722,6 @@ Item {
             if (rejected.indexOf(name) === -1) rejected.push(name)
           }
       root.engineWarm = true
-      root.engineWarm = true
       root.indexingFinished(rejected.length === 0, rejected)
       postIndexRelease.restart()
     }, root.indexTimeout)
@@ -680,10 +738,14 @@ Item {
     root.answerDetail = ""
     root.showingStored = false
     root.phase = "answering"
-    root.answerStage = "loading"
+    // A warm engine prints no "Starting chat engine", so waiting for that line
+    // would leave the first dot lit through the whole answer. What the engine
+    // is doing is already known here.
+    root.answerStage = root.chatWarm ? "retrieving" : "loading"
     root.answerStartedAt = Math.floor(Date.now() / 1000)
     root.answerElapsed = 0
-    root.answerExpected = root._expectedFor(root.answerModel)
+    root.answerExpected = root._expectedFor(root.answerModel, root.chatWarm)
+    root._askedWarm = root.chatWarm
     answerClock.restart()
 
     var cmd = [root.bin, "ask", String(question), "--no-sync"]
@@ -727,10 +789,11 @@ Item {
       var providerDown = det.indexOf("unavailable") !== -1
                       || det.indexOf("insufficient safe memory") !== -1
       if (code === 0 && !providerDown && root.answerText.length) {
-        root._recordAnswerTime(root.answerModel,
+        root._recordAnswerTime(root.answerModel, root._askedWarm,
                                Math.floor(Date.now() / 1000) - root.answerStartedAt)
         root.answerStage = ""
         root.engineWarm = true
+        root.chatWarm = true
         root.answerFinished(true)
         return
       }
