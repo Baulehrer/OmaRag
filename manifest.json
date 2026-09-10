@@ -24,7 +24,8 @@
       "omaFontFamily": "",
       "notifySound": "/usr/share/sounds/freedesktop/stereo/complete.oga",
       "compactMode": false,
-      "windowOpacity": 1.0
+      "windowOpacity": 1.0,
+      "memoryReserveGib": ""
     },
     "schema": [
       {
@@ -79,6 +80,13 @@
         "label": "Window opacity",
         "description": "How solid the window's background is, from 1.0 for opaque down to 0.45. Only the background fades — the text stays fully legible, because this is a window for reading numbers out of a textbook.",
         "defaultValue": 1.0
+      },
+      {
+        "key": "memoryReserveGib",
+        "type": "string",
+        "label": "Keep free (GiB)",
+        "description": "How much memory OMA leaves for everything else. Empty means six percent of this machine's RAM, never under 2 GiB. OMA will not start a load that would eat into it, and gives its models back when the kernel reports that something else is stalling on memory. Where llama-manager is installed, its own reserve is used instead and this is ignored.",
+        "defaultValue": ""
       }
     ]
   },

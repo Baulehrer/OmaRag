@@ -127,6 +127,7 @@ Item {
     id: lilbee
     persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
     answerModel: root.setting("answerModel", "")
+    memoryReserve: String(root.setting("memoryReserveGib", ""))
 
     // An answer that finishes while the window is shut has nobody to tell, so
     // the service says it: a short sound, and a flag the bar icon can show

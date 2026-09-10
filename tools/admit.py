@@ -40,6 +40,35 @@ def read_meminfo_override():
     return int(float(raw) * GIB) if raw else None
 
 
+def standalone_config(reserve):
+    """The shape llama-manager's config has, for a machine without it.
+
+    The reserve is a fraction of RAM rather than a fixed number, because the
+    same plugin runs on a 16 GiB laptop and a 64 GiB desktop; never below 2 GiB,
+    under which a desktop session is in trouble anyway. The lock goes in the
+    runtime directory, so it dies with the session instead of outliving a crash.
+    """
+    total = 0
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1]) * 1024
+                    break
+    except OSError:
+        pass
+    keep = (max(2.0, total / GIB * 0.06) if str(reserve) == "auto"
+            else float(reserve))
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return {
+        "ram_reserve_gib": keep,
+        "admission_margin_gib": 0.5,
+        "admission_lock": os.path.join(runtime, "omarag-admission.lock"),
+        "state_dir": "",
+        "services": {},
+    }
+
+
 def mem_available():
     forced = read_meminfo_override()
     if forced is not None:
@@ -94,6 +123,8 @@ def main():
                     help="seconds to wait for the admission lock")
     ap.add_argument("--config", default=CONFIG,
                     help="llama-manager's config; the default is where it lives")
+    ap.add_argument("--reserve-gib", default="auto",
+                    help="what to keep free when there is no coordinator to ask")
     args = ap.parse_args()
 
     try:
@@ -101,10 +132,11 @@ def main():
         with open(args.config, "rb") as handle:
             config = tomllib.load(handle)
     except (OSError, ImportError, ValueError):
-        # No coordinator on this machine: OMA is not entitled to refuse work
-        # because a component it does not require is missing.
-        print("no coordinator")
-        return 0
+        # No coordinator on this machine — the common case for anyone but its
+        # author. The rule does not change, only where its numbers come from:
+        # OMA's own reserve and OMA's own lock, so two shells, or this plugin
+        # beside another copy of itself, still take turns.
+        config = standalone_config(args.reserve_gib)
 
     lock_path = os.path.expanduser(str(config.get("admission_lock", "")))
     reserve = float(config.get("ram_reserve_gib", 0))

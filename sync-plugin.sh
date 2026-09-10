@@ -23,11 +23,12 @@ cp "$src/backend/"*.qml "$stage/backend/"
 cp "$src/ui/"*.qml "$src/ui/"*.js "$stage/ui/"
 cp "$src/common/"*.qml "$src/common/qmldir" "$stage/common/"
 cp "$src/service/"*.qml "$stage/service/"
-# The tools OMA runs at runtime: admit.py asks llama-manager whether there is
-# room to load, herdr-sound.py lifts the notification sound out of the installed
-# herdr binary. The rest of tools/ is development-only and stays in the
-# repository.
-cp "$src/tools/admit.py" "$src/tools/herdr-sound.py" "$stage/tools/"
+# The tools OMA runs at runtime: admit.py decides whether there is room to load,
+# memory-guard.py says when to give the memory back, herdr-sound.py lifts the
+# notification sound out of the installed herdr binary. The rest of tools/ is
+# development-only and stays in the repository.
+cp "$src/tools/admit.py" "$src/tools/memory-guard.py" \
+   "$src/tools/herdr-sound.py" "$stage/tools/"
 
 omarchy-plugin-validate "$stage" || { rm -rf "$stage"; exit 1; }
 rm -rf "$dst"

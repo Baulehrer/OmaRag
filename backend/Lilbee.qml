@@ -290,9 +290,11 @@ Item {
   // Called wherever work ends. Nothing happens unless a close asked for the
   // release while that work was still running.
   function _releaseIfDeferred() {
-    if (!root._releaseWhenDone) return
-    root._releaseWhenDone = false
-    root.releaseEngine()
+    if (root._releaseWhenDone) {
+      root._releaseWhenDone = false
+      root.releaseEngine()
+    }
+    root._yieldIfTight()
   }
 
   // -------------------------------------------------------------- admission
@@ -324,6 +326,9 @@ Item {
     admitProc.command = ["python3",
       String(Qt.resolvedUrl("../tools/admit.py")).replace(/^file:\/\//, ""),
       "--gib", String(gib), "--wait", "3"]
+    if (root.memoryReserve.length) {
+      admitProc.command = admitProc.command.concat(["--reserve-gib", root.memoryReserve])
+    }
     admitProc.running = true
   }
 
@@ -363,6 +368,83 @@ Item {
   }
 
   signal admissionRefused(string detail)
+
+  // ------------------------------------------------------------ giving back
+  //
+  // Admission is only half of it: nothing stops the rest of the machine from
+  // needing the memory five minutes after OMA was let in. The guard watches the
+  // kernel's own pressure signal and says when to let go — first what is idle,
+  // then, if that was not enough, what is running.
+  //
+  // The engine is stopped whoever started it. A lilbee somebody is using from a
+  // terminal loses its models too, which is rude — and still better than a
+  // machine that thrashes until systemd-oomd picks something to kill.
+  property string memoryReserve: ""
+
+  signal memoryPressure(string text, bool severe)
+
+  // Kept watching for a minute after a stand-down. Otherwise the guard goes
+  // quiet the moment it has finished releasing, its verdict resets to "ok", and
+  // the next question walks straight back into the same shortage — starting a
+  // load only to have it cancelled again.
+  property bool coolingOff: false
+
+  Timer {
+    id: coolOff
+    interval: 60000
+    onTriggered: root.coolingOff = false
+  }
+
+  MemoryGuard {
+    id: guard
+    reserveGib: root.memoryReserve
+    // Only while there is something to protect. An OMA nobody has opened runs
+    // no watcher at all.
+    active: root.coolingOff || root.engineWarm || root.phase === "answering"
+         || root.phase === "indexing" || root.phase === "searching"
+
+    onEaseOff: root._yieldIfTight()
+
+    onStandDown: {
+      // Nothing is worth finishing at this point: the work that is running is
+      // holding the memory everything else is waiting for.
+      // Cooling first: clearing engineWarm on its own would make the guard
+      // inactive for an instant, and going inactive resets its verdict — the
+      // next question would then walk into the same shortage unwarned.
+      root.coolingOff = true
+      coolOff.restart()
+      if (askProc.running) askProc.running = false
+      root._releaseWhenDone = false
+      root.engineWarm = false
+      root.chatWarm = false
+      root.answerStage = ""
+      if (root.phase !== "ready") root.phase = "ready"
+      engineStop.running = true
+      root.memoryPressure("Stopped — the machine is out of memory", true)
+    }
+  }
+
+  // Pressure that arrives mid-question cannot be acted on then — the models in
+  // use are the ones under discussion. So this is asked again whenever work
+  // ends, and the guard's state is read rather than its signal: a shortage that
+  // began during an answer never announces itself a second time.
+  function _yieldIfTight() {
+    if (!guard.tight || root.phase !== "ready" || !root.engineWarm) return
+    root._releaseWhenDone = false
+    root.engineWarm = false
+    root.chatWarm = false
+    engineStop.running = true
+    root.enginePutAway()
+    root.memoryPressure("Released the models — the machine needed the memory", false)
+  }
+
+  // Work is refused outright while the machine is in trouble. Admission would
+  // catch most of it a moment later anyway, but not the case that matters most:
+  // a warm engine skips admission entirely, and a warm engine under pressure is
+  // exactly what should be going away rather than taking on more.
+  function _memoryBars() {
+    return guard.state === "critical"
+  }
 
   // Explicit "release the models now" from Setup. Unlike releaseEngine this is
   // asked for directly, so it runs whoever started the server.
@@ -605,6 +687,7 @@ Item {
 
   function search(query, topK) {
     root._keepEngine()
+    if (root._memoryBars()) { root.refused("Not now — the machine is out of memory"); return }
     // One operation at a time — there is only one embedder to go around.
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
@@ -778,6 +861,7 @@ Item {
   // out while it works rather than left to hang.
   function addPaths(paths) {
     if (!paths || !paths.length) return
+    if (root._memoryBars()) { root.refused("Not now — the machine is out of memory"); return }
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
 
@@ -835,6 +919,7 @@ Item {
 
   function ask(question) {
     root._keepEngine()
+    if (root._memoryBars()) { root.refused("Not now — the machine is out of memory"); return }
     if (root.phase === "busy") { root.refused(root.message); return }
     if (root.phase !== "ready") { root.refused("Backend is not ready yet"); return }
     root._withAdmission(root.retrievalGib, function() { root._ask(question) })

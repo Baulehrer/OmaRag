@@ -165,28 +165,50 @@ therefore waits behind a button that says so, and nothing downloads until you
 press `Get`. A download holds the single embedder, so questions and indexing
 wait for it, and OMA says so while it runs.
 
-### Before it loads anything
+### Memory
 
-lilbee's embedder, reranker and vision model cost 8.2 and a further 5.0 GiB,
-and on this APU those weights live in the GPU translation table, where cgroup
-accounting cannot see them — only `MemAvailable` does. `llama-manager` reads
-`MemAvailable`, so it already notices when lilbee is holding memory and refuses
-a chat model. The other direction had nobody watching, and on 2026-09-09 lilbee
-loading beside a chat model in `pi` ended in an OOM.
+Models are big and the machine is shared, so OMA follows one rule: **load only
+what fits, and give it back the moment something else needs it.**
 
-So before a question, a search or an index run — and only when nothing is loaded
-yet — OMA asks `tools/admit.py`, which takes `llama-manager`'s own admission
-lock and applies `llama-manager`'s own rule with its own numbers:
-`MemAvailable >= ram_reserve_gib + admission_margin_gib + what is about to
-load`. A no comes back as a refusal that names what is in the way; a lock that
-is busy means a load is in flight and the answer is "try again in a moment".
+Two numbers, because they answer different questions.
 
-OMA neither evicts nor waits, and it never counts the chat model — lilbee
-reaches that through `llama-manager`'s own proxy, so the manager already gates
-that half, and holding the lock across an answer would deadlock against the
-load the answer triggers. On a machine without `llama-manager` the check finds
-no configuration and stays out of the way: OMA does not refuse work because a
-component it does not require is missing.
+`MemAvailable` is predictive — it says whether a load would fit, and on a
+shared-memory APU it is the only figure that sees model weights at all. They
+live in the GPU translation table, where cgroup accounting cannot follow:
+measured here, 9.19 GiB of weights while the cgroup reported 0.68 and a 3 GiB
+limit never fired. `MemoryMax` is not a tool that works for this.
+
+`/proc/pressure/memory` is reactive — it says whether anything is *stalling* on
+memory right now. With swap configured that matters more than free bytes: the
+machine is not killed, it crawls, and `MemAvailable` can look calm while
+everything thrashes. `systemd-oomd` watches the same signal and starts killing
+cgroups at 50 % sustained for 20 seconds. OMA acts far below that, so nothing
+ever has to be chosen as a victim.
+
+**Before loading** — a question, a search or an index run, and only when nothing
+is loaded yet — `tools/admit.py` checks `MemAvailable >= reserve + margin +
+what is about to load`, under a lock so the answer cannot be racing another
+load. A no is a refusal that names what is in the way.
+
+**While holding models** `tools/memory-guard.py` watches both numbers and says
+when to let go: at `tight` OMA releases what is idle, at `critical` it stops
+what is running as well and stays out of the way for a minute. Nothing is
+watched while OMA holds nothing — an OMA nobody has opened runs no watcher at
+all.
+
+`Keep free (GiB)` in Setup sets the reserve. Empty means six percent of the
+machine's RAM and never under 2 GiB, so the same plugin behaves on a laptop and
+on a workstation.
+
+Where `llama-manager` is installed, OMA uses *its* lock and *its* numbers
+instead, so the two cannot admit a model each at the same moment. The chat model
+is deliberately not counted: lilbee reaches it through `llama-manager`'s own
+proxy, so that half is already gated, and holding the lock across an answer
+would deadlock against the load the answer triggers.
+
+What this cannot do: stop another program from allocating everything at once.
+OMA can promise not to be the cause, and to have let go before the system's own
+guard has to act.
 
 ### What OMA never does on its own
 
@@ -205,6 +227,7 @@ journalctl --user -f | grep -i omarag
 node tools/tests/formula-escaping.js   # no model output can become markup
 node tools/tests/answer-timing.js      # the estimate behind the progress bar
 bash tools/tests/admission.sh          # the gate in front of every model load
+bash tools/tests/memory-guard.sh       # when the models are given back
 ```
 
 Both tests read the real source — `ui/Formula.js`, and the three timing

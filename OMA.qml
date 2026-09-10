@@ -409,6 +409,9 @@ Item {
     }
     function onIndexingFinished(ok, rejected) { root.reportIndexing(ok, rejected) }
     function onEnginePutAway() { root.flash("Retrieval models released") }
+    // The guard speaks rarely and only about something that just happened to
+    // the machine, so it goes on screen the way a failure does.
+    function onMemoryPressure(text, severe) { root.flash(text, severe) }
     function onAnswerFinished(ok) {
       if (ok && root.history)
         root.history.add(root.query, root.backend.answerText, root.backend.answerSources)
