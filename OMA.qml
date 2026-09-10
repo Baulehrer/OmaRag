@@ -405,6 +405,10 @@ Item {
     answerModel: root.setting("answerModel", "")
     onSearchFinished: function(rows) { root.hits = rows }
     onRefused: function(reason) { root.flash(reason) }
+    onOpenFailed: function(what) {
+      root.flash("Could not open " + (what.length ? what : "the document")
+                 + " — has it been moved?", true)
+    }
     onIndexingFinished: function(ok, rejected) { root.reportIndexing(ok, rejected) }
     onAnswerFinished: function(ok) {
       if (ok) history.add(root.query, backend.answerText, backend.answerSources)

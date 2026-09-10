@@ -678,7 +678,13 @@ Item {
     var first = String(pages || "").split(/[\u2013-]/)[0]
     var page = parseInt(first, 10)
 
+    // Check the file before handing it to a viewer. A document that has been
+    // moved or replaced is ordinary — the library is a folder the user tends —
+    // and without this the viewer opens on nothing and OMA says nothing.
+    // Exit 66 is the one code this script produces itself.
+    root.openWanted = path.split("/").pop()
     openProc.command = ["sh", "-c",
+      '[ -f "$1" ] || exit 66; ' +
       'p="$2"; ' +
       'if [ -n "$p" ]; then ' +
         'command -v zathura >/dev/null 2>&1 && exec setsid --fork zathura -P "$p" "$1"; ' +
@@ -690,7 +696,17 @@ Item {
     openProc.running = true
   }
 
-  Process { id: openProc }
+  // The name of the document a click asked for, so a failure can say which.
+  property string openWanted: ""
+  signal openFailed(string what)
+
+  Process {
+    id: openProc
+    onExited: function(code) {
+      if (code === 66) root.openFailed(root.openWanted)
+      else if (code !== 0) root.openFailed(root.openWanted)
+    }
+  }
 
   // ---------------------------------------------------------------- files
 
