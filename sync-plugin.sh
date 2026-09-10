@@ -17,11 +17,12 @@ dst="$HOME/.config/omarchy/plugins/kaufmann.omarag"
 # Stage OUTSIDE the plugins directory. Staging next to the target made the
 # shell briefly discover and load a phantom plugin from the temp folder.
 stage="$(mktemp -d "${TMPDIR:-/tmp}/omarag-stage.XXXXXX")"
-mkdir -p "$stage/backend" "$stage/ui" "$stage/common"
+mkdir -p "$stage/backend" "$stage/ui" "$stage/common" "$stage/service"
 cp "$src/manifest.json" "$src/OMA.qml" "$src/BarWidget.qml" "$stage/"
 cp "$src/backend/"*.qml "$stage/backend/"
 cp "$src/ui/"*.qml "$src/ui/"*.js "$stage/ui/"
 cp "$src/common/"*.qml "$src/common/qmldir" "$stage/common/"
+cp "$src/service/"*.qml "$stage/service/"
 
 omarchy-plugin-validate "$stage" || { rm -rf "$stage"; exit 1; }
 rm -rf "$dst"

@@ -353,7 +353,6 @@ Item {
     root._handshakeThen(function(err) {
       // Recorded but not answering: the files are stale, so start our own.
       if (err === "unreachable") { root._startDaemon(); return }
-      // Listening but silent means occupied, not broken.
       if (err === "timeout") { root._enterBusy(); return }
       if (err) { root._fail(root._humanise(err), "initialize: " + err); return }
       root.phase = "ready"

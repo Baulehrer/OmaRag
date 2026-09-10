@@ -7,12 +7,14 @@
   "license": "MIT",
   "description": "Local knowledge. Ask your own documents and see where every answer comes from.",
   "kinds": [
+    "service",
     "overlay",
     "bar-widget"
   ],
   "entryPoints": {
     "overlay": "OMA.qml",
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "service": "service/OmaService.qml"
   },
   "settings": {
     "defaults": {

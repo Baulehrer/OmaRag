@@ -11,6 +11,14 @@ BarWidget {
   id: root
   moduleName: "kaufmann.omarag"
 
+  // The service holds the backend, so the icon can show what is going on even
+  // when the window is closed — which is the whole point of it surviving.
+  readonly property var service: {
+    var s = root.bar ? root.bar.shell : null
+    return s && typeof s.serviceFor === "function" ? s.serviceFor(root.moduleName) : null
+  }
+  readonly property var backend: root.service ? root.service.backend : null
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 

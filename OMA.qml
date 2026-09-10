@@ -22,67 +22,17 @@ Item {
 
   // Settings live inline in the plugin's shell.json entry, the same place the
   // other overlays keep theirs.
+  // Read through the service, which owns the one copy of shell.json.
   function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
-    return value === undefined || value === null ? fallback : value
+    return root.service ? root.service.setting(name, fallback) : fallback
   }
 
-  // The type scale is read once here and pushed into the singleton the rest of
-  // OMA reads; nothing else touches it.
-  Binding { target: OmaFont; property: "scale"; value: Number(root.setting("omaFontScale", 1.0)) || 1.0 }
-  Binding { target: OmaFont; property: "family"; value: String(root.setting("omaFontFamily", "")) }
-
-  // The shell injects `settings` into bar widgets (Bar.qml:611) but into
-  // nothing else — an overlay's loader hands it omarchyPath, shell, manifest
-  // and the two registries, and stops there (shell.qml:1341). Writing works
-  // (`updateEntryInline`), reading does not, so OMA reads its own entry out of
-  // shell.json, which the README names as the one place settings live:
-  // "Settings are inline on the entry. No config: sub-object, no separate
-  // per-plugin settings file, no merge layers."
-  property var configEntry: ({})
-
-  function entrySettings() {
-    var id = String((manifest && manifest.id) || "kaufmann.omarag")
-    // If a future shell does expose the config to overlays, prefer it.
-    var config = shell ? shell.shellConfig : null
-    var plugins = config ? config.plugins : null
-    if (Array.isArray(plugins))
-      for (var i = 0; i < plugins.length; i++)
-        if (String((plugins[i] && plugins[i].id) || "") === id) return plugins[i]
-    return root.configEntry || ({})
-  }
-
-  FileView {
-    id: shellConfigFile
-    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
-    watchChanges: true
-    onFileChanged: reload()
-    onLoaded: {
-      var id = String((root.manifest && root.manifest.id) || "kaufmann.omarag")
-      var found = ({})
-      try {
-        var doc = JSON.parse(text())
-        var list = Array.isArray(doc.plugins) ? doc.plugins : []
-        for (var i = 0; i < list.length; i++)
-          if (String((list[i] && list[i].id) || "") === id) { found = list[i]; break }
-      } catch (e) { /* a config we cannot read leaves every setting at default */ }
-      root.configEntry = found
-      root.syncSettings()
-    }
-    onLoadFailed: { root.configEntry = ({}); root.syncSettings() }
-  }
-
-  function syncSettings() { root.settings = entrySettings() || ({}) }
 
   // The scoped shell facade lets a plugin write its own inline settings back to
   // shell.json — the same entry `setting()` reads from.
   function writeOwnSetting(key, value) {
-    var s = root.shell
-    if (!s || typeof s.updateEntryInline !== "function") { root.flash("Could not save the setting"); return }
-    var patch = {}
-    patch[key] = value
-    s.updateEntryInline((root.manifest && root.manifest.id) || "kaufmann.omarag", patch)
-    root.flash(key + " saved")
+    if (root.service && root.service.writeSetting(key, value)) root.flash(key + " saved")
+    else root.flash("Could not save the setting", true)
   }
 
   // Loaded when the section is first opened rather than on startup: nobody
@@ -90,22 +40,12 @@ Item {
   onTabChanged: {
     if (root.tab === "setup") {
       if (!toolchain.version.length) toolchain.readVersion()
-      if (backend.phase === "ready" && !backend.settings.length) backend.loadSettings()
+      if (root.backend.phase === "ready" && !root.backend.settings.length) root.backend.loadSettings()
       // Reads what is already on disk; no network, so it comes with the tab
       // rather than waiting for a button.
-      if (backend.phase === "ready" && !backend.installedModels.length) backend.loadModels()
+      if (root.backend.phase === "ready" && !root.backend.installedModels.length) root.backend.loadModels()
     }
     Qt.callLater(function() { root.placeFocus() })
-  }
-
-  onManifestChanged: syncSettings()
-  onShellChanged: syncSettings()
-  Component.onCompleted: syncSettings()
-
-  Connections {
-    target: root.shell
-    ignoreUnknownSignals: true
-    function onShellConfigChanged() { root.syncSettings() }
   }
 
   // ------------------------------------------------------------- appearance
@@ -140,7 +80,7 @@ Item {
 
   property int selected: -1
   readonly property int rowCount: root.tab !== "chat" ? 0
-                               : (root.showingAnswer ? backend.answerSources.length : root.hits.length)
+                               : (root.showingAnswer ? root.backend.answerSources.length : root.hits.length)
 
   function moveSelection(delta) {
     if (!root.rowCount) return
@@ -153,8 +93,8 @@ Item {
   function activateSelected() {
     if (root.selected < 0 || root.selected >= root.rowCount) return false
     if (root.showingAnswer) {
-      var src = backend.answerSources[root.selected]
-      if (src) backend.openDocument(src.url, src.pages)
+      var src = root.backend.answerSources[root.selected]
+      if (src) root.backend.openDocument(src.url, src.pages)
     } else {
       chatTab.expandSelected()
     }
@@ -163,14 +103,14 @@ Item {
 
   // The wordmark breathes while work is happening — and only then. Movement
   // that is always on stops meaning anything.
-  readonly property bool working: backend.phase === "starting" || backend.phase === "searching"
-                               || backend.phase === "answering" || backend.phase === "indexing"
-                               || backend.phase === "busy"
+  readonly property bool working: root.backend.phase === "starting" || root.backend.phase === "searching"
+                               || root.backend.phase === "answering" || root.backend.phase === "indexing"
+                               || root.backend.phase === "busy"
 
-  readonly property bool blocked: backend.phase === "busy"
-  readonly property bool indexing: backend.phase === "indexing"
-  readonly property bool answering: backend.phase === "answering"
-  readonly property bool waiting: backend.phase === "searching" || backend.phase === "starting"
+  readonly property bool blocked: root.backend.phase === "busy"
+  readonly property bool indexing: root.backend.phase === "indexing"
+  readonly property bool answering: root.backend.phase === "answering"
+  readonly property bool waiting: root.backend.phase === "searching" || root.backend.phase === "starting"
 
   // Elapsed seconds while we wait. The one honest thing to show when the
   // remaining time is unknowable — a cold embedder takes past a minute, and a
@@ -186,20 +126,20 @@ Item {
   onAnsweringChanged: root.waited = 0
   onIndexingChanged: root.waited = 0
 
-  readonly property bool showingAnswer: root.answering || backend.answerText.length > 0
+  readonly property bool showingAnswer: root.answering || root.backend.answerText.length > 0
 
   readonly property string panelMode: {
-    if (backend.phase === "error") return "error"
+    if (root.backend.phase === "error") return "error"
     if (root.indexing) return "indexing"
     if (root.blocked) return "blocked"
     if (root.showingAnswer && !root.indexing) return "none"
     if (root.waiting && !root.hits.length) return "waiting"
-    if (backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
+    if (root.backend.phase === "ready" && root.query.length && !root.hits.length) return "empty"
     return "none"
   }
 
   readonly property string phaseGlyph: {
-    switch (backend.phase) {
+    switch (root.backend.phase) {
       case "ready": return "●"
       case "error": return "!"
       case "starting":
@@ -210,13 +150,13 @@ Item {
       default: return "○"
     }
   }
-  readonly property color phaseColor: backend.phase === "error" ? root.urgent
-                                    : backend.phase === "ready" ? root.accent
+  readonly property color phaseColor: root.backend.phase === "error" ? root.urgent
+                                    : root.backend.phase === "ready" ? root.accent
                                     : root.muted
   readonly property string phaseLabel: {
-    switch (backend.phase) {
+    switch (root.backend.phase) {
       case "ready": return "Ready"
-      case "starting": return backend.message || "Starting"
+      case "starting": return root.backend.message || "Starting"
       case "searching": return "Searching"
       case "answering": return "Answering"
       case "indexing": return "Indexing"
@@ -257,7 +197,7 @@ Item {
     root.opened = true
     root.hits = []
     root.query = ""
-    backend.rawAnswer = ""
+    if (root.backend) root.backend.rawAnswer = ""
     root.detailsOpen = false
     root.notice = ""
     root.pending = ""
@@ -280,27 +220,27 @@ Item {
     chatTab.setInputText(wanted)
     root.pending = wanted
 
-    if (backend.phase === "idle" || backend.phase === "error") backend.connect()
+    root.connectIfWanted()
     // Only Chat wants the caret. Setup and Library are read-and-click screens,
     // and handing the hidden input the focus there swallows Page/Home/End.
     Qt.callLater(function() { root.placeFocus() })
-    if (wanted && backend.phase === "ready") root.runPending()
+    if (wanted && root.backend.phase === "ready") root.runPending()
 
     if (toAdd.length) {
       root.tab = "library"
       root.pendingAdd = toAdd
-      if (backend.phase === "ready") root.runPendingAdd()
+      if (root.backend.phase === "ready") root.runPendingAdd()
     }
   }
 
   function close() {
     root.opened = false
-    backend.releaseEngine()
+    root.backend.releaseEngine()
   }
 
   function dismiss() {
     root.opened = false
-    backend.releaseEngine()
+    root.backend.releaseEngine()
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "kaufmann.omarag")
   }
@@ -316,7 +256,7 @@ Item {
     if (!root.pendingAdd.length) return
     var paths = root.pendingAdd
     root.pendingAdd = []
-    backend.addPaths(paths)
+    root.backend.addPaths(paths)
   }
 
   function runPending() {
@@ -335,7 +275,8 @@ Item {
   // Recall shows the stored answer as it was — no new call to the backend, and
   // no pretence that it was answered again just now.
   function recall(index) {
-    var e = history.entries[index]
+    if (!root.history) return
+    var e = root.history.entries[index]
     if (!e) return
     root.historyIndex = index
     root.tab = "chat"
@@ -343,29 +284,29 @@ Item {
     root.hits = []
     root.selected = -1
     chatTab.setInputText(e.question)
-    backend.showStored(e.answer, e.sources)
+    root.backend.showStored(e.answer, e.sources)
   }
 
   function runQuery() {
     var q = chatTab.inputText().trim()
     if (!q) return
-    if (root.blocked) { root.flash(backend.message); return }
+    if (root.blocked) { root.flash(root.backend.message); return }
     root.query = q
     root.hits = []
     root.selected = -1
     root.historyIndex = -1
-    backend.ask(q)
+    root.backend.ask(q)
   }
 
   function runSearchOnly() {
     var q = chatTab.inputText().trim()
     if (!q) return
-    if (root.blocked) { root.flash(backend.message); return }
+    if (root.blocked) { root.flash(root.backend.message); return }
     root.query = q
     root.hits = []
     root.selected = -1
-    backend.rawAnswer = ""
-    backend.search(q, 5)
+    if (root.backend) root.backend.rawAnswer = ""
+    root.backend.search(q, 5)
   }
 
   // The overlay holds the keyboard exclusively, but a file chooser still gets
@@ -390,42 +331,49 @@ Item {
     stdout: StdioCollector {
       onStreamFinished: {
         var paths = String(text).split("\n").filter(function(p) { return p.trim().length > 0 })
-        if (paths.length) backend.addPaths(paths)
+        if (paths.length) root.backend.addPaths(paths)
       }
     }
     onRunningChanged: if (!running) Qt.callLater(function() { chatTab.focusInput() })
   }
 
-  History { id: history }
-  Toolchain { id: toolchain }
+  // The machinery lives in the service so a running answer survives closing.
+  // These aliases keep the rest of the view reading the way it always did.
+  property var service: null
+  readonly property var backend: root.service ? root.service.backend : null
 
-  Lilbee {
-    id: backend
-    persistDaemon: root.setting("backendWhenClosed", "Stop with OMA") === "Keep running"
-    answerModel: root.setting("answerModel", "")
-    onSearchFinished: function(rows) { root.hits = rows }
-    onRefused: function(reason) { root.flash(reason) }
-    onOpenFailed: function(what) {
+  // The loader assigns `service` after it assigns the rest, and the payload
+  // arrives later still — so opening cannot be the only thing that connects.
+  onServiceChanged: root.connectIfWanted()
+  function connectIfWanted() {
+    if (!root.opened || !root.backend) return
+    if (root.backend.phase === "idle" || root.backend.phase === "error") root.backend.connect()
+  }
+  readonly property var history: root.service ? root.service.history : null
+  readonly property var toolchain: root.service ? root.service.toolchain : null
+
+  Connections {
+    target: root.backend
+    function onSearchFinished(rows) { root.hits = rows }
+    function onRefused(reason) { root.flash(reason) }
+    function onOpenFailed(what) {
       root.flash("Could not open " + (what.length ? what : "the document")
                  + " — has it been moved?", true)
     }
-    onIndexingFinished: function(ok, rejected) { root.reportIndexing(ok, rejected) }
-    onEnginePutAway: root.flash("Retrieval models released")
-    onAnswerFinished: function(ok) {
-      if (ok) history.add(root.query, backend.answerText, backend.answerSources)
+    function onIndexingFinished(ok, rejected) { root.reportIndexing(ok, rejected) }
+    function onEnginePutAway() { root.flash("Retrieval models released") }
+    function onAnswerFinished(ok) {
+      if (ok && root.history)
+        root.history.add(root.query, root.backend.answerText, root.backend.answerSources)
     }
-  }
-
-  Connections {
-    target: backend
     function onPhaseChanged() {
-      if (backend.phase !== "ready") return
+      if (root.backend.phase !== "ready") return
       root.runPending()
       root.runPendingAdd()
       // Setup may have been opened before the backend was up; nothing retried
       // the load, so the sections stayed empty.
-      if (root.tab === "setup" && !backend.settings.length) backend.loadSettings()
-      if (root.tab === "setup" && !backend.installedModels.length) backend.loadModels()
+      if (root.tab === "setup" && !root.backend.settings.length) root.backend.loadSettings()
+      if (root.tab === "setup" && !root.backend.installedModels.length) root.backend.loadModels()
     }
   }
 
@@ -532,11 +480,11 @@ Item {
           if (event.key === Qt.Key_Escape) {
             // Work outwards: stop what is running, fold details, clear the
             // query, then close.
-            if (root.answering) backend.cancelAsk()
+            if (root.answering) root.backend.cancelAsk()
             else if (root.detailsOpen) root.detailsOpen = false
             else if (root.selected >= 0) root.selected = -1
-            else if (chatTab.inputText().length || backend.answerText.length) {
-              chatTab.setInputText(""); root.hits = []; root.query = ""; backend.rawAnswer = ""
+            else if (chatTab.inputText().length || root.backend.answerText.length) {
+              chatTab.setInputText(""); root.hits = []; root.query = ""; root.backend.rawAnswer = ""
             }
             else root.dismiss()
             event.accepted = true
@@ -637,7 +585,7 @@ Item {
             id: setupTab
             anchors.fill: parent
             visible: root.tab === "setup"
-            backend: backend
+            backend: root.backend
             lilbeeVersion: toolchain.version
             updateNote: toolchain.note
             checkingUpdate: toolchain.checking
@@ -650,8 +598,8 @@ Item {
             accent: root.accent
             urgent: root.urgent
             onCheckUpdate: toolchain.checkLatest()
-            onReleaseEngine: { backend.stopEngineNow(); root.flash("Models released") }
-            onOpenLog: backend.openDocument("file://" + Quickshell.env("HOME")
+            onReleaseEngine: { root.backend.stopEngineNow(); root.flash("Models released") }
+            onOpenLog: root.backend.openDocument("file://" + Quickshell.env("HOME")
                                             + "/.local/share/lilbee/logs/server.log", "")
             onOmaSettingChanged: function(key, value) { root.writeOwnSetting(key, value) }
           }
@@ -660,7 +608,7 @@ Item {
             id: chatTab
             anchors.fill: parent
             visible: root.tab === "chat"
-            backend: backend
+            backend: root.backend
             hits: root.hits
             query: root.query
             selected: root.selected
@@ -672,24 +620,24 @@ Item {
             urgent: root.urgent
             onAsk: root.runQuery()
             onSearchOnly: root.runSearchOnly()
-            onOpenSource: function(url, pages) { backend.openDocument(url, pages) }
-            onRetry: backend.retry()
+            onOpenSource: function(url, pages) { root.backend.openDocument(url, pages) }
+            onRetry: root.backend.retry()
             onDetailsToggled: root.detailsOpen = !root.detailsOpen
             onPickFiles: root.pickFiles()
             onPickFolder: root.pickFolder()
             onSelectedChanged: root.selected = Math.max(-1, Math.min(selected, root.rowCount - 1))
             onActivateRow: root.activateSelected()
-            history: history.entries
+            history: root.history ? root.history.entries : []
             historyIndex: root.historyIndex
             onHistoryPicked: function(i) { root.recall(i) }
-            onHistoryRemoved: function(i) { history.removeAt(i) }
+            onHistoryRemoved: function(i) { if (root.history) root.history.removeAt(i) }
             onCopied: function(n) { root.flash(n + " characters copied") }
           }
 
           LibraryTab {
             anchors.fill: parent
             visible: root.tab === "library"
-            backend: backend
+            backend: root.backend
             waited: root.waited
             foreground: root.foreground
             muted: root.muted
@@ -698,7 +646,7 @@ Item {
             detailsOpen: root.detailsOpen
             onPickFiles: root.pickFiles()
             onPickFolder: root.pickFolder()
-            onRetry: backend.retry()
+            onRetry: root.backend.retry()
             onDetailsToggled: root.detailsOpen = !root.detailsOpen
           }
         }

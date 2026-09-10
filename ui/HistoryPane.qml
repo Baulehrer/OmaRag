@@ -7,6 +7,8 @@ import "../common"
 Item {
   id: root
 
+  // Never undefined: the service that owns the history may arrive a moment
+  // after the view does.
   property var entries: []
   property int current: -1
 
@@ -29,7 +31,7 @@ Item {
   Text {
     anchors { top: heading.bottom; left: parent.left; right: parent.right }
     anchors.topMargin: Style.spacing.md
-    visible: !root.entries.length
+    visible: !(root.entries && root.entries.length)
     text: "Questions you ask show up here."
     color: root.muted
     font.family: OmaFont.face
