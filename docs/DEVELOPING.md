@@ -223,30 +223,11 @@ you press, none of them on a timer or on opening a view.
 ./sync-plugin.sh        # copy + validate
 omarchy restart shell   # required: overlay QML is cached, saving is not enough
 journalctl --user -f | grep -i omarag
-
-node tools/tests/formula-escaping.js   # no model output can become markup
-node tools/tests/answer-timing.js      # the estimate behind the progress bar
-bash tools/tests/admission.sh          # the gate in front of every model load
-bash tools/tests/memory-guard.sh       # when the models are given back
 ```
-
-Both tests read the real source — `ui/Formula.js`, and the three timing
-functions lifted out of `backend/Lilbee.qml` — so they fail if the code they
-cover is renamed rather than passing against a stale copy.
 
 A plugin runs **inside** the shell process. A blocking call freezes the whole
 desktop — bar, notifications, lock screen. Everything here is asynchronous, and
 should stay that way.
-
-## Documents
-
-| | |
-|---|---|
-| [`../notes/REALITY.md`](../notes/REALITY.md) | What the host and lilbee actually do, measured rather than assumed |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The decisions and what was rejected |
-| [`../notes/DESIGN.md`](../notes/DESIGN.md) | The interface, state by state |
-| [`MILESTONE-REPORT.md`](MILESTONE-REPORT.md) | Where the project stands |
-| [`PROMPT.md`](PROMPT.md) | The brief |
 
 ## License
 

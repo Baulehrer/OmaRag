@@ -1,15 +1,8 @@
-# The evaluation set and the working notes stay on this machine: the plugin is
-# what belongs in the repository. Both are still here, just not published.
+# Tests and the evaluation set stay on this machine: the repository is the
+# plugin. They are still here, just not published.
 eval/
-notes/
+tools/tests/
 NEXT.md
-
-# One-off tools for repairing a scanned library, not part of the plugin.
-tools/pdf-triage.py
-tools/repair-scans.py
-tools/restore-originals.sh
-tools/verify-redo-ocr.py
-tools/memory-profile.py
 
 *.pyc
 __pycache__/
